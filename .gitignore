@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Data
+stock_data/
+portfolio_data/
+backtest_results/
+monitor_data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Cache
+*.cache
+
+# Large files
+*.csv
+*.txt
+!requirements.txt
+!web_requirements.txt

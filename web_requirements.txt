@@ -1,0 +1,22 @@
+# Web应用依赖
+# Web Application Dependencies
+
+# Web框架
+streamlit>=1.28.0
+
+# 缓存
+redis>=5.0.0
+
+# 数据库
+psycopg2-binary>=2.9.9
+SQLAlchemy>=2.0.0
+
+# 机器学习
+scikit-learn>=1.3.0
+
+# 优化
+scipy>=1.11.0
+
+# 其他
+altair>=5.0.0  # Streamlit图表支持
+plotly>=5.17.0  # 交互式图表
