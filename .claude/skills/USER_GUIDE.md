@@ -546,6 +546,11 @@ for stock in recommended[:5]:
 
 ## 九、更新日志
 
+### v1.2 (2026-02-10)
+- ✅ 新增 `long_term_selector.py` 中长期选股策略
+- ✅ 新增 `realtime_quote.py` 实时股价查询
+- ✅ 支持CSV文件输入股票列表
+
 ### v1.1 (2026-02-04)
 - ✅ 新增 `quant_workflow.py` 统一工作流
 - ✅ 新增 `signal_generator.py` 信号生成器
@@ -558,11 +563,156 @@ for stock in recommended[:5]:
 
 ---
 
-## 十、联系与支持
+## 十、高级功能
+
+### 10.1 中长期选股策略 (long_term_selector.py)
+
+基于多周期趋势分析的中长期选股工具，适合持有3-12个月的投资。
+
+**命令行使用:**
+
+```bash
+# 分析指定股票列表文件
+python .claude/skills/long_term_selector.py --file 候选股票.csv --top 20
+
+# 分析持仓股票
+python .claude/skills/long_term_selector.py --file 持仓.csv --top 10
+
+# 使用默认股票池
+python .claude/skills/long_term_selector.py --top 30 --limit 200
+```
+
+**参数说明:**
+
+| 参数 | 简写 | 说明 | 默认值 |
+|------|------|------|--------|
+| --file | -f | 股票列表CSV文件 | 无 |
+| --pool | | 股票池文件路径 | stock_list.csv |
+| --top | | 显示Top N只股票 | 30 |
+| --limit | | 分析股票数量限制 | 200 |
+
+**CSV文件格式:**
+
+```csv
+股票代码,股票名称
+002078,太阳纸业
+002236,大华股份
+600056,中国医药
+```
+
+或简化的:
+
+```csv
+code,name
+002078,太阳纸业
+002236,大华股份
+```
+
+**Python调用:**
+
+```python
+import sys
+sys.path.append('.claude/skills')
+from long_term_selector import LongTermSelector, load_stock_list_from_file
+
+# 方式1: 从CSV文件加载
+stock_pool = load_stock_list_from_file('候选股票.csv')
+selector = LongTermSelector()
+results = selector.select_stocks(stock_pool, top_k=20)
+
+# 方式2: 直接定义股票池
+stock_pool = {
+    '002078': '太阳纸业',
+    '002236': '大华股份',
+    '600056': '中国医药'
+}
+results = selector.select_stocks(stock_pool, top_k=10)
+
+# 查看结果
+for r in results:
+    print(f'{r.name}({r.code}): 得分{r.total_score:.1f} 3月涨幅{r.return_3m:+.2f}%')
+```
+
+**输出字段说明:**
+
+| 字段 | 说明 |
+|------|------|
+| 1月% | 1个月收益率 |
+| 3月% | 3个月收益率 |
+| 6月% | 6个月收益率 |
+| 1年% | 1年收益率 |
+| 短/中/长 | 短期/中期/长期趋势 (^=UP, v=DOWN, -=SIDE) |
+| 得分 | 综合评分 (0-100) |
+| 建议 | STRONG_BUY/BUY/HOLD/AVOID |
+
+---
+
+### 10.2 实时股价查询 (realtime_quote.py)
+
+使用腾讯财经API获取实时股价，稳定快速。
+
+**命令行使用:**
+
+```bash
+# 查询持仓股票实时行情
+python -c "
+import sys; sys.path.append('.claude/skills')
+from realtime_quote import monitor_portfolio
+result = monitor_portfolio('持仓.csv')
+print(f'总资产: {result[\"total_assets\"]:,.0f} 盈亏: {result[\"total_profit\"]:+,.0f}')
+"
+```
+
+**Python调用:**
+
+```python
+import sys
+sys.path.append('.claude/skills')
+from realtime_quote import RealTimeQuoteAPI, get_quote, get_quotes, monitor_portfolio
+
+# 方式1: 查询单只股票
+quote = get_quote('002236')
+print(f'{quote.name}: {quote.price:.2f} ({quote.change_pct:+.2f}%)')
+
+# 方式2: 批量查询
+quotes = get_quotes(['002078', '002236', '600056'])
+for code, q in quotes.items():
+    print(f'{q.name}: {q.price:.2f}')
+
+# 方式3: 持仓监控
+result = monitor_portfolio('持仓.csv')
+print(f'总资产: {result["total_assets"]:,.0f}')
+print(f'总盈亏: {result["total_profit"]:+,.0f}')
+
+# 方式4: 使用API类
+api = RealTimeQuoteAPI()
+quotes = api.get_quotes(['002236', '600519'])
+print(api.format_quote_table(quotes))
+```
+
+**返回字段 (RealTimeQuote):**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| code | str | 股票代码 |
+| name | str | 股票名称 |
+| price | float | 当前价 |
+| pre_close | float | 昨收价 |
+| change | float | 涨跌额 |
+| change_pct | float | 涨跌幅% |
+| open | float | 开盘价 |
+| high | float | 最高价 |
+| low | float | 最低价 |
+| volume | float | 成交量(手) |
+| amount | float | 成交额(元) |
+
+---
+
+## 十一、联系与支持
 
 - **GitHub:** [项目地址]
 - **文档:** `.claude/skills/`
 - **问题反馈:** 请提交Issue
 
 ---
-*最后更新：2026-02-04*
+*最后更新：2026-02-10*
