@@ -280,27 +280,82 @@ class StockDataFetcher:
 
     def get_realtime_quote(self, symbol):
         """
-        获取实时行情 - 使用腾讯接口
+        获取实时行情 - 使用腾讯API
 
         Args:
             symbol: 股票代码
 
         Returns:
-            实时行情数据
+            实时行情数据字典
         """
+        import requests
+
         print(f"[INFO] 获取 {symbol} 实时行情...")
 
-        # 获取最近一天的数据作为实时行情
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=5)
-
-        df = self.get_quote_data(symbol, start_date, end_date, days=5)
-
-        if not df.empty and len(df) > 0:
-            # 返回最新一天的数据
-            return df.iloc[-1:].to_dict('records')[0]
+        # 格式化股票代码
+        if symbol.startswith('6'):
+            symbol_prefix = f'sh{symbol}'
         else:
-            return {}
+            symbol_prefix = f'sz{symbol}'
+
+        url = f'http://qt.gtimg.cn/q={symbol_prefix}'
+
+        try:
+            response = requests.get(url, timeout=10)
+            response.encoding = 'gbk'
+
+            if response.status_code == 200 and '~' in response.text:
+                data = response.text.strip()
+                # 解析腾讯返回的实时数据
+                if '~' in data:
+                    parts = data.split('~')
+                    if len(parts) > 40:
+                        result = {
+                            '代码': symbol,
+                            '名称': parts[1],
+                            '当前价': float(parts[3]) if parts[3] else 0,
+                            '昨收': float(parts[4]) if parts[4] else 0,
+                            '开盘': float(parts[5]) if parts[5] else 0,
+                            '最高': float(parts[33]) if parts[33] else 0,
+                            '最低': float(parts[34]) if parts[34] else 0,
+                            '成交量': int(parts[36]) if parts[36] else 0,
+                            '成交额': float(parts[37]) if parts[37] else 0,
+                            '日期': parts[30],
+                            '时间': parts[31],
+                            '涨跌': float(parts[3]) - float(parts[4]) if parts[3] and parts[4] else 0,
+                            '涨跌幅': ((float(parts[3]) / float(parts[4]) - 1) * 100) if parts[3] and parts[4] else 0
+                        }
+                        print(f"[OK] {symbol} 实时价: {result['当前价']:.2f}")
+                        return result
+
+        except Exception as e:
+            print(f"[WARN] 获取实时行情失败: {str(e)[:50]}")
+
+        return {}
+
+    def get_realtime_quotes_batch(self, symbols, delay=0.15):
+        """
+        批量获取多只股票的实时行情
+
+        Args:
+            symbols: 股票代码列表
+            delay: 请求间隔（秒）
+
+        Returns:
+            所有股票实时行情的字典
+        """
+        print(f"[INFO] 批量获取 {len(symbols)} 只股票的实时行情...")
+
+        all_data = {}
+        for symbol in symbols:
+            data = self.get_realtime_quote(symbol)
+            if data:
+                all_data[symbol] = data
+
+            if symbol != symbols[-1]:  # 不是最后一个
+                time.sleep(delay)
+
+        return all_data
 
     def batch_get_quotes(self, symbols, start_date=None, end_date=None, delay=0.5):
         """

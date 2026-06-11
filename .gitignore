@@ -45,3 +45,62 @@ htmlcov/
 *.txt
 !requirements.txt
 !web_requirements.txt
+
+# Test scripts
+test_*.py
+tests/
+
+# Temporary analysis scripts
+analyze_*.py
+*_analysis.py
+*_analysis_v*.py
+*_demo.py
+*_real.py
+*_report.py
+*_monitor.py
+akshare_diagnostic.py
+backtest_*.py
+batch_*.py
+calc_*.py
+compare_*.py
+data_fetcher_*.py
+day_trading_*.py
+detailed_*.py
+draw_*.py
+generate_*.py
+get_*.py
+hot_*.py
+market_review_*.md
+quant_*.py
+report_*.md
+run_tests.py
+skills_usage_example.py
+stock_*.py
+strategy_report*.py
+strategy_report*.pdf
+support_resistance*.py
+update_*.py
+持仓*.py
+持仓*.html
+stock_selection_history.json
+
+# Chart output directories
+charts/
+holdings_charts/
+
+# Strategy reports
+*.pdf
+*.md
+!README.md
+!CLAUDE.md
+
+# Optimization packages
+optimization_package/
+optimization_package.zip
+
+# Obsidian
+.obsidian/
+
+# Claude settings
+.claude/settings.json
+.claude/settings.local.json

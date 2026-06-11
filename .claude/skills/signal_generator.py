@@ -13,9 +13,19 @@ from datetime import datetime
 class SignalGenerator:
     """信号生成器类"""
 
-    def __init__(self):
-        """初始化"""
-        pass
+    def __init__(self, buy_threshold=2.0, sell_threshold=2.0):
+        """
+        初始化
+
+        Parameters:
+        -----------
+        buy_threshold : float
+            买入信号阈值，信号得分>=此值触发买入 (默认2.0)
+        sell_threshold : float
+            卖出信号阈值，信号得分>=此值触发卖出 (默认2.0)
+        """
+        self.buy_threshold = buy_threshold
+        self.sell_threshold = sell_threshold
 
     def generate_signals(self, data):
         """
@@ -261,7 +271,7 @@ class SignalGenerator:
                 buy_score += df[sig].apply(lambda x: max(0, x))
 
         # 买入阈值
-        buy_signal = (buy_score >= 2).astype(int)
+        buy_signal = (buy_score >= self.buy_threshold).astype(int)
 
         return buy_signal
 
@@ -284,7 +294,7 @@ class SignalGenerator:
                 sell_score += df[sig].apply(lambda x: max(0, -x))
 
         # 卖出阈值
-        sell_signal = (sell_score >= 2).astype(int)
+        sell_signal = (sell_score >= self.sell_threshold).astype(int)
 
         return sell_signal
 

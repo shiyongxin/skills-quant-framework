@@ -316,52 +316,75 @@ class TechnicalAnalyzer:
             'resistance': resistance_levels
         }
 
-    def _calculate_composite_score(self, data, latest):
-        """计算综合评分"""
+    def _calculate_composite_score(self, data, latest, scoring_params=None):
+        """
+        计算综合评分
+
+        Parameters:
+        -----------
+        data : DataFrame
+            历史数据
+        latest : Series
+            最新一行数据
+        scoring_params : dict or None
+            评分参数，None则使用默认值
+            - w_trend: 趋势权重 (默认30)
+            - w_momentum: 动量权重 (默认25)
+            - w_risk: 风险权重 (默认15)
+            - w_performance: 近期表现权重 (默认30)
+        """
+        if scoring_params is None:
+            scoring_params = {}
+
+        w_trend = scoring_params.get('w_trend', 30)
+        w_momentum = scoring_params.get('w_momentum', 25)
+        w_risk = scoring_params.get('w_risk', 15)
+        w_performance = scoring_params.get('w_performance', 30)
+
         score = 0
         close = data['收盘']
         current_price = latest['收盘']
 
-        # 1. 趋势 (30分)
+        # 1. 趋势
         trend = self._analyze_trend(data)
         if trend['direction'] == 'strong_up':
-            score += 30
+            score += w_trend
         elif trend['direction'] == 'up':
-            score += 25
+            score += w_trend * 0.83
         elif trend['direction'] == 'consolidation':
-            score += 15
+            score += w_trend * 0.5
         elif trend['direction'] == 'down':
-            score += 5
+            score += w_trend * 0.17
         else:
             score += 0
 
-        # 2. 动量 (25分)
+        # 2. 动量
         signals = self._analyze_signals(data)
         bullish_signals = ['MACD金叉', 'KDJ金叉', 'RSI超卖', '多头排列', '突破上轨']
-        signal_score = sum(10 for s in signals if any(b in s for b in bullish_signals))
-        score += min(signal_score, 25)
+        signal_count = sum(1 for s in signals if any(b in s for b in bullish_signals))
+        per_signal = w_momentum / 2.5  # 最多2.5个信号就能满分
+        score += min(signal_count * per_signal, w_momentum)
 
-        # 3. 风险调整 (15分)
+        # 3. 风险调整
         risk = self._assess_risk(data)
         if risk['level'] == '低风险':
-            score += 15
+            score += w_risk
         elif risk['level'] == '中风险':
-            score += 10
+            score += w_risk * 0.67
 
-        # 4. 近期表现 (30分)
-        change_5d = (current_price / data['收盘'].iloc[-6] - 1) * 100 if len(data) > 5 else 0
+        # 4. 近期表现
         change_20d = (current_price / data['收盘'].iloc[-21] - 1) * 100 if len(data) > 20 else 0
 
         if change_20d > 15:
-            score += 30
+            score += w_performance
         elif change_20d > 10:
-            score += 25
+            score += w_performance * 0.83
         elif change_20d > 5:
-            score += 20
+            score += w_performance * 0.67
         elif change_20d > 0:
-            score += 10
+            score += w_performance * 0.33
         elif change_20d > -5:
-            score += 5
+            score += w_performance * 0.17
 
         return min(score, 100)
 
