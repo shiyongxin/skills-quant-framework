@@ -87,16 +87,17 @@ class ParameterSpace:
     W_PERFORMANCE = ParamDef("w_performance", "float", 10, 40, 30, group="scoring")
 
     # ==================== 信号阈值 ====================
-    BUY_THRESHOLD = ParamDef("buy_threshold", "float", 1.0, 6.0, 2.0, group="signal")
-    SELL_THRESHOLD = ParamDef("sell_threshold", "float", 1.0, 6.0, 2.0, group="signal")
+    BUY_THRESHOLD = ParamDef("buy_threshold", "float", 1.0, 6.0, 3.0, group="signal")
+    SELL_THRESHOLD = ParamDef("sell_threshold", "float", 1.0, 6.0, 4.0, group="signal")
     SCORE_BUY_THRESHOLD = ParamDef("score_buy_threshold", "float", 40, 80, 60, group="signal")
     SCORE_SELL_THRESHOLD = ParamDef("score_sell_threshold", "float", 20, 50, 35, group="signal")
 
     # ==================== 仓位参数 ====================
-    STOP_LOSS_PCT = ParamDef("stop_loss_pct", "float", 0.03, 0.15, 0.08, group="position")
-    TAKE_PROFIT_PCT = ParamDef("take_profit_pct", "float", 0.10, 0.50, 0.20, group="position")
+    STOP_LOSS_PCT = ParamDef("stop_loss_pct", "float", 0.03, 0.15, 0.12, group="position")
+    TAKE_PROFIT_PCT = ParamDef("take_profit_pct", "float", 0.10, 0.50, 0.30, group="position")
     POSITION_SIZE_PCT = ParamDef("position_size_pct", "float", 0.3, 1.0, 0.8, group="position")
-    TRAILING_STOP_PCT = ParamDef("trailing_stop_pct", "float", 0.03, 0.10, 0.05, group="position")
+    TRAILING_STOP_PCT = ParamDef("trailing_stop_pct", "float", 0.03, 0.15, 0.10, group="position")
+    MIN_HOLDING_DAYS = ParamDef("min_holding_days", "int", 10, 90, 40, group="position")
 
     # ==================== 类方法 ====================
     @classmethod
@@ -190,6 +191,10 @@ class ParameterSpace:
         if params.get('ma_fast', 5) >= params.get('ma_slow', 20):
             violations.append(f"ma_fast({params.get('ma_fast')}) >= ma_slow({params.get('ma_slow')})")
 
+        # MA约束: mid < slow
+        if params.get('ma_mid', 10) >= params.get('ma_slow', 20):
+            violations.append(f"ma_mid({params.get('ma_mid')}) >= ma_slow({params.get('ma_slow')})")
+
         # MACD约束: fast < slow
         if params.get('macd_fast', 12) >= params.get('macd_slow', 26):
             violations.append(f"macd_fast({params.get('macd_fast')}) >= macd_slow({params.get('macd_slow')})")
@@ -215,9 +220,11 @@ class ParameterSpace:
         """
         p = params.copy()
 
-        # MA约束
+        # MA约束: fast < mid < slow
         if p.get('ma_fast', 5) >= p.get('ma_slow', 20):
             p['ma_fast'] = max(3, p['ma_slow'] - 5)
+        if p.get('ma_mid', 10) >= p.get('ma_slow', 20):
+            p['ma_mid'] = max(10, p['ma_slow'] - 3)
 
         # MACD约束
         if p.get('macd_fast', 12) >= p.get('macd_slow', 26):

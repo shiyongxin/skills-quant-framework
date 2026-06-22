@@ -144,27 +144,49 @@ class FitnessEvaluator:
         return self._compute_fitness(all_metrics)
 
     def _backtest_regime_windows(self, data, params, labels, target_regime):
-        """在体制时段内进行回测"""
+        """
+        在体制时段内进行回测
+
+        混合策略:
+        - 长窗口体制(BULL/BEAR/SIDEWAYS): 按连续窗口切割回测
+        - 短窗口体制(CRASH/RECOVERY): 全量回测后按交易入口过滤
+        """
         metrics_list = []
+
         # 找出连续的体制时段
         in_regime = labels == target_regime
+        regime_total_days = in_regime.sum()
+
+        # 找出最长连续天数
+        max_consec = 0
+        cur = 0
+        for v in in_regime:
+            if v:
+                cur += 1
+                max_consec = max(max_consec, cur)
+            else:
+                cur = 0
+
+        # 短窗口体制: 全量回测 + 交易入口过滤
+        if max_consec < 15 or regime_total_days < 60:
+            return self._backtest_by_trade_filter(data, params, labels, target_regime)
+
+        # 长窗口体制: 按连续窗口切割
         starts = []
         for i in range(len(in_regime)):
             if in_regime.iloc[i] and (i == 0 or not in_regime.iloc[i-1]):
                 starts.append(i)
 
         for start in starts:
-            # 找到该体制段的结束
             end = start
             while end < len(in_regime) and in_regime.iloc[end]:
                 end += 1
 
-            # 体制段至少60天才有效
-            if end - start < 60:
+            if end - start < 15:
                 continue
 
             window_data = data.iloc[start:end]
-            if len(window_data) < 60:
+            if len(window_data) < 15:
                 continue
 
             try:
@@ -175,6 +197,111 @@ class FitnessEvaluator:
                 continue
 
         return metrics_list
+
+    def _backtest_by_trade_filter(self, data, params, labels, target_regime):
+        """
+        全量回测 + 按交易入口体制过滤
+
+        适用于短窗口体制(CRASH/RECOVERY):
+        1. 对整只股票做回测，获取每笔交易的入场日期
+        2. 检查入场日的体制标签
+        3. 仅保留入场时处于目标体制的交易
+        4. 用过滤后的交易计算指标
+        """
+        try:
+            metrics, trade_details = self.backtester.backtest_with_details(data, params)
+        except Exception:
+            return []
+
+        if not trade_details:
+            return []
+
+        # 按入口过滤交易
+        filtered_trades = []
+        for td in trade_details:
+            if td.entry_idx < len(labels):
+                entry_regime = labels.iloc[td.entry_idx]
+                if entry_regime == target_regime:
+                    filtered_trades.append(td)
+
+        if not filtered_trades:
+            return []
+
+        # 从过滤后的交易计算指标
+        filtered_metrics = self._compute_metrics_from_trades(filtered_trades, data, params)
+        if filtered_metrics and filtered_metrics.num_trades > 0:
+            return [filtered_metrics]
+        return []
+
+    def _compute_metrics_from_trades(self, trades, data, params):
+        """从交易列表计算BacktestMetrics"""
+        import numpy as np
+
+        if not trades:
+            return None
+
+        pnl_arr = np.array([t.pnl_pct for t in trades], dtype=np.float64)
+        holding_arr = np.array([t.holding_days for t in trades], dtype=np.float64)
+        position_size_pct = float(params.get('position_size_pct', 0.8))
+
+        # 胜率
+        wins = pnl_arr[pnl_arr > 0]
+        losses = pnl_arr[pnl_arr <= 0]
+        win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
+
+        # 盈亏比
+        avg_win = np.mean(wins) if len(wins) > 0 else 0
+        avg_loss = abs(np.mean(losses)) if len(losses) > 0 else 1
+        profit_factor = avg_win / avg_loss if avg_loss > 0 else 0
+
+        # 总收益(复利)
+        cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
+        total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
+
+        # 年化收益
+        total_days = data.iloc[-1]['收盘']  # placeholder
+        total_days = len(data)
+        years = total_days / 252
+        if years > 0 and cumulative[-1] > 0:
+            annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
+        else:
+            annualized_return = 0
+
+        # 最大回撤
+        equity = np.concatenate([[1.0], cumulative])
+        peak = np.maximum.accumulate(equity)
+        drawdown = (equity - peak) / peak * 100
+        max_drawdown = abs(drawdown.min()) if len(drawdown) > 0 else 0
+
+        # 夏普比率
+        if len(pnl_arr) > 1:
+            daily_returns = pnl_arr / 100
+            avg_ret = np.mean(daily_returns) * 252 / np.mean(holding_arr) if np.mean(holding_arr) > 0 else 0
+            std_ret = np.std(daily_returns) * np.sqrt(252 / np.mean(holding_arr)) if np.mean(holding_arr) > 0 else 1
+            sharpe = (avg_ret - 0.03) / std_ret if std_ret > 0 else 0
+        else:
+            sharpe = 0
+
+        # 最大连续亏损
+        is_loss = pnl_arr <= 0
+        max_consec = 0
+        if np.any(is_loss):
+            loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
+            max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
+
+        from vectorized_backtest import BacktestMetrics
+        return BacktestMetrics(
+            total_return=float(total_return),
+            annualized_return=float(annualized_return),
+            max_drawdown=float(max_drawdown),
+            sharpe_ratio=float(sharpe),
+            win_rate=float(win_rate),
+            profit_factor=float(profit_factor),
+            num_trades=len(pnl_arr),
+            avg_holding_days=float(np.mean(holding_arr)),
+            avg_return_per_trade=float(np.mean(pnl_arr)),
+            max_consecutive_losses=max_consec
+        )
 
     def _compute_fitness(self, metrics_list: list) -> tuple:
         """
@@ -500,22 +627,28 @@ class OptimizationEngine:
         print(f"[OK] 成功加载 {loaded} 只股票")
 
     def _assign_regime_labels(self, symbol, data):
-        """为股票数据分配体制标签(基于指数日期对齐)"""
+        """为股票数据分配体制标签(基于指数日期对齐) - 向量化版本"""
         idx_labels = self._index_regime_labels
         if idx_labels is None:
             return
 
-        stock_dates = data['日期']
-        regime_map = dict(zip(idx_labels['日期'], idx_labels['regime']))
+        # 使用 pd.merge_asof 向量化查找最近的指数日期
+        stock_df = data[['日期']].copy()
+        idx_df = idx_labels[['日期', 'regime']].copy()
 
-        labels = pd.Series('SIDEWAYS', index=data.index)
-        for i, date in enumerate(stock_dates):
-            # 找最近的指数日期
-            closest = idx_labels[idx_labels['日期'] <= date]
-            if len(closest) > 0:
-                labels.iloc[i] = closest.iloc[-1]['regime']
+        # 统一datetime类型为datetime64[ns](避免us/ns不匹配)
+        stock_df['日期'] = pd.to_datetime(stock_df['日期']).astype('datetime64[ns]')
+        idx_df['日期'] = pd.to_datetime(idx_df['日期']).astype('datetime64[ns]')
 
-        self.regime_labels[symbol] = labels
+        idx_df = idx_df.sort_values('日期')
+        stock_df = stock_df.sort_values('日期')
+
+        merged = pd.merge_asof(
+            stock_df, idx_df,
+            on='日期',
+            direction='backward'
+        )
+        self.regime_labels[symbol] = merged['regime'].fillna('SIDEWAYS')
 
     def optimize_global(self, stock_sample=None, n_stocks=50,
                         ga_params=None, verbose=True) -> OptimizationResult:
@@ -637,8 +770,9 @@ class OptimizationEngine:
                 count = (labels == regime).sum()
                 regime_counts[regime] = regime_counts.get(regime, 0) + count
 
-        active_regimes = [r for r, c in regime_counts.items() if c >= 500]
+        active_regimes = [r for r, c in regime_counts.items() if c >= 200]
         print(f"  活跃体制: {active_regimes}")
+        print(f"  体制数据量: {regime_counts}")
         print(f"  样本股票: {len(sample_data)} 只")
 
         ga_cfg = {
@@ -741,21 +875,26 @@ class OptimizationEngine:
             ga_cfg.update(ga_params)
 
         def evaluate_robust(params):
-            """稳健适应度: 各体制fitness的最小值"""
+            """稳健适应度: 各体制fitness的最小值(忽略无数据体制)"""
             if not all_regimes or not self.regime_labels:
                 return self.evaluator.evaluate(params, sample_data)
 
             regime_fitnesses = {}
             for regime in all_regimes:
-                fitness, _ = self.evaluator.evaluate(
+                fitness, details = self.evaluator.evaluate(
                     params, sample_data, self.regime_labels, regime
                 )
-                regime_fitnesses[regime] = fitness
+                # 仅记录有样本的体制
+                if details.get('sample_count', 0) > 0:
+                    regime_fitnesses[regime] = fitness
+
+            if not regime_fitnesses:
+                return 0.0, {}
 
             # 稳健适应度 = 最小fitness (最大化最差表现)
-            min_fitness = min(regime_fitnesses.values())
-            # 加入平均fitness作为辅助
-            avg_fitness = np.mean(list(regime_fitnesses.values()))
+            fitness_values = list(regime_fitnesses.values())
+            min_fitness = min(fitness_values)
+            avg_fitness = np.mean(fitness_values)
             # 70%最小 + 30%平均
             robust_fitness = 0.7 * min_fitness + 0.3 * avg_fitness
 
@@ -763,6 +902,8 @@ class OptimizationEngine:
                 'regime_fitnesses': regime_fitnesses,
                 'min_fitness': min_fitness,
                 'avg_fitness': avg_fitness,
+                'regimes_used': list(regime_fitnesses.keys()),
+                'regimes_skipped': [r for r in all_regimes if r not in regime_fitnesses],
             }
             return robust_fitness, details
 
@@ -773,10 +914,18 @@ class OptimizationEngine:
         total_time = time.time() - start_time
 
         regime_scores = best.fitness_details.get('regime_fitnesses', {})
+        regimes_used = best.fitness_details.get('regimes_used', [])
+        regimes_skipped = best.fitness_details.get('regimes_skipped', [])
+
+        if verbose:
+            print(f"\n  使用体制: {regimes_used}")
+            if regimes_skipped:
+                print(f"  跳过体制(无数据): {regimes_skipped}")
+
         system = IndicatorSystem(
             name="通用稳健型",
             description="在所有市场体制下都不差的稳健参数，适合不确定市场方向时使用",
-            applicable_regimes=all_regimes,
+            applicable_regimes=regimes_used if regimes_used else all_regimes,
             params=best.params,
             fitness_scores=regime_scores,
             confidence=0.6,

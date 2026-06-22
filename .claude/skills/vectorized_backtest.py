@@ -30,6 +30,18 @@ class BacktestMetrics:
     max_consecutive_losses: int = 0 # 最大连续亏损次数
 
 
+@dataclass
+class TradeDetail:
+    """单笔交易详情"""
+    entry_idx: int          # 入场日在原始数据中的索引
+    exit_idx: int           # 出场日在原始数据中的索引
+    entry_price: float
+    exit_price: float
+    pnl_pct: float          # 收益率(%)
+    holding_days: int
+    exit_reason: str        # "stop_loss" / "take_profit" / "signal" / "end"
+
+
 class VectorizedBacktester:
     """
     向量化回测引擎
@@ -65,7 +77,7 @@ class VectorizedBacktester:
         --------
         BacktestMetrics
         """
-        if len(data) < 60:
+        if len(data) < 15:
             return BacktestMetrics()
 
         # Step 1: 计算指标
@@ -270,15 +282,31 @@ class VectorizedBacktester:
         conflict = (buy_score >= buy_threshold) & (sell_score >= sell_threshold)
         signals[conflict] = -1
 
-        # 跳过前60行(指标计算需要warmup)
-        signals.iloc[:60] = 0
+        # 跳过warmup期(短窗口自适应，最少10天)
+        warmup = min(60, max(10, len(df) // 3))
+        signals.iloc[:warmup] = 0
 
         return signals
 
-    def _simulate_trades(self, df: pd.DataFrame, signals: pd.Series,
-                         params: dict) -> BacktestMetrics:
+    def backtest_with_details(self, data: pd.DataFrame, params: dict) -> tuple:
         """
-        模拟交易并计算指标
+        回测并返回交易详情 (用于按体制过滤)
+
+        Returns:
+        --------
+        (BacktestMetrics, list[TradeDetail])
+        """
+        if len(data) < 15:
+            return BacktestMetrics(), []
+
+        df = self._compute_indicators(data, params)
+        signals = self._generate_signals(df, params)
+        return self._simulate_trades(df, signals, params, return_details=True)
+
+    def _simulate_trades(self, df: pd.DataFrame, signals: pd.Series,
+                         params: dict, return_details=False) -> BacktestMetrics:
+        """
+        模拟交易并计算指标 (向量化版本)
 
         简化版本: 全仓进出，百分比止损止盈
         """
@@ -286,144 +314,214 @@ class VectorizedBacktester:
         take_profit_pct = float(params.get('take_profit_pct', 0.20))
         position_size_pct = float(params.get('position_size_pct', 0.8))
         trailing_stop_pct = float(params.get('trailing_stop_pct', 0.05))
+        min_holding = int(params.get('min_holding_days', 20))
 
-        close = df['收盘'].values
-        high_arr = df['最高'].values
-        low_arr = df['最低'].values
+        close = df['收盘'].values.astype(np.float64)
+        high_arr = df['最高'].values.astype(np.float64)
+        low_arr = df['最低'].values.astype(np.float64)
+        signals_arr = signals.values.astype(np.int8)
 
-        trades = []
-        in_position = False
-        entry_price = 0
-        entry_idx = 0
-        highest_since_entry = 0
-
-        for i in range(len(close)):
-            if not in_position:
-                # 检查买入信号
-                if signals.iloc[i] == 1:
-                    entry_price = close[i] * (1 + self.slippage + self.commission)
-                    entry_idx = i
-                    highest_since_entry = close[i]
-                    in_position = True
-            else:
-                # 更新最高价
-                highest_since_entry = max(highest_since_entry, high_arr[i])
-
-                # 检查止损
-                stop_price = entry_price * (1 - stop_loss_pct)
-                # 检查追踪止损
-                trailing_stop = highest_since_entry * (1 - trailing_stop_pct)
-                effective_stop = max(stop_price, trailing_stop)
-
-                # 检查止盈
-                take_profit_price = entry_price * (1 + take_profit_pct)
-
-                should_exit = False
-                exit_reason = ""
-
-                # 止损触发(用最低价检查)
-                if low_arr[i] <= effective_stop:
-                    exit_price = effective_stop
-                    should_exit = True
-                    exit_reason = "stop_loss"
-
-                # 止盈触发(用最高价检查)
-                elif high_arr[i] >= take_profit_price:
-                    exit_price = take_profit_price
-                    should_exit = True
-                    exit_reason = "take_profit"
-
-                # 卖出信号
-                elif signals.iloc[i] == -1:
-                    exit_price = close[i] * (1 - self.slippage - self.commission)
-                    should_exit = True
-                    exit_reason = "signal"
-
-                if should_exit:
-                    pnl_pct = (exit_price / entry_price - 1) * 100
-                    holding_days = i - entry_idx
-                    trades.append({
-                        'entry_idx': entry_idx,
-                        'exit_idx': i,
-                        'entry_price': entry_price,
-                        'exit_price': exit_price,
-                        'pnl_pct': pnl_pct,
-                        'holding_days': holding_days,
-                        'reason': exit_reason
-                    })
-                    in_position = False
-
-        # 计算指标
-        if not trades:
+        n = len(close)
+        if n < 2:
             return BacktestMetrics()
 
-        pnl_list = [t['pnl_pct'] for t in trades]
-        holding_list = [t['holding_days'] for t in trades]
+        # 预计算交易成本
+        buy_cost = 1 + self.slippage + self.commission
+        sell_cost = 1 - self.slippage - self.commission
+
+        # 找出所有买入信号索引
+        buy_indices = np.where(signals_arr == 1)[0]
+
+        if len(buy_indices) == 0:
+            return BacktestMetrics()
+
+        # 向量化处理所有交易
+        trades_pnl = []
+        trades_holding = []
+        trades_reason = []
+        trade_details = [] if return_details else None
+
+        for idx in range(len(buy_indices)):
+            entry_idx = buy_indices[idx]
+
+            # 入场价
+            entry_price = close[entry_idx] * buy_cost
+
+            # 止盈止损价格
+            take_profit_price = entry_price * (1 + take_profit_pct)
+            stop_price = entry_price * (1 - stop_loss_pct)
+
+            # 确定本次持仓的结束位置(下次买入前或数据末尾)
+            if idx + 1 < len(buy_indices):
+                end_idx = buy_indices[idx + 1]
+            else:
+                end_idx = n
+
+            # 截取持仓期间的数据 (从入场日+1开始检查，避免入场日即触发)
+            period_close = close[entry_idx:end_idx]
+            period_high = high_arr[entry_idx:end_idx]
+            period_low = low_arr[entry_idx:end_idx]
+            period_sell_signals = signals_arr[entry_idx:end_idx]
+
+            # 计算追踪止损价格序列
+            cummax = np.maximum.accumulate(period_high)
+            trailing_stops = cummax * (1 - trailing_stop_pct)
+            effective_stops = np.maximum(stop_price, trailing_stops)
+
+            # 从第1根K线开始检查(跳过入场日)
+            check_start = min(1, len(period_close) - 1)
+            period_len = len(period_close)
+
+            # 最小持有期内: 仅硬止损可触发
+            # 最小持有期后: 所有退出条件正常生效
+            min_hold_end = min(min_holding, period_len)
+
+            # 1. 硬止损(整个持仓期间都检查, 保护本金)
+            hit_stop_hard = period_low[check_start:] <= stop_price
+            stop_hard_triggers = np.where(hit_stop_hard)[0] + check_start
+
+            # 2. 追踪止损(仅最小持有期后)
+            if min_hold_end < period_len:
+                hit_stop_trail = period_low[min_hold_end:] <= trailing_stops[min_hold_end:]
+                stop_trail_triggers = np.where(hit_stop_trail)[0] + min_hold_end
+            else:
+                stop_trail_triggers = np.array([], dtype=int)
+
+            # 3. 止盈(仅最小持有期后)
+            if min_hold_end < period_len:
+                hit_tp = period_high[min_hold_end:] >= take_profit_price
+                tp_triggers = np.where(hit_tp)[0] + min_hold_end
+            else:
+                tp_triggers = np.array([], dtype=int)
+
+            # 4. 卖出信号(仅最小持有期后)
+            if min_hold_end < period_len:
+                hit_sell = period_sell_signals[min_hold_end:] == -1
+                sell_triggers = np.where(hit_sell)[0] + min_hold_end
+            else:
+                sell_triggers = np.array([], dtype=int)
+
+            # 确定最早触发的事件
+            exit_reason = None
+            exit_offset = len(period_close)  # 默认持有到最后
+
+            # 优先级: 硬止损 > 追踪止损 > 止盈 > 卖出信号
+            if len(stop_hard_triggers) > 0:
+                exit_reason = "stop_loss"
+                exit_offset = stop_hard_triggers[0]
+            elif len(stop_trail_triggers) > 0:
+                exit_reason = "trailing_stop"
+                exit_offset = stop_trail_triggers[0]
+            elif len(tp_triggers) > 0:
+                exit_reason = "take_profit"
+                exit_offset = tp_triggers[0]
+            elif len(sell_triggers) > 0:
+                exit_reason = "signal"
+                exit_offset = sell_triggers[0]
+
+            # 确保exit_offset不越界
+            if exit_offset >= len(period_close):
+                exit_offset = len(period_close) - 1
+
+            # 计算出场价
+            if exit_reason == "stop_loss":
+                exit_price = stop_price  # 硬止损用固定止损价
+            elif exit_reason == "trailing_stop":
+                exit_price = trailing_stops[exit_offset]  # 追踪止损用动态止损价
+            elif exit_reason == "take_profit":
+                exit_price = take_profit_price
+            else:
+                # 信号出场用收盘价
+                exit_price = period_close[exit_offset] * sell_cost
+
+            # 计算收益
+            pnl_pct = (exit_price / entry_price - 1) * 100
+            holding_days = exit_offset
+
+            trades_pnl.append(pnl_pct)
+            trades_holding.append(holding_days)
+            trades_reason.append(exit_reason)
+
+            if return_details:
+                trade_details.append(TradeDetail(
+                    entry_idx=int(entry_idx),
+                    exit_idx=int(entry_idx + exit_offset),
+                    entry_price=float(entry_price),
+                    exit_price=float(exit_price),
+                    pnl_pct=float(pnl_pct),
+                    holding_days=int(holding_days),
+                    exit_reason=str(exit_reason) if exit_reason else "end",
+                ))
+
+        if len(trades_pnl) == 0:
+            return BacktestMetrics()
+
+        # 转换为numpy数组进行向量化计算
+        pnl_arr = np.array(trades_pnl, dtype=np.float64)
+        holding_arr = np.array(trades_holding, dtype=np.float64)
 
         # 胜率
-        wins = [p for p in pnl_list if p > 0]
-        losses = [p for p in pnl_list if p <= 0]
-        win_rate = len(wins) / len(pnl_list) * 100 if pnl_list else 0
+        wins = pnl_arr[pnl_arr > 0]
+        losses = pnl_arr[pnl_arr <= 0]
+        win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
 
         # 盈亏比
-        avg_win = np.mean(wins) if wins else 0
-        avg_loss = abs(np.mean(losses)) if losses else 1
+        avg_win = np.mean(wins) if len(wins) > 0 else 0
+        avg_loss = abs(np.mean(losses)) if len(losses) > 0 else 1
         profit_factor = avg_win / avg_loss if avg_loss > 0 else 0
 
-        # 总收益(复利)
-        cumulative = 1.0
-        for p in pnl_list:
-            cumulative *= (1 + p / 100 * position_size_pct)
-        total_return = (cumulative - 1) * 100
+        # 总收益(复利) - 向量化
+        cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
+        total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
 
         # 年化收益
-        total_days = len(df)
+        total_days = n
         years = total_days / 252
-        if years > 0 and cumulative > 0:
-            annualized_return = (cumulative ** (1 / years) - 1) * 100
+        if years > 0 and cumulative[-1] > 0:
+            annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
         else:
             annualized_return = 0
 
-        # 最大回撤(基于权益曲线)
-        equity = [1.0]
-        for p in pnl_list:
-            equity.append(equity[-1] * (1 + p / 100 * position_size_pct))
-        equity = np.array(equity)
+        # 最大回撤 - 向量化
+        equity = np.concatenate([[1.0], cumulative])
         peak = np.maximum.accumulate(equity)
         drawdown = (equity - peak) / peak * 100
-        max_drawdown = abs(drawdown.min())
+        max_drawdown = abs(drawdown.min()) if len(drawdown) > 0 else 0
 
-        # 夏普比率
-        if len(pnl_list) > 1:
-            daily_returns = np.array(pnl_list) / 100
-            avg_ret = np.mean(daily_returns) * 252 / np.mean(holding_list) if np.mean(holding_list) > 0 else 0
-            std_ret = np.std(daily_returns) * np.sqrt(252 / np.mean(holding_list)) if np.mean(holding_list) > 0 else 1
+        # 夏普比率 - 向量化
+        if len(pnl_arr) > 1:
+            daily_returns = pnl_arr / 100
+            avg_ret = np.mean(daily_returns) * 252 / np.mean(holding_arr) if np.mean(holding_arr) > 0 else 0
+            std_ret = np.std(daily_returns) * np.sqrt(252 / np.mean(holding_arr)) if np.mean(holding_arr) > 0 else 1
             sharpe = (avg_ret - 0.03) / std_ret if std_ret > 0 else 0
         else:
             sharpe = 0
 
-        # 最大连续亏损
-        max_consec = 0
-        current_consec = 0
-        for p in pnl_list:
-            if p <= 0:
-                current_consec += 1
-                max_consec = max(max_consec, current_consec)
-            else:
-                current_consec = 0
+        # 最大连续亏损 - 向量化
+        is_loss = pnl_arr <= 0
+        if np.any(is_loss):
+            # 计算连续亏损
+            loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
+            max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
+        else:
+            max_consec = 0
 
-        return BacktestMetrics(
-            total_return=total_return,
-            annualized_return=annualized_return,
-            max_drawdown=max_drawdown,
-            sharpe_ratio=sharpe,
-            win_rate=win_rate,
-            profit_factor=profit_factor,
-            num_trades=len(trades),
-            avg_holding_days=np.mean(holding_list) if holding_list else 0,
-            avg_return_per_trade=np.mean(pnl_list) if pnl_list else 0,
+        metrics = BacktestMetrics(
+            total_return=float(total_return),
+            annualized_return=float(annualized_return),
+            max_drawdown=float(max_drawdown),
+            sharpe_ratio=float(sharpe),
+            win_rate=float(win_rate),
+            profit_factor=float(profit_factor),
+            num_trades=len(trades_pnl),
+            avg_holding_days=float(np.mean(holding_arr)),
+            avg_return_per_trade=float(np.mean(pnl_arr)),
             max_consecutive_losses=max_consec
         )
+
+        if return_details:
+            return metrics, trade_details
+        return metrics
 
     def walk_forward(self, data: pd.DataFrame, params: dict,
                      train_days=504, test_days=180, step_days=63) -> list:
