@@ -234,19 +234,25 @@ class ParameterSpace:
         if p.get('rsi_oversold', 30) >= p.get('rsi_overbought', 70):
             p['rsi_oversold'] = p['rsi_overbought'] - 10
 
-        # 权重归一化
-        w_keys = ['w_trend', 'w_momentum', 'w_risk', 'w_performance']
-        w_vals = [p.get(k, v) for k, v in zip(w_keys, [30, 25, 15, 30])]
-        w_sum = sum(w_vals)
-        if w_sum > 0:
-            for k, v in zip(w_keys, w_vals):
-                p[k] = v / w_sum * 100
-
-        # 所有值裁剪到合法范围
+        # 所有值先裁剪到合法范围(影响权重和)
         for param_def in cls.get_all_params():
             name = param_def.name
             if name in p:
                 p[name] = param_def.clip(p[name])
+
+        # 权重归一化(在clip之后，保证总和=100)
+        w_keys = ['w_trend', 'w_momentum', 'w_risk', 'w_performance']
+        w_vals = [p.get(k, 30) for k in w_keys]
+        w_sum = sum(w_vals)
+        if w_sum > 0:
+            for k, v in zip(w_keys, w_vals):
+                p[k] = v / w_sum * 100
+            # clip后再normalize一次以防越界
+            w_vals2 = [p[k] for k in w_keys]
+            w_sum2 = sum(w_vals2)
+            if w_sum2 > 0:
+                for k in w_keys:
+                    p[k] = p[k] / w_sum2 * 100
 
         return p
 
