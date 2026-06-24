@@ -28,6 +28,81 @@ stock_name_cache = None
 stock_name_cache_time = None
 
 
+# ============== 优化方案加载（来自 stock_data/optimization_result.json）==============
+
+OPTIMIZATION_PATH = Path("stock_data/optimization_result.json")
+_optimization_cache = {"mtime": None, "by_name": {}, "timestamp": None, "warning": None}
+
+# 25 个参数 + 4 个 scoring 权重的默认值；作为手动模式预设 + 系统模式的 merge 底
+DEFAULT_PARAMS = {
+    # 指标周期
+    "ma_fast": 5, "ma_mid": 10, "ma_slow": 20,
+    "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+    "rsi_period": 14, "rsi_oversold": 30, "rsi_overbought": 70,
+    "kdj_n": 9, "bb_period": 20, "bb_std": 2.0, "atr_period": 14,
+    # 信号阈值（手动模式：点计数阈值；系统模式：连续分阈值 0-100）
+    "buy_threshold": 4.0, "sell_threshold": 4.0,
+    # 仓位/风控
+    "stop_loss_pct": 0.0, "take_profit_pct": 0.0,
+    "trailing_stop_pct": 0.0, "min_holding_days": 0,
+    "position_size_pct": 1.0,
+    # 加权评分（仅在系统模式下生效）
+    "score_buy_threshold": 50.0, "score_sell_threshold": 50.0,
+    "w_trend": 25.0, "w_momentum": 25.0, "w_risk": 25.0, "w_performance": 25.0,
+    "use_weighted_scoring": False,
+}
+
+
+def load_optimization_systems():
+    """加载 stock_data/optimization_result.json 里的 8 个系统。
+
+    带 mtime 缓存：文件变化时自动重读。文件缺失或损坏返回 None。
+    返回 {"timestamp", "by_name", "warning"} 字典。
+    """
+    global _optimization_cache
+    if not OPTIMIZATION_PATH.exists():
+        return None
+    try:
+        mtime = OPTIMIZATION_PATH.stat().st_mtime
+    except OSError:
+        return None
+    if _optimization_cache["mtime"] == mtime and _optimization_cache["by_name"]:
+        return _optimization_cache
+    try:
+        with open(OPTIMIZATION_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    by_name = {}
+    for sys in data.get("systems", []):
+        name = sys.get("name")
+        if not name:
+            continue
+        # 注入 use_weighted_scoring=True 标志
+        merged = {**sys.get("params", {}), "use_weighted_scoring": True}
+        by_name[name] = {**sys, "params": merged}
+    _optimization_cache = {
+        "mtime": mtime,
+        "by_name": by_name,
+        "timestamp": data.get("timestamp"),
+        "warning": None,
+    }
+    return _optimization_cache
+
+
+def resolve_system_params(system_name):
+    """根据 system_name 解析得到合并后的 params dict；找不到则返回 None（手动模式）。"""
+    if not system_name:
+        return None
+    cache = load_optimization_systems()
+    if not cache:
+        return None
+    sys = cache["by_name"].get(system_name)
+    if not sys:
+        return None
+    return sys["params"]
+
+
 # ============== 核心算法函数 ==============
 
 def get_stock_data(code, days=365, start_date=None, end_date=None):
@@ -78,146 +153,283 @@ def get_stock_data(code, days=365, start_date=None, end_date=None):
         return None
 
 
-def calculate_indicators(df):
-    """计算技术指标"""
+def calculate_indicators(df, params=None):
+    """计算技术指标。
+
+    列名固定为 MA5/MA10/MA20/MA60/RSI14/K/D/J/MACD/MACD_Signal/ATR/BB_*
+    以保持与图表接口兼容；具体周期由 params 决定。
+    """
+    p = {**DEFAULT_PARAMS, **(params or {})}
     close = df['收盘'].values
     high = df['最高'].values
     low = df['最低'].values
 
-    # MA
-    df['MA5'] = df['收盘'].rolling(5).mean()
-    df['MA10'] = df['收盘'].rolling(10).mean()
-    df['MA20'] = df['收盘'].rolling(20).mean()
+    # MA — 列名固定为 5/10/20/60，内部周期取自 params
+    df['MA5'] = df['收盘'].rolling(p['ma_fast']).mean()
+    df['MA10'] = df['收盘'].rolling(p['ma_mid']).mean()
+    df['MA20'] = df['收盘'].rolling(p['ma_slow']).mean()
     df['MA60'] = df['收盘'].rolling(60).mean()
 
-    # 成交量MA
+    # 成交量MA（未在参数空间中，保持固定）
     df['Vol_MA5'] = df['成交量'].rolling(5).mean()
     df['Vol_MA20'] = df['成交量'].rolling(20).mean()
 
     # RSI
+    rsi_period = int(p['rsi_period'])
     delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
     rs = gain / loss
     df['RSI14'] = 100 - (100 / (1 + rs))
 
     # KDJ
-    low_n = pd.Series(low).rolling(9).min()
-    high_n = pd.Series(high).rolling(9).max()
+    kdj_n = int(p['kdj_n'])
+    low_n = pd.Series(low).rolling(kdj_n).min()
+    high_n = pd.Series(high).rolling(kdj_n).max()
     rsv = (pd.Series(close) - low_n) / (high_n - low_n) * 100
     df['K'] = rsv.ewm(alpha=1/3).mean()
     df['D'] = df['K'].ewm(alpha=1/3).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
 
     # MACD
-    ema12 = pd.Series(close).ewm(span=12).mean()
-    ema26 = pd.Series(close).ewm(span=26).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+    macd_fast = int(p['macd_fast'])
+    macd_slow = int(p['macd_slow'])
+    macd_signal = int(p['macd_signal'])
+    ema_fast = pd.Series(close).ewm(span=macd_fast).mean()
+    ema_slow = pd.Series(close).ewm(span=macd_slow).mean()
+    df['MACD'] = ema_fast - ema_slow
+    df['MACD_Signal'] = df['MACD'].ewm(span=macd_signal).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
     # ATR
+    atr_period = int(p['atr_period'])
     high_low = pd.Series(high) - pd.Series(low)
     high_close = np.abs(pd.Series(high) - pd.Series(close).shift(1))
     low_close = np.abs(pd.Series(low) - pd.Series(close).shift(1))
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(14).mean()
+    df['ATR'] = tr.rolling(atr_period).mean()
 
     # 布林带
-    df['BB_Mid'] = df['收盘'].rolling(20).mean()
-    bb_std = df['收盘'].rolling(20).std()
-    df['BB_Upper'] = df['BB_Mid'] + 2 * bb_std
-    df['BB_Lower'] = df['BB_Mid'] - 2 * bb_std
+    bb_period = int(p['bb_period'])
+    bb_std_mult = float(p['bb_std'])
+    df['BB_Mid'] = df['收盘'].rolling(bb_period).mean()
+    bb_std = df['收盘'].rolling(bb_period).std()
+    df['BB_Upper'] = df['BB_Mid'] + bb_std_mult * bb_std
+    df['BB_Lower'] = df['BB_Mid'] - bb_std_mult * bb_std
 
     return df
 
 
-def detect_reversal_signals(df, buy_threshold=4, sell_threshold=4):
-    """检测转折点信号"""
+def calculate_weighted_score(row, prev, p):
+    """多因子加权评分（0-100）。
+
+    4 个子分数各为 0-100：
+      - trend (w_trend):        MA 排列 + MACD 方向 + MA20 突破
+      - momentum (w_momentum):  RSI 位置 + KDJ 金叉
+      - risk (w_risk):          布林带位置（越低越安全 → 越高分）
+      - performance (w_performance): 短期收益率
+
+    返回 (buy_score, sell_score) 加权后归一化到 0-100。
+    sell_score 通过反转每个子分数计算（独立加权）。
+    """
+    # --- trend_bull: 0-100 ---
+    trend_bull = 0.0
+    if pd.notna(row['MA5']) and pd.notna(row['MA10']) and pd.notna(row['MA20']):
+        if row['MA5'] > row['MA10'] > row['MA20']:
+            trend_bull += 40
+        elif row['MA5'] > row['MA20']:
+            trend_bull += 20
+    if pd.notna(row['MACD']) and pd.notna(row['MACD_Signal']):
+        if row['MACD'] > row['MACD_Signal']:
+            trend_bull += 40
+    if pd.notna(prev['收盘']) and pd.notna(prev['MA20']):
+        if row['收盘'] > row['MA20'] and prev['收盘'] <= prev['MA20']:
+            trend_bull += 20
+    trend_bull = min(100, trend_bull)
+
+    # --- momentum_bull: 0-100 ---
+    rsi = row['RSI14'] if pd.notna(row['RSI14']) else 50
+    if rsi < 30:
+        mom_bull = 90
+    elif rsi < 50:
+        mom_bull = 70
+    elif rsi < 70:
+        mom_bull = 40
+    else:
+        mom_bull = 10
+    if pd.notna(row['K']) and pd.notna(row['D']):
+        if row['K'] > row['D'] and row['K'] < 80:
+            mom_bull = min(100, mom_bull + 10)
+    mom_bull = min(100, mom_bull)
+
+    # --- risk_bull: 0-100（布林带位置越低越适合买入）---
+    if pd.notna(row['BB_Upper']) and pd.notna(row['BB_Lower']):
+        bb_range = row['BB_Upper'] - row['BB_Lower']
+        if bb_range > 0:
+            bb_pos = (row['收盘'] - row['BB_Lower']) / bb_range
+            bb_pos = max(0.0, min(1.0, bb_pos))
+            risk_bull = (1 - bb_pos) * 100
+        else:
+            risk_bull = 50
+    else:
+        risk_bull = 50
+
+    # --- performance_bull: 0-100（5日收益率）---
+    if pd.notna(prev['收盘']) and prev['收盘'] > 0:
+        ret5 = (row['收盘'] / prev['收盘'] - 1)
+        perf_bull = 50 + ret5 * 500
+        perf_bull = max(0, min(100, perf_bull))
+    else:
+        perf_bull = 50
+
+    # 卖方子分数 = 100 - 买方子分数
+    trend_bear = 100 - trend_bull
+    mom_bear = 100 - mom_bull
+    risk_bear = 100 - risk_bull
+    perf_bear = 100 - perf_bull
+
+    wsum = p['w_trend'] + p['w_momentum'] + p['w_risk'] + p['w_performance']
+    if wsum <= 0:
+        wsum = 100.0
+    buy_score = (p['w_trend'] * trend_bull
+                 + p['w_momentum'] * mom_bull
+                 + p['w_risk'] * risk_bull
+                 + p['w_performance'] * perf_bull) / wsum
+    sell_score = (p['w_trend'] * trend_bear
+                  + p['w_momentum'] * mom_bear
+                  + p['w_risk'] * risk_bear
+                  + p['w_performance'] * perf_bear) / wsum
+    return buy_score, sell_score
+
+
+def detect_reversal_signals(df, params=None):
+    """检测转折点信号。
+
+    双模式：
+      - 手动模式（默认）：原有点计数评分（兼容旧行为）
+      - 系统模式（params 中 use_weighted_scoring=True）：4 因子加权评分，0-100 连续分
+    """
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    use_weighted = p.get('use_weighted_scoring', False)
+
+    # 加权模式下使用 score_*_threshold，否则使用 buy/sell_threshold
+    buy_threshold = float(p['score_buy_threshold']) if use_weighted else float(p['buy_threshold'])
+    sell_threshold = float(p['score_sell_threshold']) if use_weighted else float(p['sell_threshold'])
+    rsi_oversold = float(p['rsi_oversold'])
+    rsi_overbought = float(p['rsi_overbought'])
+
     signals = []
 
     for i in range(60, len(df)):
         row = df.iloc[i]
         prev = df.iloc[i-1]
 
-        buy_signals = []
-        buy_score = 0
+        if use_weighted:
+            # ---- 加权模式 ----
+            buy_score_f, sell_score_f = calculate_weighted_score(row, prev, p)
+            buy_score = buy_score_f
+            sell_score = sell_score_f
 
-        # 买入信号
-        if row['RSI14'] < 30:
-            buy_signals.append(f"RSI超卖({row['RSI14']:.1f})")
-            buy_score += 2
-        elif row['RSI14'] < 40:
-            buy_signals.append(f"RSI偏低({row['RSI14']:.1f})")
-            buy_score += 1
+            buy_signals = []
+            sell_signals = []
 
-        if prev['J'] > 100 and row['J'] < prev['J']:
-            buy_signals.append(f"KDJ回落({row['J']:.0f})")
-            buy_score += 2
-        elif row['J'] < 20:
-            buy_signals.append(f"KDJ超卖({row['J']:.0f})")
-            buy_score += 2
+            # 标注主要因子
+            if buy_score_f >= buy_threshold:
+                # 找出贡献最大的子分数
+                wsum = p['w_trend'] + p['w_momentum'] + p['w_risk'] + p['w_performance']
+                if wsum <= 0:
+                    wsum = 100.0
+                rsi_val = row['RSI14'] if pd.notna(row['RSI14']) else 50
+                contribs = {
+                    '趋势': p['w_trend'] * (50 if pd.isna(row['MA5']) or row['MA5'] <= row['MA20'] else 70) / wsum,
+                    '动量': p['w_momentum'] * (50 if rsi_val >= 50 else 70) / wsum,
+                    '风险': p['w_risk'] * 50 / wsum,
+                    '表现': p['w_performance'] * 50 / wsum,
+                }
+                top = max(contribs, key=contribs.get)
+                buy_signals.append(f"加权{buy_score_f:.0f}分(主:{top})")
 
-        if row['收盘'] <= row['BB_Lower'] * 1.02:
-            buy_signals.append("触及下轨")
-            buy_score += 2
+            if sell_score_f >= sell_threshold:
+                sell_signals.append(f"加权{sell_score_f:.0f}分")
+        else:
+            # ---- 手动模式（点计数，原行为）----
+            buy_signals = []
+            buy_score = 0
 
-        if prev['MACD'] <= prev['MACD_Signal'] and row['MACD'] > row['MACD_Signal']:
-            buy_signals.append("MACD金叉")
-            buy_score += 2
+            if row['RSI14'] < rsi_oversold:
+                buy_signals.append(f"RSI超卖({row['RSI14']:.1f})")
+                buy_score += 2
+            elif row['RSI14'] < rsi_oversold + 10:
+                buy_signals.append(f"RSI偏低({row['RSI14']:.1f})")
+                buy_score += 1
 
-        if row['收盘'] > row['MA20'] and prev['收盘'] <= prev['MA20']:
-            buy_signals.append("站上MA20")
-            buy_score += 2
+            if prev['J'] > 100 and row['J'] < prev['J']:
+                buy_signals.append(f"KDJ回落({row['J']:.0f})")
+                buy_score += 2
+            elif row['J'] < 20:
+                buy_signals.append(f"KDJ超卖({row['J']:.0f})")
+                buy_score += 2
 
-        if row['成交量'] > row['Vol_MA20'] * 1.5:
-            buy_signals.append("放量")
-            buy_score += 1
+            if row['收盘'] <= row['BB_Lower'] * 1.02:
+                buy_signals.append("触及下轨")
+                buy_score += 2
 
-        # 卖出信号
-        sell_signals = []
-        sell_score = 0
+            if prev['MACD'] <= prev['MACD_Signal'] and row['MACD'] > row['MACD_Signal']:
+                buy_signals.append("MACD金叉")
+                buy_score += 2
 
-        if row['RSI14'] > 80:
-            sell_signals.append(f"RSI严重超买({row['RSI14']:.1f})")
-            sell_score += 3
-        elif row['RSI14'] > 70:
-            sell_signals.append(f"RSI超买({row['RSI14']:.1f})")
-            sell_score += 2
+            if row['收盘'] > row['MA20'] and prev['收盘'] <= prev['MA20']:
+                buy_signals.append("站上MA20")
+                buy_score += 2
 
-        if prev['J'] < 0 and row['J'] > prev['J']:
-            sell_signals.append(f"KDJ回升({row['J']:.0f})")
-            sell_score += 2
-        elif row['J'] > 100:
-            sell_signals.append(f"KDJ超买({row['J']:.0f})")
-            sell_score += 2
+            if row['成交量'] > row['Vol_MA20'] * 1.5:
+                buy_signals.append("放量")
+                buy_score += 1
 
-        if row['收盘'] >= row['BB_Upper'] * 0.98:
-            sell_signals.append("触及上轨")
-            sell_score += 2
+            sell_signals = []
+            sell_score = 0
 
-        if prev['MACD'] >= prev['MACD_Signal'] and row['MACD'] < row['MACD_Signal']:
-            sell_signals.append("MACD死叉")
-            sell_score += 2
+            if row['RSI14'] > rsi_overbought + 10:
+                sell_signals.append(f"RSI严重超买({row['RSI14']:.1f})")
+                sell_score += 3
+            elif row['RSI14'] > rsi_overbought:
+                sell_signals.append(f"RSI超买({row['RSI14']:.1f})")
+                sell_score += 2
 
-        if row['收盘'] < row['MA20'] and prev['收盘'] >= prev['MA20']:
-            sell_signals.append("跌破MA20")
-            sell_score += 2
+            if prev['J'] < 0 and row['J'] > prev['J']:
+                sell_signals.append(f"KDJ回升({row['J']:.0f})")
+                sell_score += 2
+            elif row['J'] > 100:
+                sell_signals.append(f"KDJ超买({row['J']:.0f})")
+                sell_score += 2
 
-        if row['成交量'] < row['Vol_MA20'] * 0.7:
-            sell_signals.append("缩量")
-            sell_score += 1
+            if row['收盘'] >= row['BB_Upper'] * 0.98:
+                sell_signals.append("触及上轨")
+                sell_score += 2
+
+            if prev['MACD'] >= prev['MACD_Signal'] and row['MACD'] < row['MACD_Signal']:
+                sell_signals.append("MACD死叉")
+                sell_score += 2
+
+            if row['收盘'] < row['MA20'] and prev['收盘'] >= prev['MA20']:
+                sell_signals.append("跌破MA20")
+                sell_score += 2
+
+            if row['成交量'] < row['Vol_MA20'] * 0.7:
+                sell_signals.append("缩量")
+                sell_score += 1
 
         signals.append({
             'date': row['日期'].strftime('%Y-%m-%d'),
             'close': float(row['收盘']),
             'buy_signals': buy_signals,
-            'buy_score': buy_score,
+            'buy_score': float(buy_score),
             'sell_signals': sell_signals,
-            'sell_score': sell_score,
+            'sell_score': float(sell_score),
             'rsi': float(row['RSI14']) if pd.notna(row['RSI14']) else 50,
             'j': float(row['J']) if pd.notna(row['J']) else 50,
-            'macd': float(row['MACD']) if pd.notna(row['MACD']) else 0
+            'macd': float(row['MACD']) if pd.notna(row['MACD']) else 0,
+            'use_weighted': use_weighted,
         })
 
     return pd.DataFrame(signals)
@@ -277,14 +489,59 @@ def calculate_position_size(buy_score, sell_score, position_config=None):
     return buy_ratio, sell_ratio
 
 
-def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, position_config=None):
-    """对单只股票进行回测（带仓位管理）"""
+def backtest_stock(code, name, signals_df, params=None, position_config=None):
+    """对单只股票进行回测（带仓位管理 + 止损/止盈/移动止损）。"""
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    use_weighted = p.get('use_weighted_scoring', False)
+    # 阈值选择
+    if use_weighted:
+        buy_threshold = float(p['score_buy_threshold'])
+        sell_threshold = float(p['score_sell_threshold'])
+    else:
+        buy_threshold = float(p['buy_threshold'])
+        sell_threshold = float(p['sell_threshold'])
+
+    stop_loss_pct     = float(p['stop_loss_pct'])
+    take_profit_pct   = float(p['take_profit_pct'])
+    trailing_stop_pct = float(p['trailing_stop_pct'])
+    min_holding_days  = int(p['min_holding_days'])
+    position_size_cap = float(p['position_size_pct'])
+
     initial_cash = 100000
     cash = initial_cash
     shares = 0
     trades = []
     position = None
     daily_logs = []  # 详细日志
+
+    def execute_sell(qty, price, trade_type, reason, signal):
+        """执行卖出，accounting 与原 SELL 分支一致。"""
+        nonlocal shares, cash, position
+        revenue = qty * price
+        cash += revenue
+        cost_of_sold = position['cost'] * (qty / shares) if shares > 0 else 0
+        profit = revenue - cost_of_sold
+        profit_pct = profit / cost_of_sold * 100 if cost_of_sold > 0 else 0
+        shares_before = shares
+        shares -= qty
+        trades.append({
+            'type': trade_type,
+            'date': signal['date'],
+            'price': float(price),
+            'shares': qty,
+            'revenue': revenue,
+            'profit': profit,
+            'profit_pct': profit_pct,
+            'entry_price': position['entry_price'],
+            'shares_before': shares_before,
+            'shares_after': shares,
+        })
+        if shares == 0:
+            position = None
+        else:
+            position['cost'] -= cost_of_sold
+            position['shares'] = shares
+        return profit, profit_pct
 
     for idx, signal in signals_df.iterrows():
         price = signal['close']
@@ -309,60 +566,105 @@ def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, po
             'action_detail': ''
         }
 
-        # 卖出逻辑 - 优先处理卖出信号
+        # ---- 持仓期：先检查止损/止盈/移动止损 ----
+        if position and shares > 0:
+            if price > position['highest_price']:
+                position['highest_price'] = price
+            holding_days = (datetime.strptime(signal['date'], '%Y-%m-%d')
+                            - datetime.strptime(position['entry_date'], '%Y-%m-%d')).days
+
+            # 1) 固定止损（任何时间）
+            if stop_loss_pct > 0:
+                sl_price = position['entry_price'] * (1 - stop_loss_pct)
+                if price <= sl_price:
+                    daily_log['action'] = 'STOP_LOSS'
+                    daily_log['action_reason'] = (
+                        f'触发止损 {stop_loss_pct*100:.1f}% '
+                        f'(现价{price:.2f} ≤ 止损线{sl_price:.2f})'
+                    )
+                    p_profit, p_pct = execute_sell(shares, price, 'STOP_LOSS', daily_log['action_reason'], signal)
+                    daily_log['action_result'] = (
+                        f'止损平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
+                    )
+                    daily_logs.append(daily_log)
+                    continue
+
+            # 2) 止盈（受 min_holding_days 约束）
+            if take_profit_pct > 0 and holding_days >= min_holding_days:
+                tp_price = position['entry_price'] * (1 + take_profit_pct)
+                if price >= tp_price:
+                    daily_log['action'] = 'TAKE_PROFIT'
+                    daily_log['action_reason'] = (
+                        f'触发止盈 {take_profit_pct*100:.1f}% '
+                        f'(现价{price:.2f} ≥ 止盈线{tp_price:.2f}, 已持仓{holding_days}天)'
+                    )
+                    p_profit, p_pct = execute_sell(shares, price, 'TAKE_PROFIT', daily_log['action_reason'], signal)
+                    daily_log['action_result'] = (
+                        f'止盈平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
+                    )
+                    daily_logs.append(daily_log)
+                    continue
+
+            # 3) 移动止损（只在创新高后启动，止损线须在成本价之上）
+            if (trailing_stop_pct > 0
+                    and position['highest_price'] > position['entry_price']):
+                ts_price = position['highest_price'] * (1 - trailing_stop_pct)
+                if price <= ts_price and ts_price > position['entry_price']:
+                    daily_log['action'] = 'TRAILING_STOP'
+                    daily_log['action_reason'] = (
+                        f'触发移动止损 {trailing_stop_pct*100:.1f}% '
+                        f'(高点{position["highest_price"]:.2f}, 止损线{ts_price:.2f})'
+                    )
+                    p_profit, p_pct = execute_sell(shares, price, 'TRAILING_STOP', daily_log['action_reason'], signal)
+                    daily_log['action_result'] = (
+                        f'移动止损平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
+                    )
+                    daily_logs.append(daily_log)
+                    continue
+
+        # 卖出逻辑（信号驱动，受 min_holding_days 约束）
         if sell_score >= sell_threshold and shares > 0:
+            holding_days = 0
+            if position:
+                holding_days = (datetime.strptime(signal['date'], '%Y-%m-%d')
+                                - datetime.strptime(position['entry_date'], '%Y-%m-%d')).days
+            if holding_days < min_holding_days:
+                daily_log['action'] = 'HOLD_MIN_DAYS'
+                daily_log['action_reason'] = (
+                    f'卖出信号{sell_score:.1f}分但未到最小持仓天数 '
+                    f'({holding_days}/{min_holding_days})'
+                )
+                daily_logs.append(daily_log)
+                continue
+
             buy_ratio, sell_ratio = calculate_position_size(buy_score, sell_score, position_config)
             sell_shares = int(shares * sell_ratio / 100) * 100  # 100股取整
 
             daily_log['action'] = 'SELL'
-            daily_log['action_reason'] = f'卖出信号{sell_score}分≥阈值{sell_threshold}|{",".join(sell_signals)}'
+            daily_log['action_reason'] = f'卖出信号{sell_score:.1f}分≥阈值{sell_threshold:.1f}|{",".join(sell_signals)}'
             daily_log['action_detail'] = f'计划卖出{sell_ratio*100:.0f}%仓位'
 
             if sell_shares > 0 and sell_shares <= shares:
-                revenue = sell_shares * price
-                cash += revenue
-
-                # 计算卖出部分的成本（按比例分摊总成本）
-                cost_of_sold = position['cost'] * (sell_shares / shares)
-                profit = revenue - cost_of_sold
-                profit_pct = profit / cost_of_sold * 100 if cost_of_sold > 0 else 0
-
-                trades.append({
-                    'type': 'SELL',
-                    'date': signal['date'],
-                    'price': price,
-                    'shares': sell_shares,
-                    'revenue': revenue,
-                    'profit': profit,
-                    'profit_pct': profit_pct,
-                    'sell_ratio': sell_ratio,
-                    'entry_price': position['entry_price'],
-                    'shares_before': shares,
-                    'shares_after': shares - sell_shares
-                })
-
-                daily_log['action_result'] = f'卖出{sell_shares}股@{price:.2f}元,收入{revenue:.2f}元,盈亏{profit:+.2f}元({profit_pct:+.1f}%)'
-
-                shares -= sell_shares
-
-                if shares == 0:
-                    position = None
-                else:
-                    # 更新剩余持仓的成本
-                    position['cost'] -= cost_of_sold
-                    position['shares'] = shares
+                p_profit, p_pct = execute_sell(sell_shares, price, 'SELL', daily_log['action_reason'], signal)
+                daily_log['action_result'] = (
+                    f'卖出{sell_shares}股@{price:.2f}元, 收入{p_profit + (position["cost"] * (sell_shares / (sell_shares + shares)) if position else 0):.2f}元, '
+                    f'盈亏{p_profit:+.2f}元({p_pct:+.1f}%)'
+                )
             else:
                 daily_log['action'] = 'SKIP'
-                daily_log['action_reason'] = f'卖出信号{sell_score}分但计算卖出股数为0或超过持仓'
+                daily_log['action_reason'] = f'卖出信号{sell_score:.1f}分但计算卖出股数为0或超过持仓'
 
         # 买入逻辑 - 支持建仓和加仓
         elif buy_score >= buy_threshold:
             buy_ratio, _ = calculate_position_size(buy_score, sell_score, position_config)
+            # 用 position_size_pct 给信号分数档位加一个上限（系统模式生效）
+            if position_size_cap < 1.0:
+                buy_ratio = min(buy_ratio, position_size_cap)
             cost_per_share = price
             max_shares = int((cash * buy_ratio) / cost_per_share / 100) * 100  # 100股取整
 
             daily_log['action'] = 'BUY' if position is None else 'ADD'
-            daily_log['action_reason'] = f'买入信号{buy_score}分≥阈值{buy_threshold}|{",".join(buy_signals)}'
+            daily_log['action_reason'] = f'买入信号{buy_score:.1f}分≥阈值{buy_threshold:.1f}|{",".join(buy_signals)}'
             daily_log['action_detail'] = f'计划使用{buy_ratio*100:.0f}%资金({cash*buy_ratio:.0f}元)'
 
             if max_shares > 0:
@@ -377,6 +679,7 @@ def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, po
                     position = {
                         'entry_date': signal['date'],
                         'entry_price': cost_per_share,
+                        'highest_price': cost_per_share,
                         'shares': shares,
                         'cost': cost,
                         'buy_score': buy_score,
@@ -392,7 +695,8 @@ def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, po
                     new_avg_price = total_cost / total_shares
                     position = {
                         'entry_date': position['entry_date'],  # 保持首次建仓日期
-                        'entry_price': total_cost / total_shares,  # 更新加权平均价
+                        'entry_price': new_avg_price,  # 更新加权平均价
+                        'highest_price': max(position.get('highest_price', cost_per_share), cost_per_share),
                         'shares': total_shares,
                         'cost': total_cost,
                         'buy_score': max(position.get('buy_score', 0), buy_score),  # 更新最高买入分数
@@ -414,11 +718,11 @@ def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, po
                 })
             else:
                 daily_log['action'] = 'SKIP'
-                daily_log['action_reason'] = f'买入信号{buy_score}分但资金不足(现金{cash:.2f}元)'
+                daily_log['action_reason'] = f'买入信号{buy_score:.1f}分但资金不足(现金{cash:.2f}元)'
         else:
             # 没有触发买卖信号
             if buy_score > 0 or sell_score > 0:
-                daily_log['action_reason'] = f'买入{buy_score}分(阈值{buy_threshold})|卖出{sell_score}分(阈值{sell_threshold})'
+                daily_log['action_reason'] = f'买入{buy_score:.1f}分(阈值{buy_threshold:.1f})|卖出{sell_score:.1f}分(阈值{sell_threshold:.1f})'
             else:
                 daily_log['action_reason'] = '无买卖信号'
 
@@ -437,17 +741,35 @@ def backtest_stock(code, name, signals_df, buy_threshold=4, sell_threshold=4, po
         'initial_cash': initial_cash,
         'final_value': final_value,
         'trades': trades,
-        'trade_count': len([t for t in trades if t['type'] == 'SELL']),
+        'trade_count': len([t for t in trades if t['type'] in ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')]),
         'total_profit': final_value - initial_cash,
         'profit_pct': (final_value - initial_cash) / initial_cash * 100,
         'daily_logs': daily_logs,
         'buy_count': len([t for t in trades if t['type'] in ('BUY', 'ADD')]),
-        'sell_count': len([t for t in trades if t['type'] == 'SELL'])
+        'sell_count': len([t for t in trades if t['type'] in ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')])
     }
 
 
-def run_backtest_task(task_id, stock_list, days, buy_threshold, sell_threshold, position_config=None, start_date=None, end_date=None):
-    """执行回测任务（后台线程）"""
+def run_backtest_task(task_id, stock_list, days, buy_threshold, sell_threshold,
+                       position_config=None, start_date=None, end_date=None,
+                       system_name=None):
+    """执行回测任务（后台线程）。
+
+    system_name: 优化方案名（None=手动模式，使用 buy/sell_threshold；非空则加载
+    optimization_result.json 中的系统参数，覆盖 buy/sell_threshold 并启用加权评分）。
+    """
+    # 解析系统参数
+    if system_name:
+        system_params = resolve_system_params(system_name)
+        if system_params:
+            params = system_params
+        else:
+            # 找不到该系统，回退到手动模式
+            params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
+            system_name = None
+    else:
+        params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
+
     try:
         backtest_tasks[task_id]['status'] = 'running'
         backtest_tasks[task_id]['progress'] = 0
@@ -471,17 +793,17 @@ def run_backtest_task(task_id, stock_list, days, buy_threshold, sell_threshold, 
                 skipped.append({'code': code, 'name': name, 'reason': '数据不足'})
                 continue
 
-            # 计算指标
-            df = calculate_indicators(df)
+            # 计算指标（用系统 params）
+            df = calculate_indicators(df, params=params)
 
-            # 检测信号
-            signals = detect_reversal_signals(df, buy_threshold, sell_threshold)
+            # 检测信号（用系统 params）
+            signals = detect_reversal_signals(df, params=params)
             if len(signals) == 0:
                 skipped.append({'code': code, 'name': name, 'reason': '无信号'})
                 continue
 
-            # 回测
-            result = backtest_stock(code, name, signals, buy_threshold, sell_threshold, position_config)
+            # 回测（用系统 params）
+            result = backtest_stock(code, name, signals, params=params, position_config=position_config)
             results.append(result)
 
             backtest_tasks[task_id]['progress'] = int((idx + 1) / total * 100)
@@ -498,7 +820,7 @@ def run_backtest_task(task_id, stock_list, days, buy_threshold, sell_threshold, 
 
         for r in results:
             for t in r['trades']:
-                if t['type'] == 'SELL':
+                if t['type'] in ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP'):
                     total_trades_cnt += 1
                     if t.get('profit', 0) > 0:
                         win_trades.append(t['profit_pct'])
@@ -535,8 +857,11 @@ def run_backtest_task(task_id, stock_list, days, buy_threshold, sell_threshold, 
                 'days': days,
                 'start_date': start_date,
                 'end_date': end_date,
-                'buy_threshold': buy_threshold,
-                'sell_threshold': sell_threshold
+                'buy_threshold': float(params['buy_threshold']),
+                'sell_threshold': float(params['sell_threshold']),
+                'system_name': system_name,
+                'all_params': {k: (float(v) if isinstance(v, (int, float)) else v)
+                               for k, v in params.items()},
             }
         }
 
@@ -614,6 +939,10 @@ def start_backtest():
     # 接收日期范围参数
     start_date = data.get('start_date', None)  # 格式: YYYY-MM-DD
     end_date = data.get('end_date', None)      # 格式: YYYY-MM-DD
+    # 接收优化方案名
+    system_name = data.get('system_name', None)
+    if system_name == '' or system_name == 'manual':
+        system_name = None
 
     if len(stocks) > 25:
         return jsonify({'error': '每次回测最多支持25只股票'}), 400
@@ -630,14 +959,58 @@ def start_backtest():
         'results': None
     }
 
-    # 启动后台线程（传递日期范围参数）
+    # 启动后台线程（传递日期范围 + system_name）
     thread = threading.Thread(
         target=run_backtest_task,
-        args=(task_id, stocks, days, buy_threshold, sell_threshold, position_config, start_date, end_date)
+        args=(task_id, stocks, days, buy_threshold, sell_threshold,
+              position_config, start_date, end_date, system_name)
     )
     thread.start()
 
     return jsonify({'task_id': task_id})
+
+
+@app.route('/api/optimization-systems', methods=['GET'])
+def get_optimization_systems():
+    """获取可用的优化方案列表（来自 stock_data/optimization_result.json）"""
+    cache = load_optimization_systems()
+    if not cache:
+        return jsonify({
+            'systems': [],
+            'warning': '未找到优化结果文件或文件格式错误',
+        })
+    systems = []
+    for name, sys in cache['by_name'].items():
+        systems.append({
+            'name': name,
+            'description': sys.get('description', ''),
+            'applicable_regimes': sys.get('applicable_regimes', []),
+            'regime': sys.get('regime'),
+            'fitness_scores': sys.get('fitness_scores', {}),
+            'confidence': sys.get('confidence'),
+            'median_return': sys.get('median_return'),
+            'win_rate_above_10pct': sys.get('win_rate_above_10pct'),
+            'median_sharpe': sys.get('median_sharpe'),
+            'median_max_drawdown': sys.get('median_max_drawdown'),
+            'median_holding_days': sys.get('median_holding_days'),
+            'num_trades': sys.get('num_trades'),
+            'sample_count': sys.get('sample_count'),
+            'params': sys.get('params', {}),
+        })
+    return jsonify({
+        'timestamp': cache.get('timestamp'),
+        'systems': systems,
+    })
+
+
+@app.route('/api/optimization-systems/<path:name>', methods=['GET'])
+def get_optimization_system(name):
+    """获取单个优化方案详情"""
+    cache = load_optimization_systems()
+    if not cache or name not in cache['by_name']:
+        return jsonify({'error': f'方案不存在: {name}'}), 404
+    sys = cache['by_name'][name]
+    return jsonify(sys)
 
 
 @app.route('/api/backtest/status/<task_id>', methods=['GET'])
@@ -679,6 +1052,17 @@ def get_stock_detail(code):
     end_date = request.args.get('end_date', None)
     buy_threshold = request.args.get('buy_threshold', 4, type=int)
     sell_threshold = request.args.get('sell_threshold', 4, type=int)
+    system_name = request.args.get('system_name', None)
+    if system_name in ('', 'manual', 'null'):
+        system_name = None
+
+    # 解析参数
+    if system_name:
+        params = resolve_system_params(system_name)
+    else:
+        params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
+    if params is None:
+        params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
 
     # 获取数据（支持日期范围）
     df = get_stock_data(code, days=days, start_date=start_date, end_date=end_date)
@@ -686,10 +1070,10 @@ def get_stock_detail(code):
         return jsonify({'error': '数据获取失败'}), 404
 
     # 计算指标
-    df = calculate_indicators(df)
+    df = calculate_indicators(df, params=params)
 
     # 检测信号
-    signals = detect_reversal_signals(df, buy_threshold, sell_threshold)
+    signals = detect_reversal_signals(df, params=params)
 
     # 准备K线数据
     kline_data = []
@@ -751,6 +1135,16 @@ def get_stock_logs(code):
     end_date = request.args.get('end_date', None)
     buy_threshold = request.args.get('buy_threshold', 4, type=int)
     sell_threshold = request.args.get('sell_threshold', 4, type=int)
+    system_name = request.args.get('system_name', None)
+    if system_name in ('', 'manual', 'null'):
+        system_name = None
+
+    if system_name:
+        params = resolve_system_params(system_name)
+    else:
+        params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
+    if params is None:
+        params = {**DEFAULT_PARAMS, 'buy_threshold': buy_threshold, 'sell_threshold': sell_threshold}
 
     # 获取数据（支持日期范围）
     df = get_stock_data(code, days=days, start_date=start_date, end_date=end_date)
@@ -758,13 +1152,13 @@ def get_stock_logs(code):
         return jsonify({'error': '数据获取失败'}), 404
 
     # 计算指标
-    df = calculate_indicators(df)
+    df = calculate_indicators(df, params=params)
 
     # 检测信号
-    signals = detect_reversal_signals(df, buy_threshold, sell_threshold)
+    signals = detect_reversal_signals(df, params=params)
 
     # 执行回测获取详细日志
-    result = backtest_stock(code, '', signals, buy_threshold, sell_threshold)
+    result = backtest_stock(code, '', signals, params=params)
 
     return jsonify({
         'code': code,

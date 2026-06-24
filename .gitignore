@@ -36,6 +36,7 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+temp/
 
 # Cache
 *.cache

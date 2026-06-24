@@ -458,6 +458,22 @@
         ::-webkit-scrollbar-thumb { background: rgba(79, 172, 254, 0.5); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(79, 172, 254, 0.7); }
         .empty-state { text-align: center; padding: 60px 20px; color: #666; }
+
+        /* 下拉框暗色样式 — 修复未选中时 option 文字不可见 */
+        #systemSelect, #poolSelector, select {
+            color-scheme: dark;
+            background-color: rgba(255, 255, 255, 0.05) !important;
+            color: #fff !important;
+        }
+        #systemSelect option, #poolSelector option, select option {
+            background-color: #1a1f2e !important;
+            color: #fff !important;
+        }
+        #systemSelect option:checked, #poolSelector option:checked, select option:checked {
+            background-color: #4facfe !important;
+            color: #fff !important;
+        }
+
         @media (max-width: 1000px) {
             .main-content { grid-template-columns: 1fr; }
             .summary-cards { grid-template-columns: repeat(2, 1fr); }
@@ -490,6 +506,14 @@
                             <button id="btn3Years" class="quick-date-btn" style="padding: 4px 12px; background: rgba(79, 172, 254, 0.2); border: 1px solid #4facfe; color: #4facfe; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">近3年</button>
                             <button id="btn5Years" class="quick-date-btn" style="padding: 4px 12px; background: rgba(79, 172, 254, 0.2); border: 1px solid #4facfe; color: #4facfe; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">近5年</button>
                         </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>优化方案</label>
+                        <select id="systemSelect" title="选择优化方案" style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: #fff; font-size: 0.9rem;">
+                            <option value="">加载中…</option>
+                        </select>
+                        <small id="systemInfoHint" style="color: #666; font-size: 0.8rem;">选择方案后阈值滑块将自动填入并锁定</small>
                     </div>
 
                     <div class="form-group">
@@ -783,6 +807,10 @@
         const resultsContainer = document.getElementById('resultsContainer');
         const emptyState = document.getElementById('emptyState');
         const paramsDisplay = document.getElementById('paramsDisplay');
+        const systemSelect = document.getElementById('systemSelect');
+        const systemInfoHint = document.getElementById('systemInfoHint');
+        let currentSystem = null;  // null = 手动模式
+        let optimizationSystems = [];  // 缓存 /api/optimization-systems 返回
         const summaryCards = document.getElementById('summaryCards');
         const stockResultsBody = document.getElementById('stockResultsBody');
         const chartModal = document.getElementById('chartModal');
@@ -934,7 +962,74 @@
             loadPositionConfig();  // 加载仓位配置
             setDateRange(1);       // 默认设置近1年日期范围
             loadStockPools();
+            loadOptimizationSystems();  // 加载优化方案
             bindEvents();
+        }
+
+        // ---- 优化方案 ----
+        async function loadOptimizationSystems() {
+            try {
+                const resp = await fetch('/api/optimization-systems');
+                const data = await resp.json();
+                optimizationSystems = data.systems || [];
+                if (optimizationSystems.length === 0) {
+                    systemSelect.innerHTML = '<option value="">未找到优化结果 (手动模式)</option>';
+                    systemInfoHint.textContent = data.warning || '运行优化后将自动出现在此处';
+                    return;
+                }
+                let html = '<option value="">手动模式 (使用滑块)</option>';
+                for (const s of optimizationSystems) {
+                    const ret = s.median_return != null ? `中位收益 ${(s.median_return).toFixed(1)}%` : '';
+                    const label = `${s.name} — ${ret}`;
+                    html += `<option value="${s.name}">${label}</option>`;
+                }
+                systemSelect.innerHTML = html;
+                systemInfoHint.textContent = '选择方案后阈值滑块将自动填入并锁定';
+            } catch (e) {
+                systemSelect.innerHTML = '<option value="">未找到优化结果 (手动模式)</option>';
+                systemInfoHint.textContent = '加载失败：' + e.message;
+            }
+        }
+
+        function applySystem(name) {
+            if (!name) {
+                // 手动模式：解锁滑块，恢复默认 4/4
+                currentSystem = null;
+                buyThreshold.disabled = false;
+                sellThreshold.disabled = false;
+                buyThreshold.value = 4;
+                sellThreshold.value = 4;
+                buyThresholdValue.textContent = '4分';
+                sellThresholdValue.textContent = '4分';
+                systemInfoHint.textContent = '手动模式：使用滑块调整阈值';
+                return;
+            }
+            const sys = optimizationSystems.find(s => s.name === name);
+            if (!sys || !sys.params) {
+                currentSystem = null;
+                return;
+            }
+            currentSystem = sys;
+            // 0-100 连续分映射到 2-8 滑块：slider = round(score / 12.5) 钳制到 [2,8]
+            const mapScore = (s) => {
+                const v = Math.round(s / 12.5);
+                return Math.max(2, Math.min(8, v));
+            };
+            const buyVal = mapScore(sys.params.score_buy_threshold);
+            const sellVal = mapScore(sys.params.score_sell_threshold);
+            buyThreshold.value = buyVal;
+            sellThreshold.value = sellVal;
+            buyThresholdValue.textContent = `${buyVal}分 (weighted)`;
+            sellThresholdValue.textContent = `${sellVal}分 (weighted)`;
+            buyThreshold.disabled = true;
+            sellThreshold.disabled = true;
+            const stop = (sys.params.stop_loss_pct * 100).toFixed(1);
+            const tp = (sys.params.take_profit_pct * 100).toFixed(1);
+            const ts = (sys.params.trailing_stop_pct * 100).toFixed(1);
+            const pos = (sys.params.position_size_pct * 100).toFixed(0);
+            const hold = sys.params.min_holding_days;
+            systemInfoHint.innerHTML =
+                `加权评分模式 · 止损 ${stop}% · 止盈 ${tp}% · 移动止损 ${ts}% · 仓位 ${pos}% · 最小持仓 ${hold}天`;
         }
 
         // 绑定事件
@@ -951,6 +1046,11 @@
 
             sellThreshold.addEventListener('input', () => {
                 sellThresholdValue.textContent = sellThreshold.value + '分';
+            });
+
+            // 优化方案变化 → 自动填入并锁定滑块
+            systemSelect.addEventListener('change', () => {
+                applySystem(systemSelect.value);
             });
 
             startBtn.addEventListener('click', startBacktest);
@@ -1171,6 +1271,8 @@
                 end_date: endDate.value,
                 buy_threshold: parseInt(buyThreshold.value),
                 sell_threshold: parseInt(sellThreshold.value),
+                // 优化方案名（空字符串 = 手动模式）
+                system_name: currentSystem ? currentSystem.name : '',
                 // 添加仓位配置
                 position_config: {
                     buy_levels: positionConfig.buyLevels,
@@ -1255,8 +1357,9 @@
 
                 paramsDisplay.innerHTML = `
                     <span>回测时间: ${data.params.start_date || data.params.days + '天'} ~ ${data.params.end_date || '至今'}</span>
-                    <span>买入阈值: ${data.params.buy_threshold}分</span>
-                    <span>卖出阈值: ${data.params.sell_threshold}分</span>
+                    <span>方案: ${data.params.system_name || '手动模式'}</span>
+                    <span>买入阈值: ${data.params.buy_threshold}</span>
+                    <span>卖出阈值: ${data.params.sell_threshold}</span>
                     <span>分析股票: ${data.summary.analyzed}/${data.summary.total_stocks}</span>
                 `;
 
@@ -1468,9 +1571,10 @@
                 buy_threshold: 4,
                 sell_threshold: 4
             };
+            const systemName = encodeURIComponent(params.system_name || '');
 
             try {
-                const response = await fetch(`/api/stock-logs/${code}?days=${params.days}&start_date=${params.start_date || ''}&end_date=${params.end_date || ''}&buy_threshold=${params.buy_threshold}&sell_threshold=${params.sell_threshold}`);
+                const response = await fetch(`/api/stock-logs/${code}?days=${params.days}&start_date=${params.start_date || ''}&end_date=${params.end_date || ''}&buy_threshold=${params.buy_threshold}&sell_threshold=${params.sell_threshold}&system_name=${systemName}`);
                 const data = await response.json();
 
                 if (data.error) {
@@ -1564,9 +1668,10 @@
                 buy_threshold: 4,
                 sell_threshold: 4
             };
+            const systemName = encodeURIComponent(params.system_name || '');
 
             try {
-                const response = await fetch(`/api/stock-detail/${code}?days=${params.days}&start_date=${params.start_date || ''}&end_date=${params.end_date || ''}&buy_threshold=${params.buy_threshold}&sell_threshold=${params.sell_threshold}`);
+                const response = await fetch(`/api/stock-detail/${code}?days=${params.days}&start_date=${params.start_date || ''}&end_date=${params.end_date || ''}&buy_threshold=${params.buy_threshold}&sell_threshold=${params.sell_threshold}&system_name=${systemName}`);
                 const data = await response.json();
 
                 if (data.error) {
