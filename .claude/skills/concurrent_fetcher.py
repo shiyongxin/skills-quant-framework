@@ -191,6 +191,11 @@ class ConcurrentDataFetcher:
                     self.cache_manager.cache_stock_data(symbol, data, days=days)
 
                 return data
+
+            # 上游已吞异常返回空DF —— 空数据同样是失败 (审计 P0-2/R12):
+            # 旧逻辑直接 return None 导致 failed 计数恒 0
+            self._stats['failed'] += 1
+            return None
         except Exception as e:
             self._stats['failed'] += 1
             print(f"[WARN] 获取 {symbol} 失败: {e}")

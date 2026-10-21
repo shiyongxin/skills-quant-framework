@@ -109,8 +109,12 @@ class HistoricalDataManager:
         new_df = self._fetch_from_api(symbol, start_date, end_date)
 
         if new_df is None or len(new_df) == 0:
-            # API无新数据，返回已有数据
-            return existing_df if existing_df is not None else pd.DataFrame()
+            # API失败或无新数据: 返回已有数据, 但明确提示"这是旧数据"
+            if existing_df is not None:
+                last_date = pd.to_datetime(existing_df['日期'].iloc[-1])
+                print(f"[WARN] {symbol} API无新数据/失败, 返回本地旧数据(最后日期 {last_date.date()})")
+                return existing_df
+            return pd.DataFrame()
 
         # 合并数据
         if existing_df is not None and len(existing_df) > 0:
@@ -174,7 +178,8 @@ class HistoricalDataManager:
                 return df
 
         except Exception as e:
-            pass  # 静默失败，批量获取时会有很多失败
+            # 不再静默: 记录错误, 调用方 (fetch_and_cache) 会区分"API失败"与"无新数据"
+            print(f"[WARN] {symbol} API获取失败: {str(e)[:120]}")
 
         return None
 

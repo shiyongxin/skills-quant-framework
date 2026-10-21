@@ -610,15 +610,29 @@ class OptimizationEngine:
         print(f"[INFO] 加载 {len(symbols)} 只股票数据...")
 
         loaded = 0
+        failed_symbols = []
         for sym in symbols:
             data = self.data_manager.load(sym)
-            if len(data) >= 252:  # 至少1年数据
+            if data is not None and len(data) >= 252:  # 至少1年数据
                 self.stock_data[sym] = data
                 loaded += 1
 
                 # 为每只股票分配体制标签
                 if self._index_regime_labels is not None:
                     self._assign_regime_labels(sym, data)
+            else:
+                failed_symbols.append(sym)
+
+        if failed_symbols and loaded > 0:
+            print(f"[WARN] {len(failed_symbols)} 只股票数据不足252天, 已跳过: "
+                  f"{failed_symbols[:10]}{'...' if len(failed_symbols) > 10 else ''}")
+
+        if loaded == 0:
+            # 旧逻辑: 即使一只都没加载成功也打印 "[OK] 成功加载 0 只股票" — 假成功
+            raise RuntimeError(
+                f"加载股票数据失败: {len(failed_symbols)}/{len(symbols)} 只不足252天或数据缺失. "
+                f"请先运行 historical_data_manager.py batch 获取数据"
+            )
 
         print(f"[OK] 成功加载 {loaded} 只股票")
 

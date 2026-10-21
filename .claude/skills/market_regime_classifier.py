@@ -147,7 +147,7 @@ class MarketRegimeClassifier:
 
     def classify(self, method='adaptive', crash_threshold=-10.0,
                  recovery_threshold=8.0, bull_trend_pct=5.0,
-                 bear_trend_pct=-5.0) -> pd.Series:
+                 bear_trend_pct=-5.0, min_segment_days=10) -> pd.Series:
         """
         对每个交易日标注大盘态势
 
@@ -164,6 +164,9 @@ class MarketRegimeClassifier:
             牛市趋势阈值(%)，20日涨幅超过此值且MA60>MA120判定为牛市
         bear_trend_pct : float
             熊市趋势阈值(%)，20日跌幅超过此值且MA60<MA120判定为熊市
+        min_segment_days : int
+            迟滞参数: 短于此天数的BULL/BEAR/SIDEWAYS段会被合并到相邻段,
+            抑制噪声切换 (CRASH/RECOVERY 段受保护不合并)
 
         Returns:
         --------
@@ -193,7 +196,10 @@ class MarketRegimeClassifier:
 
         # 自适应阈值: 根据历史波动率中位数调整
         if method == 'adaptive':
-            vol_median = vol_20d.rolling(252).median()
+            # 前252日 rolling median 为 NaN — 用 expanding median 补齐,
+            # 否则首年阈值全 NaN、规则全部失效、与后续不可比
+            vol_median = (vol_20d.rolling(252).median()
+                          .combine_first(vol_20d.expanding().median()))
             vol_ratio = vol_20d / vol_median.clip(lower=1)
             # 波动率高时放宽阈值
             crash_threshold = crash_threshold * vol_ratio
@@ -217,24 +223,69 @@ class MarketRegimeClassifier:
                 if ret_20d.iloc[i] > recovery_threshold and regimes.iloc[i] != Regime.CRASH.value:
                     regimes.iloc[i] = Regime.RECOVERY.value
 
-        # Step 3: 牛市判定 (MA60>MA120 且 趋势向上)
+        # Step 3: 牛市判定 (MA60>MA120 且 20日涨幅 > bull_trend_pct)
         is_bull = (ma60 > ma120) & (ret_20d > bull_trend_pct) & (regimes == Regime.SIDEWAYS.value)
         regimes[is_bull] = Regime.BULL.value
 
-        # Step 4: 熊市判定 (MA60<MA120 且 趋势向下)
+        # Step 4: 熊市判定 (MA60<MA120 且 20日跌幅 > bear_trend_pct)
         is_bear = (ma60 < ma120) & (ret_20d < bear_trend_pct) & (regimes == Regime.SIDEWAYS.value)
         regimes[is_bear] = Regime.BEAR.value
 
-        # Step 5: 补充规则 - MA60>MA120 但涨幅不大也算偏牛市
-        is_mild_bull = (ma60 > ma120) & (ret_20d > 0) & (regimes == Regime.SIDEWAYS.value)
-        regimes[is_mild_bull] = Regime.BULL.value
+        # (已删除) 原 Step 5/6 "温和牛/熊" 规则: 只要 MA 交叉方向 + 涨跌符号
+        # 就贴 BULL/BEAR 标签, 使 bull_trend_pct/bear_trend_pct 完全失效,
+        # 且 SIDEWAYS 几乎不可达、标签日间噪声极大. 现未达阈值的留在 SIDEWAYS.
 
-        # Step 6: 补充规则 - MA60<MA120 但跌幅不大也算偏熊市
-        is_mild_bear = (ma60 < ma120) & (ret_20d < 0) & (regimes == Regime.SIDEWAYS.value)
-        regimes[is_mild_bear] = Regime.BEAR.value
+        # 迟滞: 合并过短的普通体制段
+        regimes = self._apply_hysteresis(regimes, min_segment_days)
 
         self.regime_series = regimes
         return regimes
+
+    @staticmethod
+    def _apply_hysteresis(regimes: pd.Series, min_days: int) -> pd.Series:
+        """
+        合并长度 < min_days 的 BULL/BEAR/SIDEWAYS 段到相邻段.
+
+        CRASH/RECOVERY 段受保护: 既不被合并, 也不吸收普通段.
+        """
+        if min_days <= 1 or len(regimes) == 0:
+            return regimes
+
+        protected = {Regime.CRASH.value, Regime.RECOVERY.value}
+        values = regimes.tolist()
+        n = len(values)
+
+        # 切分为连续段 [(start, end_exclusive, label), ...]
+        runs = []
+        start = 0
+        for i in range(1, n + 1):
+            if i == n or values[i] != values[start]:
+                runs.append([start, i, values[start]])
+                start = i
+
+        changed = True
+        while changed:
+            changed = False
+            for j, (s, e, lab) in enumerate(runs):
+                if (e - s) >= min_days or lab in protected:
+                    continue
+                # 优先并入前一个普通段; 否则并入后一个普通段
+                if j > 0 and runs[j - 1][2] not in protected:
+                    runs[j - 1][1] = e
+                    del runs[j]
+                    changed = True
+                    break
+                if j + 1 < len(runs) and runs[j + 1][2] not in protected:
+                    runs[j + 1][0] = s
+                    del runs[j]
+                    changed = True
+                    break
+                # 两侧都是保护段(或无邻段): 保持原样
+
+        out_values = [''] * n
+        for s, e, lab in runs:
+            out_values[s:e] = [lab] * (e - s)
+        return pd.Series(out_values, index=regimes.index)
 
     def get_regime_windows(self, regime_series=None) -> dict[str, list[RegimeWindow]]:
         """

@@ -26,6 +26,8 @@ import os
 import time
 from pathlib import Path
 
+from core.fetch_result import FetchResult
+
 
 class StockDataFetcher:
     """股票数据获取器 - 使用可靠数据源"""
@@ -47,6 +49,9 @@ class StockDataFetcher:
         (self.data_dir / "market").mkdir(exist_ok=True)
 
         print(f"[OK] 数据将保存到: {self.data_dir.absolute()}")
+
+        # 最近一次 get_quote_data 的结构化结果 (审计项 11 FetchResult)
+        self.last_fetch_result = None
 
     def _format_symbol(self, symbol):
         """
@@ -164,14 +169,34 @@ class StockDataFetcher:
                 df.to_csv(filepath, index=False, encoding='utf-8-sig')
 
                 print(f"[OK] 获取到 {len(df)} 条记录")
+                self.last_fetch_result = FetchResult.success(df, source=f"stock_zh_a_daily:{symbol}")
                 return df
             else:
                 print(f"[WARN] {symbol} 没有数据")
+                self.last_fetch_result = FetchResult.failure(f"{symbol} 无数据", source=f"stock_zh_a_daily:{symbol}")
                 return pd.DataFrame()
 
         except Exception as e:
             print(f"[ERROR] 获取 {symbol} 数据失败: {str(e)[:100]}")
+            self.last_fetch_result = FetchResult.failure(str(e)[:200], source=f"stock_zh_a_daily:{symbol}")
             return pd.DataFrame()
+
+    def get_quote_result(self, symbol, start_date=None, end_date=None, days=252):
+        """
+        获取历史行情并返回结构化 FetchResult (审计项 11)
+
+        与 get_quote_data 的区别: 失败不再只体现为空 DataFrame，
+        调用方应检查 result.ok / result.error。
+
+        Returns:
+            core.fetch_result.FetchResult
+        """
+        df = self.get_quote_data(symbol, start_date=start_date, end_date=end_date, days=days)
+        if self.last_fetch_result is not None:
+            return self.last_fetch_result
+        if df is not None and len(df) > 0:
+            return FetchResult.success(df, source=f"stock_zh_a_daily:{symbol}")
+        return FetchResult.failure(f"{symbol} 获取失败(未知原因)", source=f"stock_zh_a_daily:{symbol}")
 
     def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust="qfq"):
         """
