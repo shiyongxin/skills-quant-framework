@@ -171,9 +171,9 @@ class ConcurrentDataFetcher:
         """
         use_cache = use_cache if use_cache is not None else self.use_cache
 
-        # 尝试从缓存获取
+        # 尝试从缓存获取（key 含 days 维度, 消除跨周期串数据）
         if use_cache and self.cache_manager:
-            cached_data = self.cache_manager.get_stock_data(symbol)
+            cached_data = self.cache_manager.get_stock_data(symbol, days=days)
             if cached_data is not None:
                 self._stats['cache_hits'] += 1
                 return cached_data
@@ -188,7 +188,7 @@ class ConcurrentDataFetcher:
 
                 # 存入缓存
                 if use_cache and self.cache_manager:
-                    self.cache_manager.cache_stock_data(symbol, data)
+                    self.cache_manager.cache_stock_data(symbol, data, days=days)
 
                 return data
         except Exception as e:

@@ -265,8 +265,8 @@ class TrendIndicators:
         df['Senkou_B'] = ((high.rolling(window=senkou).max() +
                           low.rolling(window=senkou).min()) / 2).shift(kijun)
 
-        # 滞后跨度 (Chikou Span)
-        df['Chikou'] = close.shift(-kijun)
+        # 滞后跨度 (Chikou Span): 值即当根收盘; 图上回移 kijun 是展示层职责
+        df['Chikou'] = close
 
         return df
 

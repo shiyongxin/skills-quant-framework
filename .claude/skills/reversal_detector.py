@@ -105,13 +105,10 @@ class ReversalDetector:
         df['MA20'] = close.rolling(20).mean()
         df['MA60'] = close.rolling(60).mean()
 
-        # RSI (多个周期)
+        # RSI (多个周期, core 权威口径)
+        from core.indicators import rsi as _core_rsi
         for period in [6, 14, 24]:
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-            rs = gain / loss
-            df[f'RSI{period}'] = 100 - (100 / (1 + rs))
+            df[f'RSI{period}'] = _core_rsi(close, period)
 
         # KDJ
         low_n = low.rolling(9).min()

@@ -18,6 +18,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Callable, Optional, Tuple, Union
+
+from core import metrics as _core_metrics
 from dataclasses import dataclass
 from enum import Enum
 import warnings
@@ -407,10 +409,10 @@ class BacktestEngine:
         # 计算基准收益
         benchmark_return = (data['收盘'].iloc[-1] / data['收盘'].iloc[0] - 1) * 100
 
-        # 计算回撤
+        # 计算回撤（core 统一口径: 正值百分比）
         equity_df['cummax'] = equity_df['value'].cummax()
         equity_df['drawdown'] = (equity_df['value'] / equity_df['cummax'] - 1) * 100
-        max_drawdown = equity_df['drawdown'].min()
+        max_drawdown = _core_metrics.max_drawdown_pct(equity_df['value'])
 
         # 计算每日收益率
         equity_df['daily_return'] = equity_df['value'].pct_change() * 100
@@ -419,15 +421,15 @@ class BacktestEngine:
         days = len(equity_df)
         annualized_return = (1 + total_return / 100) ** (252 / days) - 1
 
-        # 夏普比率 (假设无风险利率3%)
-        mean_return = equity_df['daily_return'].mean()
-        std_return = equity_df['daily_return'].std()
-        sharpe_ratio = (mean_return * 252 - 3) / (std_return * np.sqrt(252)) if std_return > 0 else 0
+        # 夏普比率（core 统一口径: 日频收益, rf=3%, ddof=1）
+        sharpe_ratio = _core_metrics.sharpe_ratio(
+            equity_df['daily_return'] / 100, periods_per_year=252, rf=0.03)
 
         # Sortino比率 (只考虑下行风险)
+        mean_return_pct = equity_df['daily_return'].mean()
         negative_returns = equity_df['daily_return'][equity_df['daily_return'] < 0]
         downside_std = negative_returns.std() if len(negative_returns) > 0 else 0
-        sortino_ratio = (mean_return * 252 - 3) / (downside_std * np.sqrt(252)) if downside_std > 0 else 0
+        sortino_ratio = (mean_return_pct * 252 - 3) / (downside_std * np.sqrt(252)) if downside_std > 0 else 0
 
         # Calmar比率 (年化收益 / 最大回撤)
         calmar_ratio = (annualized_return * 100) / abs(max_drawdown) if max_drawdown != 0 else 0
@@ -445,7 +447,8 @@ class BacktestEngine:
             win_rate = len(win_trades) / len(profits) * 100 if profits else 0
             avg_profit = np.mean(win_trades) if win_trades else 0
             avg_loss = np.mean(lose_trades) if lose_trades else 0
-            profit_factor = abs(sum(win_trades) / sum(lose_trades)) if lose_trades and sum(lose_trades) != 0 else 0
+            # core 求和式口径（统一 A/B/优化器）
+            profit_factor = _core_metrics.profit_factor(profits)
 
             # 最大盈利/亏损
             max_profit = max(win_trades) if win_trades else 0

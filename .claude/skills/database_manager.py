@@ -314,12 +314,14 @@ class DatabaseManager:
             print(f"[ERROR] 保存股票信息失败: {e}")
             return False
 
-    def batch_save_stock_quotes(self, data: pd.DataFrame) -> int:
+    def batch_save_stock_quotes(self, data: pd.DataFrame, symbol: str = None) -> int:
         """
         批量保存行情数据
 
         Args:
             data: DataFrame with columns: 日期, 开盘, 最高, 最低, 收盘, 成交量
+            symbol: 股票代码（必传; 兼容旧行为: 缺省时尝试从 data 的
+                symbol 列提取, 提取不到返回 0 而非静默丢弃）
 
         Returns:
             保存的记录数
@@ -328,9 +330,10 @@ class DatabaseManager:
             return 0
 
         try:
-            # 提取symbol（假设从数据中）
-            symbol = data.get('symbol', [None])[0] if 'symbol' in data.columns else None
-            if symbol is None:
+            if symbol is None and 'symbol' in data.columns:
+                symbol = data['symbol'].iloc[0]
+            if not symbol:
+                print("[ERROR] batch_save_stock_quotes: 缺少 symbol 参数")
                 return 0
 
             saved_count = 0

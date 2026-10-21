@@ -375,10 +375,12 @@ class TestGoldenMetrics:
     def test_engine_b_vectorized_golden(self):
         m = VectorizedBacktester().backtest(self._big(), {})
         assert m.total_return == pytest.approx(8.24347173537372, rel=1e-6)
-        assert m.sharpe_ratio == pytest.approx(1.529450875084276, rel=1e-6)
-        assert m.max_drawdown == pytest.approx(6.539773759999894, rel=1e-6)
+        # 口径统一后(core): 日频盯市Sharpe(ddof=1) + 日频MDD + 求和式profit_factor
+        assert m.sharpe_ratio == pytest.approx(0.7067662022777503, rel=1e-6)
+        assert m.max_drawdown == pytest.approx(6.516848434608427, rel=1e-6)
         assert m.num_trades == 2
         assert m.win_rate == pytest.approx(50.0)
+        assert m.profit_factor == pytest.approx(2.4186901535872116, rel=1e-6)
 
     def test_engine_a_framework_golden(self):
         big = self._big()
@@ -403,6 +405,8 @@ class TestGoldenMetrics:
                                                        symbol='600519')
         assert res['total_return'] == pytest.approx(20.02675523695121, rel=1e-6)
         assert res['sharpe_ratio'] == pytest.approx(0.8098904708567016, rel=1e-6)
-        assert res['max_drawdown'] == pytest.approx(-14.194905174592487, rel=1e-6)
+        # core 统一口径: MDD 为正值百分比
+        assert res['max_drawdown'] == pytest.approx(14.194905174592487, rel=1e-6)
         assert res['trade_count'] == 9
         assert len(res['trades']) == 19
+        assert res['profit_factor'] == pytest.approx(1.2589570136340924, rel=1e-6)

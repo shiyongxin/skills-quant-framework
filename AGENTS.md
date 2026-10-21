@@ -6,7 +6,7 @@ Chinese A-share quantitative analysis framework ("Skills 股票量化分析框�
 
 ## Two parallel systems (do not confuse them)
 
-1. **`.claude/skills/`** — main analysis chain (38 modules). Entry: `quant_workflow.py` (facade), `web_app.py` (Streamlit), `signal_generator.py`, `technical_analyzer.py`.
+1. **`.claude/skills/`** — main analysis chain (38+ modules + `core/`). Entry: `quant_workflow.py` (facade), `web_app.py` (Streamlit), `signal_generator.py`, `technical_analyzer.py`.
 2. **`optimization_package/optimization_package/`** — standalone GA optimization pipeline (17 modules, Parquet-based). Has its own `run_optimize.py`, `fetch_data.py`, `pack.py`. Shares ~8 copied files with `.claude/skills/` that have **diverged** (e.g. different realtime-quote impl, signal thresholds). Edit one → check the other.
 
 `optimization_package/` is **gitignored**. Do not commit it.
@@ -15,7 +15,12 @@ Chinese A-share quantitative analysis framework ("Skills 股票量化分析框�
 
 Modules import each other by **bare module name** (`from stock_data_fetcher import StockDataFetcher`), relying on `sys.path.append('.')` or `sys.path.append('.claude/skills')` hacks. **Always run scripts from the repo root.** Running from any other directory breaks all intra-project imports.
 
-`pytest.ini` has `pythonpath = .` but does **not** include `.claude/skills/` — pytest cannot import skill modules as-is.
+`pytest.ini` has `pythonpath = . .claude/skills`, so pytest imports skill modules directly.
+
+## Single source of truth (`core/`, audit roadmap items 8/9)
+
+- `core/indicators.py` — authoritative `rsi()` (Cutler SMA; 0-div: no-loss→100, no-movement→50). All 5 former RSI implementations (`technical_analyzer`, `position_analyzer`, `daily_signal_generator`, `reversal_detector`, `vectorized_backtest`) call it. **Do not write a new local RSI.**
+- `core/metrics.py` — `profit_factor` (sum-of-pnls formula), `max_drawdown_pct` (**positive** magnitude), `sharpe_ratio` (decimal returns, rf=0.03, ddof=1). Engines A (`backtest_framework`), B (`vectorized_backtest`) and `optimization_engine` all route through it. B's MDD/Sharpe use a daily mark-to-market equity curve (trade spans), not the per-trade compounding curve.
 
 ## Running things
 
@@ -23,8 +28,8 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 # Web app (Streamlit, port 8501)
 python run_web_app.py
 
-# Typical script usage — must be from repo root
-python -c "import sys; sys.path.insert(0, '.claude/skills'); from stock_data_fetcher import StockDataFetcher; ..."
+# Test suite (offline, from repo root)
+python3 -m pytest tests/ -q
 ```
 
 No lint/typecheck/CI config exists. No pre-commit.
@@ -32,32 +37,28 @@ No lint/typecheck/CI config exists. No pre-commit.
 ## Dependencies
 
 - Core: `pandas numpy akshare matplotlib pyarrow`
-- Optional: `streamlit redis psycopg2-binary SQLAlchemy scikit-learn scipy` (see `web_requirements.txt`)
-- Several modules use `_AVAILABLE` / `MODULES_AVAILABLE` guards for optional deps, but **the guards are buggy** — multiple imports bundled in one try block means a missing optional dep can cascade into `NameError` for unrelated symbols (e.g. `concurrent_fetcher` → `NameError: CacheManager`). See analysis docs.
+- Optional: `streamlit redis psycopg2-binary SQLAlchemy scikit-learn scipy flask` (see `web_requirements.txt`)
+- Optional-dep guards (`_AVAILABLE` / `MODULES_AVAILABLE`): `concurrent_fetcher` now uses **separate try blocks** per import (fixed); keep that pattern for new guards. `database_manager` still requires sqlalchemy (guarded, import-safe without it).
 
 ## Testing
 
-- `pytest.ini` points to `testpaths = tests` — **the `tests/` directory does not exist**. `pytest` discovers nothing.
-- Root-level `test_*.py` files are ad-hoc manual scripts, not a real suite. Only `test_portfolio_manager.py` has genuine `def test_*` functions with asserts.
-- `test_signal_generator.py`, `test_tool.py` hit the network via akshare — not offline-safe.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **93 offline tests** (no network): honesty suite (engines A/B/D/E + web routes), core metric/RSI unification, ML time-series split, stage1/stage2 fix regressions, execution model.
+- Golden-metric snapshots live in `tests/test_backtest_honesty.py::TestGoldenMetrics` (seed=3, n=300). If they drift, suspect a backtest-logic change first; update snapshots only with justification.
+- Root-level `test_*.py` files are legacy ad-hoc scripts (network-hitting); not part of the suite.
 
-## Critical known bugs (verified in source, see `skills-quant-framework-analysis-extracted/` for full audit)
+## Audit fix status (vs `skills-quant-framework-analysis-extracted/analysis/`, baseline `14b2f59`)
 
-- `pattern_recognition.py:65` — `high = row['最低']` (self-commented as wrong). Entire pattern recognition layer silently returns empty.
-- `technical_analyzer.py:242` — matches `'latest' in col` but `scan_all_patterns` produces `Pattern_*` columns. K-line pattern list is always empty.
-- `strategy_optimizer.py:280-284` — passes `PositionConfig(max_positions=..., position_size_pct=...)`; those fields don't exist (real: `sizing_method/sizing_value/max_position_pct`). Also calls `engine.run_backtest()` but the method is `run()`. All 5 strategy grids are non-executable.
-- `signal_generator.py` — 8 `fillna()` calls are dead code (target values have no NaN). Also breaks on pandas ≥ 3 (`TypeError: Invalid value '0.5' for dtype 'int64'`).
-- `database_manager.py:667` — operator precedence bug: `(current_price or avg_cost - avg_cost) * shares`.
-- All 4 backtest engines use same-bar signal + same-bar fill (look-ahead bias). No stamp duty, transfer fee, limit-up/down, or suspension constraints anywhere.
-- Multiple RSI implementations with divergent zero-division handling (`technical_analyzer.py:104` uses `fill_value=100`; `vectorized_backtest.py:162` uses `replace(0, np.nan)`). Numbers are **not comparable across modules**.
+Fixed (commits `34e6a41`→`HEAD`): pattern-recognition layer, Flask duplicate route, optional-dep guards, `strategy_optimizer` executability, `signal_generator` pandas≥3 + tier signals, 4-engine t+1 fills + costs + limit-up/down (`execution_model.py`), ml_predictor time-series split, `database_manager:667` precedence, RSI/profit-factor/MDD unification (`core/`), walk-forward IS/OOS (`param_space` arg), Chikou lookahead, MACD true-cross, cache key `days` dimension, `batch_save_stock_quotes` symbol param.
+
+Still open (see audit): suspension modeling, volume/amount unit unification, `optimization_config.py` w_* dead params, island-module decisions, `risk_management` wiring into order path, 3-way stock-selection unification, `SKILL.md` false method claims (`plot_kdj` etc.), hardcoded `持仓.csv` paths in `web_backtest.py`, ATR 4-way divergence, `technical_analyzer` signals lack shift(1) protection (advisory-only, documented).
 
 ## `.gitignore` gotchas
 
-- `*.csv` is ignored (no exceptions for data files). `stock_list.csv` exists locally at `.claude/skills/stock_list.csv` but is **not tracked by git**. A fresh clone will not have it — code that reads it will silently get an empty stock list.
-- `*.txt` is ignored except `requirements.txt` and `web_requirements.txt`.
-- `tests/`, `test_*.py` are gitignored per the analysis (though root-level test scripts exist untracked).
+- `*.csv` ignored **except** `!.claude/skills/stock_list.csv` (tracked, 5523 rows).
+- `tests/` and `test_*.py` have negation patterns (`!tests/`, `!tests/test_*.py`) so the real suite is tracked. Root-level legacy `test_*.py` remain ignored.
+- `*.txt` ignored except `requirements.txt` and `web_requirements.txt`.
 
 ## Architecture docs
 
-- `skills-quant-framework-analysis-extracted/analysis/` — external deep audit (7 Chinese MD reports). References a **larger upstream snapshot** (`14b2f59`) that includes files not present locally (`web_backtest.py`, `historical_backtest_validator.py`, `templates/`, `CLAUDE.md`). Treat audit claims about those files as not applicable to this repo state. Claims about files that *do* exist locally are verified accurate.
+- `skills-quant-framework-analysis-extracted/analysis/` — external deep audit (7 Chinese MD reports) against upstream `14b2f59`. Claims about files present locally are accurate as of that baseline; many have since been fixed — see "Audit fix status" above.
 - Root has 34+ Chinese MD docs (dev reports, API refs, user manuals). `README.md` is the entry point.

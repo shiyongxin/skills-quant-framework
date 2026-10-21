@@ -21,6 +21,7 @@ import sys
 from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
+from core.indicators import rsi as _core_rsi
 
 
 # ==================== 数据结构 ====================
@@ -109,13 +110,9 @@ def compute_indicators(data: pd.DataFrame, params: dict) -> pd.DataFrame:
     df['MACD_Signal'] = df['MACD'].ewm(span=macd_signal_p, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # RSI
+    # RSI（core 权威口径，消灭 replace(NaN) 分歧）
     rsi_period = int(params.get('rsi_period', 14))
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0).rolling(rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = _core_rsi(close, rsi_period)
 
     # KDJ
     kdj_n = int(params.get('kdj_n', 9))

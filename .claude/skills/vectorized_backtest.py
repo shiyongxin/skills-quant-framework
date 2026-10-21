@@ -10,11 +10,15 @@
 用途: 遗传算法优化中的大规模回测评估
 """
 
+import itertools
+
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 
 from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok, limit_pct_for
+from core.indicators import rsi as _core_rsi
+from core import metrics as _core_metrics
 
 
 @dataclass
@@ -157,13 +161,9 @@ class VectorizedBacktester:
         df['macd_signal'] = df['macd'].ewm(span=macd_signal_period, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
 
-        # ---- RSI ----
+        # ---- RSI（core 权威口径）----
         rsi_period = int(params.get('rsi_period', 14))
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0).rolling(rsi_period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df['rsi'] = 100 - (100 / (1 + rs))
+        df['rsi'] = _core_rsi(close, rsi_period)
 
         # ---- KDJ ----
         kdj_n = int(params.get('kdj_n', 9))
@@ -358,6 +358,7 @@ class VectorizedBacktester:
         trades_pnl = []
         trades_holding = []
         trades_reason = []
+        trade_spans = []
         trade_details = [] if return_details else None
 
         for idx in range(len(buy_indices)):
@@ -475,6 +476,7 @@ class VectorizedBacktester:
             trades_pnl.append(pnl_pct)
             trades_holding.append(holding_days)
             trades_reason.append(exit_reason)
+            trade_spans.append((int(entry_bar), int(exit_offset)))
 
             if return_details:
                 trade_details.append(TradeDetail(
@@ -499,12 +501,10 @@ class VectorizedBacktester:
         losses = pnl_arr[pnl_arr <= 0]
         win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
 
-        # 盈亏比
-        avg_win = np.mean(wins) if len(wins) > 0 else 0
-        avg_loss = abs(np.mean(losses)) if len(losses) > 0 else 1
-        profit_factor = avg_win / avg_loss if avg_loss > 0 else 0
+        # 盈亏比（core 求和式口径，统一 A/B/优化器）
+        profit_factor = _core_metrics.profit_factor(pnl_arr)
 
-        # 总收益(复利) - 向量化
+        # 总收益(复利, 逐笔含费口径) - 向量化
         cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
         total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
 
@@ -516,22 +516,27 @@ class VectorizedBacktester:
         else:
             annualized_return = 0
 
-        # 最大回撤 - 向量化
-        equity = np.concatenate([[1.0], cumulative])
-        peak = np.maximum.accumulate(equity)
-        drawdown = (equity - peak) / peak * 100
-        max_drawdown = abs(drawdown.min()) if len(drawdown) > 0 else 0
+        # 日频盯市净值（审计项9: 消除逐笔复利曲线对回撤的低估）
+        # 在仓区间按 日收益×仓位 累乘; 入场日按 开盘→收盘(不含隔夜跳空),
+        # 出场日仅保留隔夜跳空(按开盘成交)。近似口径, 仅用于 MDD/Sharpe。
+        daily_ret = np.zeros(n)
+        daily_ret[1:] = close[1:] / close[:-1] - 1
+        for e, x in trade_spans:
+            if e < n and open_arr[e] > 0:
+                daily_ret[e] = close[e] / open_arr[e] - 1
+            if x < n:
+                daily_ret[x] = (open_arr[x] / close[x - 1] - 1) if x > 0 else 0.0
+        held = np.zeros(n, dtype=bool)
+        for e, x in trade_spans:
+            held[e:x + 1] = True
+        mtm = np.concatenate(
+            [[1.0], np.cumprod(1 + daily_ret * position_size_pct * held)])
 
-        # 夏普比率 - 向量化 (持有天数为自然日时按365天年化, 否则252交易日)
-        if len(pnl_arr) > 1:
-            hold_unit = 365 if dates is not None else 252
-            mean_hold = np.mean(holding_arr)
-            daily_returns = pnl_arr / 100
-            avg_ret = np.mean(daily_returns) * hold_unit / mean_hold if mean_hold > 0 else 0
-            std_ret = np.std(daily_returns) * np.sqrt(hold_unit / mean_hold) if mean_hold > 0 else 1
-            sharpe = (avg_ret - 0.03) / std_ret if std_ret > 0 else 0
-        else:
-            sharpe = 0
+        max_drawdown = _core_metrics.max_drawdown_pct(mtm)
+
+        # 夏普(core口径: 日频盯市收益, 年化252, rf=3%, ddof=1)
+        sharpe = _core_metrics.sharpe_ratio(daily_ret * held,
+                                            periods_per_year=252, rf=0.03)
 
         # 最大连续亏损 - 向量化
         is_loss = pnl_arr <= 0
@@ -560,9 +565,14 @@ class VectorizedBacktester:
         return metrics
 
     def walk_forward(self, data: pd.DataFrame, params: dict,
-                     train_days=504, test_days=180, step_days=63) -> list:
+                     train_days=504, test_days=180, step_days=63,
+                     param_space: dict = None) -> list:
         """
-        单只股票的Walk-Forward验证
+        单只股票的Walk-Forward验证（IS 拟合 / OOS 评估，审计项 17）。
+
+        param_space: {参数名: [候选值, ...]}。给定时每个窗口先在训练窗
+        网格搜索（最大化 Sharpe）拟合参数，再在测试窗用拟合参数评估，
+        保证测试窗参数不含未来信息；为 None 时退化为固定参数滚动评估。
 
         Returns:
         --------
@@ -571,12 +581,27 @@ class VectorizedBacktester:
         if len(data) < train_days + test_days:
             return []
 
+        def _fit_params(train_data: pd.DataFrame) -> dict:
+            best_params, best_sharpe = params, -np.inf
+            names = list(param_space.keys())
+            for combo in itertools.product(*param_space.values()):
+                candidate = {**params, **dict(zip(names, combo))}
+                m = self.backtest(train_data, candidate)
+                if m.sharpe_ratio > best_sharpe:
+                    best_params, best_sharpe = candidate, m.sharpe_ratio
+            return best_params
+
         results = []
         idx = train_days
 
         while idx + test_days <= len(data):
             test_data = data.iloc[idx:idx + test_days]
-            metrics = self.backtest(test_data, params)
+            if param_space:
+                train_data = data.iloc[idx - train_days:idx]
+                fitted = _fit_params(train_data)
+            else:
+                fitted = params
+            metrics = self.backtest(test_data, fitted)
             results.append(metrics)
             idx += step_days
 

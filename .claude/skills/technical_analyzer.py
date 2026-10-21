@@ -14,6 +14,7 @@ from trend_indicators import TrendIndicators
 from pattern_recognition import CandlestickPatterns, PricePatterns
 from advanced_indicators import AdvancedIndicators
 from risk_management import RiskMetrics
+from core.indicators import rsi as _core_rsi
 
 
 class TechnicalAnalyzer:
@@ -97,12 +98,8 @@ class TechnicalAnalyzer:
         data['MACD'] = ema_fast - ema_slow
         data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
 
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain.div(loss, fill_value=100)
-        data['RSI'] = 100 - (100 / (1 + rs))
+        # RSI（core 权威口径，消灭 fill_value=100 分歧）
+        data['RSI'] = _core_rsi(close, 14)
 
         # KDJ
         low_n = low.rolling(window=9).min()
@@ -186,13 +183,19 @@ class TechnicalAnalyzer:
         latest = data.iloc[-1]
         signals = []
 
-        # MACD信号
-        macd = latest.get('MACD', 0)
-        macd_signal = latest.get('MACD_Signal', 0)
-        if macd > macd_signal and macd > 0:
+        # MACD信号（真交叉: 与前一根比较, 消除"水平比较当金叉"的口径冲突）
+        macd = data['MACD']
+        macd_signal = data['MACD_Signal']
+        cross_up = (macd > macd_signal) & (macd.shift(1) <= macd_signal.shift(1))
+        cross_down = (macd < macd_signal) & (macd.shift(1) >= macd_signal.shift(1))
+        if bool(cross_up.iloc[-1]):
             signals.append('MACD金叉')
-        elif macd < macd_signal and macd < 0:
+        elif bool(cross_down.iloc[-1]):
             signals.append('MACD死叉')
+        elif macd.iloc[-1] > macd_signal.iloc[-1]:
+            signals.append('MACD多头')
+        elif macd.iloc[-1] < macd_signal.iloc[-1]:
+            signals.append('MACD空头')
 
         # KDJ信号
         k = latest.get('K', 50)

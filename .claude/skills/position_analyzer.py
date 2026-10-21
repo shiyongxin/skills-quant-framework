@@ -11,6 +11,7 @@ from datetime import datetime
 
 from stock_data_fetcher import StockDataFetcher
 from risk_management import RiskMetrics
+from core.indicators import rsi as _core_rsi
 
 
 class PositionAnalyzer:
@@ -60,12 +61,8 @@ class PositionAnalyzer:
         data['MACD'] = ema_fast - ema_slow
         data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
 
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain.div(loss, fill_value=100)  # 避免除以0
-        data['RSI'] = 100 - (100 / (1 + rs))
+        # RSI（core 权威口径）
+        data['RSI'] = _core_rsi(close, 14)
 
         # KDJ
         low_n = low.rolling(window=9).min()

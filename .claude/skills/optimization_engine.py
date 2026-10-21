@@ -22,6 +22,7 @@ import copy
 from parameter_space import ParameterSpace
 from vectorized_backtest import VectorizedBacktester, BacktestMetrics
 from historical_data_manager import HistoricalDataManager
+from core import metrics as _core_metrics
 
 
 # ==================== 数据结构 ====================
@@ -249,10 +250,8 @@ class FitnessEvaluator:
         losses = pnl_arr[pnl_arr <= 0]
         win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
 
-        # 盈亏比
-        avg_win = np.mean(wins) if len(wins) > 0 else 0
-        avg_loss = abs(np.mean(losses)) if len(losses) > 0 else 1
-        profit_factor = avg_win / avg_loss if avg_loss > 0 else 0
+        # 盈亏比（core 求和式口径，统一 A/B/优化器）
+        profit_factor = _core_metrics.profit_factor(pnl_arr)
 
         # 总收益(复利)
         cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
@@ -267,20 +266,17 @@ class FitnessEvaluator:
         else:
             annualized_return = 0
 
-        # 最大回撤
+        # 最大回撤（core 统一口径: 正值）
         equity = np.concatenate([[1.0], cumulative])
-        peak = np.maximum.accumulate(equity)
-        drawdown = (equity - peak) / peak * 100
-        max_drawdown = abs(drawdown.min()) if len(drawdown) > 0 else 0
+        max_drawdown = _core_metrics.max_drawdown_pct(equity)
 
-        # 夏普比率
-        if len(pnl_arr) > 1:
-            daily_returns = pnl_arr / 100
-            avg_ret = np.mean(daily_returns) * 252 / np.mean(holding_arr) if np.mean(holding_arr) > 0 else 0
-            std_ret = np.std(daily_returns) * np.sqrt(252 / np.mean(holding_arr)) if np.mean(holding_arr) > 0 else 1
-            sharpe = (avg_ret - 0.03) / std_ret if std_ret > 0 else 0
+        # 夏普（core口径: 逐笔收益按平均持有期年化, rf=3%, ddof=1）
+        mean_hold = float(np.mean(holding_arr)) if len(holding_arr) else 0.0
+        if len(pnl_arr) > 1 and mean_hold > 0:
+            sharpe = _core_metrics.sharpe_ratio(
+                pnl_arr / 100, periods_per_year=252.0 / mean_hold, rf=0.03)
         else:
-            sharpe = 0
+            sharpe = 0.0
 
         # 最大连续亏损
         is_loss = pnl_arr <= 0
@@ -328,8 +324,8 @@ class FitnessEvaluator:
         median_sharpe = np.median(sharpes) if sharpes else 0
         sharpe_score = min(max(median_sharpe / 2, -1), 1)  # 夏普2得满分
 
-        # 回撤惩罚 (越小越好)
-        median_dd = np.median(drawdowns) if drawdowns else 100
+        # 回撤惩罚 (越小越好; abs 兼容不同来源符号)
+        median_dd = np.median([abs(d) for d in drawdowns]) if drawdowns else 100
         dd_penalty = max(0, 1 - median_dd / self.max_drawdown_limit)
 
         # 交易次数惩罚 (太少或太多都不好)

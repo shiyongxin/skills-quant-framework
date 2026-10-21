@@ -259,7 +259,8 @@ class CacheManager:
     # =============================================================================
 
     def cache_stock_data(self, symbol: str, data: pd.DataFrame,
-                         ttl: int = None) -> bool:
+                         ttl: int = None, days: int = None,
+                         adjust: str = None, period: str = None) -> bool:
         """
         缓存股票数据
 
@@ -267,25 +268,34 @@ class CacheManager:
             symbol: 股票代码
             data: 股票数据DataFrame
             ttl: 过期时间（秒），默认24小时
+            days: 取数天数（纳入缓存 key, 消除跨周期串数据）
+            adjust: 复权口径（纳入缓存 key）
+            period: 周期（纳入缓存 key）
 
         Returns:
             是否成功
         """
         ttl = ttl or CacheConfig.TTL_STOCK_DATA
-        key = self._generate_key(CacheConfig.PREFIX_STOCK, symbol)
+        key = self._generate_key(CacheConfig.PREFIX_STOCK, symbol,
+                                 days, adjust, period)
         return self.set(key, data, ttl)
 
-    def get_stock_data(self, symbol: str) -> Optional[pd.DataFrame]:
+    def get_stock_data(self, symbol: str, days: int = None,
+                       adjust: str = None, period: str = None) -> Optional[pd.DataFrame]:
         """
         获取缓存的股票数据
 
         Args:
             symbol: 股票代码
+            days: 取数天数（须与写入时一致才能命中）
+            adjust: 复权口径（须与写入时一致才能命中）
+            period: 周期（须与写入时一致才能命中）
 
         Returns:
             股票数据DataFrame，不存在返回None
         """
-        key = self._generate_key(CacheConfig.PREFIX_STOCK, symbol)
+        key = self._generate_key(CacheConfig.PREFIX_STOCK, symbol,
+                                 days, adjust, period)
         return self.get(key)
 
     def batch_cache_stock_data(self, data_dict: Dict[str, pd.DataFrame],
