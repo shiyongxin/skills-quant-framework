@@ -7,6 +7,7 @@
 """
 import numpy as np
 import pandas as pd
+import pytest
 
 from backtest_framework import BacktestEngine
 from execution_model import CostModel
@@ -353,3 +354,55 @@ class TestValidatorE:
         assert abs(csi_ret - exp_csi) < 1e-9, (csi_ret, exp_csi)
         # 扣成本后收益低于裸价差
         assert ret < (11.0 / 10.2 - 1) * 100
+
+
+class TestGoldenMetrics:
+    """黄金指标快照: 锁定 seed=3/n=300 数据上 A/B 引擎的完整指标输出。
+    数值漂移 → 先怀疑回测逻辑变更, 确认后才更新快照。"""
+
+    @staticmethod
+    def _big():
+        rng = np.random.default_rng(3)
+        n = 300
+        close = 10 * np.cumprod(1 + rng.normal(0, 0.015, n))
+        return pd.DataFrame({
+            '日期': pd.date_range('2022-01-03', periods=n, freq='B'),
+            '开盘': close * (1 + rng.normal(0, 0.003, n)),
+            '最高': close * 1.02, '最低': close * 0.98, '收盘': close,
+            '成交量': rng.integers(1e6, 5e6, n).astype(float),
+        })
+
+    def test_engine_b_vectorized_golden(self):
+        m = VectorizedBacktester().backtest(self._big(), {})
+        assert m.total_return == pytest.approx(8.24347173537372, rel=1e-6)
+        assert m.sharpe_ratio == pytest.approx(1.529450875084276, rel=1e-6)
+        assert m.max_drawdown == pytest.approx(6.539773759999894, rel=1e-6)
+        assert m.num_trades == 2
+        assert m.win_rate == pytest.approx(50.0)
+
+    def test_engine_a_framework_golden(self):
+        big = self._big()
+        ma5 = pd.Series(big['收盘']).rolling(5).mean()
+        ma20 = pd.Series(big['收盘']).rolling(20).mean()
+
+        def strat(d):
+            i = len(d) - 1
+            if i < 21:
+                return 0
+            up = (ma5.iloc[i] > ma20.iloc[i]
+                  and ma5.iloc[i - 1] <= ma20.iloc[i - 1])
+            down = (ma5.iloc[i] < ma20.iloc[i]
+                    and ma5.iloc[i - 1] >= ma20.iloc[i - 1])
+            if up:
+                return 1
+            if down:
+                return -1
+            return 0
+
+        res = BacktestEngine(initial_cash=1000000).run(big, strat,
+                                                       symbol='600519')
+        assert res['total_return'] == pytest.approx(20.02675523695121, rel=1e-6)
+        assert res['sharpe_ratio'] == pytest.approx(0.8098904708567016, rel=1e-6)
+        assert res['max_drawdown'] == pytest.approx(-14.194905174592487, rel=1e-6)
+        assert res['trade_count'] == 9
+        assert len(res['trades']) == 19

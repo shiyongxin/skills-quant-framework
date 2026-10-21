@@ -248,3 +248,22 @@ class TestDetectSignalsOHLC:
         # 首行 prev_close = 检测起点(df 第59行)的收盘
         assert abs(sig.iloc[0]['prev_close'] - df['收盘'].iloc[59]) < 1e-9
         assert abs(sig.iloc[0]['open'] - df['开盘'].iloc[60]) < 1e-9
+
+
+class TestRouteHygiene:
+    def test_no_duplicate_route_rules(self):
+        from collections import Counter
+        seen = Counter()
+        for r in wb.app.url_map.iter_rules():
+            methods = tuple(sorted(m for m in r.methods
+                                   if m not in ('HEAD', 'OPTIONS')))
+            seen[(r.rule, methods)] += 1
+        # 旧 bug: 两条 @app.route('/api/stock-name/<code>') 重复注册
+        dups = {k: v for k, v in seen.items() if v > 1}
+        assert dups == {}
+
+    def test_stock_name_route_registered_once(self):
+        rules = [r for r in wb.app.url_map.iter_rules()
+                 if r.rule == '/api/stock-name/<code>']
+        assert len(rules) == 1
+        assert rules[0].endpoint == 'get_stock_name'
