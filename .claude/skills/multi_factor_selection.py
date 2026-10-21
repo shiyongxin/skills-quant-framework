@@ -36,24 +36,31 @@ class FactorWeightingMethod:
     """因子加权方法"""
 
     @staticmethod
+    def _valid_score_cols(factors_df: pd.DataFrame) -> List[str]:
+        """可用因子列：*_Score 且非全 NaN（全 NaN 列会毒化综合分）"""
+        return [col for col in factors_df.columns
+                if col.endswith('_Score') and factors_df[col].notna().any()]
+
+    @staticmethod
+    def equal_weights(factors_df: pd.DataFrame) -> Dict[str, float]:
+        """等权重（仅覆盖可用因子列）"""
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
+        return {col: 1.0 / len(factor_cols) for col in factor_cols}
+
+    @staticmethod
     def equal_weight(factors_df: pd.DataFrame) -> pd.Series:
         """
         等权重加权
-        所有因子权重相等
+        所有因子权重相等（忽略全 NaN 的因子列，避免毒化综合分）
         """
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
-        weights = {col: 1.0 / len(factor_cols) for col in factor_cols}
-        return FactorWeightingMethod._apply_weights(factors_df, weights)
+        return FactorWeightingMethod._apply_weights(
+            factors_df, FactorWeightingMethod.equal_weights(factors_df))
 
     @staticmethod
-    def ic_weighted(factors_df: pd.DataFrame, returns: pd.Series) -> pd.Series:
-        """
-        IC加权
-        根据历史IC表现分配权重
-        """
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
+    def ic_weights(factors_df: pd.DataFrame, returns: pd.Series) -> Dict[str, float]:
+        """IC 加权权重（|IC| 归一化；样本不足或总 IC 为 0 → 等权）"""
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
 
-        # 计算每个因子与收益的相关系数 (IC)
         ics = {}
         for col in factor_cols:
             valid_idx = factors_df[col].notna() & returns.notna()
@@ -63,24 +70,25 @@ class FactorWeightingMethod:
             else:
                 ics[col] = 0
 
-        # 归一化权重
         total_ic = sum(ics.values())
         if total_ic > 0:
-            weights = {col: ic / total_ic for col, ic in ics.items()}
-        else:
-            weights = {col: 1.0 / len(factor_cols) for col in factor_cols}
-
-        return FactorWeightingMethod._apply_weights(factors_df, weights)
+            return {col: ic / total_ic for col, ic in ics.items()}
+        return FactorWeightingMethod.equal_weights(factors_df)
 
     @staticmethod
-    def ir_weighted(factors_df: pd.DataFrame, ic_history: Dict[str, List[float]]) -> pd.Series:
+    def ic_weighted(factors_df: pd.DataFrame, returns: pd.Series) -> pd.Series:
         """
-        IR加权 (Information Ratio加权)
-        根据IR (IC均值/IC标准差) 分配权重
+        IC加权
+        根据历史IC表现分配权重
         """
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
+        return FactorWeightingMethod._apply_weights(
+            factors_df, FactorWeightingMethod.ic_weights(factors_df, returns))
 
-        # 计算IR
+    @staticmethod
+    def ir_weights(factors_df: pd.DataFrame, ic_history: Dict[str, List[float]]) -> Dict[str, float]:
+        """IR 加权权重（IC 均值/IC 标准差，负 IR 记 0；无历史 → 等权）"""
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
+
         irs = {}
         for col in factor_cols:
             if col in ic_history and len(ic_history[col]) > 1:
@@ -90,32 +98,37 @@ class FactorWeightingMethod:
             else:
                 irs[col] = 1.0
 
-        # 归一化权重
         total_ir = sum(irs.values())
         if total_ir > 0:
-            weights = {col: ir / total_ir for col, ir in irs.items()}
-        else:
-            weights = {col: 1.0 / len(factor_cols) for col in factor_cols}
-
-        return FactorWeightingMethod._apply_weights(factors_df, weights)
+            return {col: ir / total_ir for col, ir in irs.items()}
+        return FactorWeightingMethod.equal_weights(factors_df)
 
     @staticmethod
-    def max_sharpe(factors_df: pd.DataFrame, returns: pd.Series,
-                   risk_free_rate: float = 0.03) -> pd.Series:
+    def ir_weighted(factors_df: pd.DataFrame, ic_history: Dict[str, List[float]]) -> pd.Series:
         """
-        最大夏普比率加权
-        优化权重使组合夏普比率最大
+        IR加权 (Information Ratio加权)
+        根据IR (IC均值/IC标准差) 分配权重
         """
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
+        return FactorWeightingMethod._apply_weights(
+            factors_df, FactorWeightingMethod.ir_weights(factors_df, ic_history))
+
+    @staticmethod
+    def max_sharpe_weights(factors_df: pd.DataFrame, returns: pd.Series,
+                           risk_free_rate: float = 0.03) -> Dict[str, float]:
+        """
+        最大夏普比率优化权重
+        优化权重使因子组合夏普比率最大（样本不足 → 等权）
+        """
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
         n_factors = len(factor_cols)
 
         if n_factors == 0:
-            return pd.Series(0, index=factors_df.index)
+            return {}
 
         # 提取因子数据
         factor_data = factors_df[factor_cols].dropna()
         if len(factor_data) < 10:
-            return FactorWeightingMethod.equal_weight(factors_df)
+            return FactorWeightingMethod.equal_weights(factors_df)
 
         # 计算因子收益协方差矩阵
         aligned_returns = returns.loc[factor_data.index]
@@ -126,7 +139,7 @@ class FactorWeightingMethod:
 
         factor_returns = factor_returns.dropna()
         if len(factor_returns) < 10:
-            return FactorWeightingMethod.equal_weight(factors_df)
+            return FactorWeightingMethod.equal_weights(factors_df)
 
         mean_returns = factor_returns.mean()
         cov_matrix = factor_returns.cov()
@@ -150,24 +163,33 @@ class FactorWeightingMethod:
             result = minimize(negative_sharpe, x0, method='SLSQP',
                             bounds=bounds, constraints=constraints)
             optimal_weights = result.x
-        except:
+        except Exception:
             optimal_weights = np.array([1.0 / n_factors] * n_factors)
 
-        # 应用权重
-        weights = {factor_cols[i]: optimal_weights[i] for i in range(n_factors)}
-        return FactorWeightingMethod._apply_weights(factors_df, weights)
+        return {factor_cols[i]: float(optimal_weights[i]) for i in range(n_factors)}
 
     @staticmethod
-    def risk_parity(factors_df: pd.DataFrame, returns: pd.Series) -> pd.Series:
+    def max_sharpe(factors_df: pd.DataFrame, returns: pd.Series,
+                   risk_free_rate: float = 0.03) -> pd.Series:
         """
-        风险平价加权
-        使各因子对组合风险的贡献相等
+        最大夏普比率加权
+        优化权重使组合夏普比率最大
         """
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
+        return FactorWeightingMethod._apply_weights(
+            factors_df,
+            FactorWeightingMethod.max_sharpe_weights(factors_df, returns, risk_free_rate))
+
+    @staticmethod
+    def risk_parity_weights(factors_df: pd.DataFrame, returns: pd.Series) -> Dict[str, float]:
+        """
+        风险平价优化权重
+        使各因子对组合风险的贡献相等（样本不足 → 等权）
+        """
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
         n_factors = len(factor_cols)
 
         if n_factors == 0:
-            return pd.Series(0, index=factors_df.index)
+            return {}
 
         # 提取因子数据
         factor_data = factors_df[factor_cols].dropna()
@@ -180,7 +202,7 @@ class FactorWeightingMethod:
 
         factor_returns = factor_returns.dropna()
         if len(factor_returns) < 10:
-            return FactorWeightingMethod.equal_weight(factors_df)
+            return FactorWeightingMethod.equal_weights(factors_df)
 
         cov_matrix = factor_returns.cov()
 
@@ -206,19 +228,27 @@ class FactorWeightingMethod:
                             constraints=constraints)
             optimal_weights = result.x
             optimal_weights = optimal_weights / optimal_weights.sum()  # 归一化
-        except:
+        except Exception:
             optimal_weights = np.array([1.0 / n_factors] * n_factors)
 
-        weights = {factor_cols[i]: optimal_weights[i] for i in range(n_factors)}
-        return FactorWeightingMethod._apply_weights(factors_df, weights)
+        return {factor_cols[i]: float(optimal_weights[i]) for i in range(n_factors)}
+
+    @staticmethod
+    def risk_parity(factors_df: pd.DataFrame, returns: pd.Series) -> pd.Series:
+        """
+        风险平价加权
+        使各因子对组合风险的贡献相等
+        """
+        return FactorWeightingMethod._apply_weights(
+            factors_df, FactorWeightingMethod.risk_parity_weights(factors_df, returns))
 
     @staticmethod
     def _apply_weights(factors_df: pd.DataFrame, weights: Dict[str, float]) -> pd.Series:
-        """应用权重计算综合得分"""
+        """应用权重计算综合得分（全 NaN 的因子列跳过，NaN*权重 仍为 NaN 会毒化整行）"""
         composite_score = pd.Series(0.0, index=factors_df.index)
 
         for col, weight in weights.items():
-            if col in factors_df.columns:
+            if col in factors_df.columns and factors_df[col].notna().any():
                 composite_score += factors_df[col] * weight
 
         return composite_score
@@ -538,28 +568,61 @@ class FactorModels:
         return factors
 
     @staticmethod
+    def _price_cross_section(price_df) -> Optional[pd.DataFrame]:
+        """
+        将价格输入归一化为“股票×日期”横截面面板（index=股票码, columns=日期）。
+
+        支持两种形态:
+          - 宽面板: price_df['收盘'] 为 DataFrame（index=日期, columns=股票码）
+          - 堆叠行: price_df['收盘'] 为 MultiIndex Series（(股票,日期) 或 (日期,股票)，日期层级为 datetime）
+        单股时序、无法识别日期层级等输入无法构成横截面，返回 None。
+        """
+        close = price_df['收盘']
+        if isinstance(close, pd.DataFrame):
+            # (index=日期, columns=股票码) → 转置为 (index=股票码, columns=日期)
+            return close.T
+
+        if isinstance(close, pd.Series) and isinstance(close.index, pd.MultiIndex):
+            date_level = None
+            for i in range(close.index.nlevels):
+                if pd.api.types.is_datetime64_any_dtype(close.index.levels[i].dtype):
+                    date_level = i
+                    break
+            if date_level is None:
+                return None
+            # 日期层级 unstack 到 columns，剩余层级（股票码）作 index
+            return close.unstack(level=date_level)
+
+        return None
+
+    @staticmethod
     def momentum_factor(price_df, periods=[20, 60, 120]) -> pd.DataFrame:
         """
         动量因子
-        过去N日的收益率
+        每只股票过去N日的收益率（横截面：index=股票码）
 
         Args:
-            price_df: 价格数据
+            price_df: 价格数据（宽面板或 (股票,日期) 堆叠行，见 _price_cross_section）
             periods: 计算周期列表
 
         Returns:
-            因子得分DataFrame
+            因子得分DataFrame（无法构成横截面时返回空表）
         """
         factors = pd.DataFrame()
 
-        close = price_df['收盘']
+        panel = FactorModels._price_cross_section(price_df)
+        if panel is None or panel.shape[1] == 0:
+            return factors
 
         for period in periods:
-            if len(close) >= period:
-                momentum = close.pct_change(period)
-                factors[f'Momentum_{period}'] = momentum.iloc[-1]
+            if panel.shape[1] > period:
+                # 沿日期轴取最近一根 bar 的 N 期收益率（每只股票一个值）
+                factors[f'Momentum_{period}'] = panel.pct_change(period, axis=1).iloc[:, -1]
 
-        # 标准化
+        if factors.shape[1] == 0:
+            return factors  # 数据不足，无法计算任何周期
+
+        # 标准化（横截面）
         for col in factors.columns:
             factors[col] = (factors[col] - factors[col].mean()) / factors[col].std()
 
@@ -571,37 +634,36 @@ class FactorModels:
     def volatility_factor(price_df, period=20) -> pd.DataFrame:
         """
         波动率因子
-        历史波动率、下行风险
+        历史波动率、下行风险（横截面：index=股票码，负值表示低波动更好）
 
         Args:
-            price_df: 价格数据
+            price_df: 价格数据（宽面板或 (股票,日期) 堆叠行，见 _price_cross_section）
             period: 计算周期
 
         Returns:
-            因子得分DataFrame (负值表示低波动更好)
+            因子得分DataFrame (负值表示低波动更好；无法构成横截面时返回空表)
         """
         factors = pd.DataFrame()
 
-        close = price_df['收盘']
+        panel = FactorModels._price_cross_section(price_df)
+        if panel is None or panel.shape[1] < 2:
+            return factors
 
-        # 历史波动率
-        returns = close.pct_change()
-        volatility = returns.rolling(window=period).std()
-        factors['Volatility'] = -volatility.iloc[-1]  # 低波动为正
+        returns = panel.pct_change(axis=1)  # (股票 × 日期)
 
-        # 下行风险
-        negative_returns = returns[returns < 0]
-        if len(negative_returns) > 0:
-            downside_vol = negative_returns.rolling(window=period).std()
-            factors['Downside_Vol'] = -downside_vol.iloc[-1]
+        # 历史波动率（pandas 3 rolling 无 axis 参数 → 转置后沿日期轴滚动）
+        factors['Volatility'] = -returns.T.rolling(period).std().iloc[-1]
 
-        # 最大回撤 (倒数)
-        cummax = close.cummax()
-        drawdown = (close - cummax) / cummax
-        max_dd = drawdown.rolling(window=period).min()
-        factors['Max_Drawdown'] = -max_dd.iloc[-1]
+        # 下行波动（过去 period 日下行偏差：正收益记 0，仅对 min(r,0) 取标准差）
+        tail = returns.iloc[:, -period:]
+        factors['Downside_Vol'] = -tail.clip(upper=0).std(axis=1)
 
-        # 标准化
+        # 最大回撤 (倒数)：窗口内相对历史高点的最深回撤
+        cummax = panel.cummax(axis=1)
+        drawdown = (panel - cummax) / cummax
+        factors['Max_Drawdown'] = -drawdown.T.rolling(period).min().iloc[-1]
+
+        # 标准化（横截面）
         for col in factors.columns:
             factors[col] = (factors[col] - factors[col].mean()) / factors[col].std()
 
@@ -657,13 +719,14 @@ class MultiFactorSelector:
     """多因子选股器 - 增强版"""
 
     def __init__(self, factor_weights: Dict[str, float] = None,
-                 weighting_method: str = 'equal'):
+                 weighting_method: str = 'custom'):
         """
         初始化多因子选股器
 
         Args:
             factor_weights: 因子权重，如 {'value': 0.3, 'growth': 0.3, 'quality': 0.2, 'momentum': 0.2}
-            weighting_method: 加权方法 ('equal', 'ic', 'ir', 'max_sharpe', 'risk_parity')
+            weighting_method: 加权方法 ('custom' 使用 factor_weights 配置[默认],
+                'equal' 等权, 'ic', 'ir', 'max_sharpe', 'risk_parity')
         """
         if factor_weights is None:
             factor_weights = {
@@ -697,38 +760,42 @@ class MultiFactorSelector:
         """
         all_factors = pd.DataFrame(index=financial_df.index)
 
+        def _attach(factor_result, score_col):
+            # 仅并入与股票池对齐、且有有效值的得分列：
+            # ① 全 NaN 列会毒化综合分（NaN*权重 仍为 NaN）；② reindex 防止价格面板独有股票经 concat 外联进股票池
+            if factor_result is None or score_col not in factor_result.columns:
+                return
+            col = factor_result[score_col].reindex(all_factors.index)
+            if col.notna().any():
+                all_factors[score_col] = col
+
         # 价值因子
         try:
-            value_factors = self.factor_models.value_factor(financial_df)
-            all_factors = pd.concat([all_factors, value_factors[['Value_Score']]], axis=1)
+            _attach(self.factor_models.value_factor(financial_df), 'Value_Score')
         except:
             pass
 
         # 成长因子
         try:
-            growth_factors = self.factor_models.growth_factor(financial_df)
-            all_factors = pd.concat([all_factors, growth_factors[['Growth_Score']]], axis=1)
+            _attach(self.factor_models.growth_factor(financial_df), 'Growth_Score')
         except:
             pass
 
         # 质量因子
         try:
-            quality_factors = self.factor_models.quality_factor(financial_df)
-            all_factors = pd.concat([all_factors, quality_factors[['Quality_Score']]], axis=1)
+            _attach(self.factor_models.quality_factor(financial_df), 'Quality_Score')
         except:
             pass
 
         # 动量和波动率因子 (需要价格数据)
         if price_df is not None and len(price_df) > 0:
             try:
-                momentum_factors = self.factor_models.momentum_factor(price_df)
-                all_factors = pd.concat([all_factors, momentum_factors[['Momentum_Score']]], axis=1)
+                _attach(self.factor_models.momentum_factor(price_df), 'Momentum_Score')
             except:
                 pass
 
             try:
-                volatility_factors = self.factor_models.volatility_factor(price_df)
-                all_factors = pd.concat([all_factors, volatility_factors[['Volatility_Score']]], axis=1)
+                _attach(self.factor_models.volatility_factor(price_df), 'Volatility_Score')
             except:
                 pass
 
@@ -749,6 +816,9 @@ class MultiFactorSelector:
         if self.weighting_method == 'equal':
             return self.weighting_class.equal_weight(factors_df)
 
+        elif self.weighting_method == 'custom':
+            return self._apply_custom_weights(factors_df)
+
         elif self.weighting_method == 'ic' and returns is not None:
             return self.weighting_class.ic_weighted(factors_df, returns)
 
@@ -762,12 +832,12 @@ class MultiFactorSelector:
             return self.weighting_class.risk_parity(factors_df, returns)
 
         else:
-            # 默认使用自定义权重
+            # 未识别方法或缺少所需数据 → 使用配置权重
             return self._apply_custom_weights(factors_df)
 
     def _apply_custom_weights(self, factors_df: pd.DataFrame) -> pd.Series:
-        """应用自定义权重"""
-        composite_score = pd.Series(0, index=factors_df.index)
+        """应用 factor_weights 配置权重（按现存因子重归一化，全 NaN 列跳过）"""
+        composite_score = pd.Series(0.0, index=factors_df.index)
 
         factor_mapping = {
             'Value_Score': 'value',
@@ -777,10 +847,20 @@ class MultiFactorSelector:
             'Volatility_Score': 'volatility'
         }
 
+        weights = {}
         for factor_col, factor_name in factor_mapping.items():
             if factor_col in factors_df.columns and factor_name in self.factor_weights:
-                weight = self.factor_weights[factor_name]
-                composite_score += factors_df[factor_col] * weight
+                if not factors_df[factor_col].notna().any():
+                    continue  # 全 NaN 列会毒化综合分
+                weights[factor_col] = self.factor_weights[factor_name]
+
+        # 按现存因子重归一化，保证 min_score 刻度不随因子可得性漂移
+        total = sum(weights.values())
+        if total > 0:
+            weights = {col: w / total for col, w in weights.items()}
+
+        for factor_col, weight in weights.items():
+            composite_score += factors_df[factor_col] * weight
 
         return composite_score
 
@@ -881,35 +961,50 @@ class MultiFactorSelector:
         return self.tester.test_all_factors(factors_df, returns)
 
     def optimize_weights(self, factors_df: pd.DataFrame,
-                        returns: pd.Series,
-                        method: str = 'max_sharpe') -> Dict[str, float]:
+                         returns: pd.Series,
+                         method: str = 'max_sharpe') -> Dict[str, float]:
         """
         优化因子权重
 
         Args:
             factors_df: 因子DataFrame
             returns: 收益率数据
-            method: 优化方法 ('max_sharpe', 'risk_parity', 'equal')
+            method: 优化方法 ('max_sharpe', 'risk_parity', 'ic', 'equal', 'custom')
 
         Returns:
-            优化后的权重字典
+            优化后的权重字典（key=因子得分列名，value=权重；按现存因子归一化）
         """
         if method == 'equal':
-            factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
-            return {col: 1.0 / len(factor_cols) for col in factor_cols}
+            return FactorWeightingMethod.equal_weights(factors_df)
 
         elif method == 'max_sharpe':
-            # 使用最大夏普比率加权
-            score = self.weighting_class.max_sharpe(factors_df, returns)
-            # 这里简化处理，实际应该返回权重
-            factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
-            return {col: 1.0 / len(factor_cols) for col in factor_cols}
+            return FactorWeightingMethod.max_sharpe_weights(factors_df, returns)
 
         elif method == 'risk_parity':
-            # 使用风险平价加权
-            score = self.weighting_class.risk_parity(factors_df, returns)
-            factor_cols = [col for col in factors_df.columns if col.endswith('_Score')]
-            return {col: 1.0 / len(factor_cols) for col in factor_cols}
+            return FactorWeightingMethod.risk_parity_weights(factors_df, returns)
+
+        elif method == 'ic':
+            return FactorWeightingMethod.ic_weights(factors_df, returns)
+
+        elif method == 'custom':
+            # 配置权重按现存因子重归一化
+            factor_mapping = {
+                'Value_Score': 'value',
+                'Growth_Score': 'growth',
+                'Quality_Score': 'quality',
+                'Momentum_Score': 'momentum',
+                'Volatility_Score': 'volatility'
+            }
+            weights = {}
+            for factor_col, factor_name in factor_mapping.items():
+                if factor_col in factors_df.columns and factor_name in self.factor_weights:
+                    if not factors_df[factor_col].notna().any():
+                        continue
+                    weights[factor_col] = self.factor_weights[factor_name]
+            total = sum(weights.values())
+            if total > 0:
+                weights = {col: w / total for col, w in weights.items()}
+            return weights
 
         else:
             return self.factor_weights.copy()
@@ -1172,21 +1267,23 @@ class SmartBetaStrategy:
         选择过去N期涨幅最大的股票
 
         Args:
-            price_df: 价格DataFrame (收盘价列)
+            price_df: 价格DataFrame（宽面板或 (股票,日期) 堆叠行，见 FactorModels._price_cross_section）
             period: 回溯周期
             top_n: 选择数量
 
         Returns:
-            股票代码列表
+            股票代码列表（无法构成横截面时返回空列表）
         """
-        close = price_df['收盘']
-        momentum = close.pct_change(period)
+        panel = FactorModels._price_cross_section(price_df)
+        if panel is None or panel.shape[1] <= period:
+            return []
+        momentum = panel.pct_change(period, axis=1).iloc[:, -1]
         return momentum.nlargest(top_n).index.tolist()
 
 
 # 便捷函数
-def multi_factor_select(financial_df, price_df=None, top_n=20, weighting_method='equal'):
-    """多因子选股"""
+def multi_factor_select(financial_df, price_df=None, top_n=20, weighting_method='custom'):
+    """多因子选股（默认 'custom'：使用构造器默认 factor_weights）"""
     selector = MultiFactorSelector(weighting_method=weighting_method)
     return selector.select_stocks(financial_df, price_df, top_n)
 

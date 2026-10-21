@@ -664,7 +664,7 @@ class DatabaseManager:
                 ).first()
 
                 market_value = shares * (current_price or avg_cost)
-                profit_loss = (current_price or avg_cost - avg_cost) * shares
+                profit_loss = ((current_price or avg_cost) - avg_cost) * shares
                 profit_pct = ((current_price or avg_cost) / avg_cost - 1) * 100 if avg_cost > 0 else 0
 
                 if position:

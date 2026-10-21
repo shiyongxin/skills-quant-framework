@@ -62,7 +62,7 @@ class CandlestickPatterns:
         row = df.iloc[idx]
         open_price = row['开盘']
         close = row['收盘']
-        high = row['最低']  # 错误，应该是high
+        high = row['最高']
         low = row['最低']
 
         body = abs(close - open_price)
@@ -317,6 +317,8 @@ class CandlestickPatterns:
             包含形态信号的DataFrame
         """
         df = df.copy()
+        orig_index = df.index
+        df = df.reset_index(drop=True)
         df['Pattern_Doji'] = False
         df['Pattern_Hammer'] = None
         df['Pattern_HangingMan'] = None
@@ -365,6 +367,7 @@ class CandlestickPatterns:
             df.loc[i, 'Pattern_Piercing'] = CandlestickPatterns.is_piercing(df, i)
             df.loc[i, 'Pattern_DarkCloud'] = CandlestickPatterns.is_dark_cloud(df, i)
 
+        df.index = orig_index
         return df
 
 
@@ -534,10 +537,10 @@ class PricePatterns:
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.iloc[-1].mean()
 
-        # 检查突破
+        # 检查突破（不含当日：取最近 period 根历史 bar）
         latest = df.iloc[-1]
-        prev_high = df['最高'].tail(period).max()
-        prev_low = df['最低'].tail(period).min()
+        prev_high = df['最高'].iloc[-period-1:-1].max()
+        prev_low = df['最低'].iloc[-period-1:-1].min()
 
         up_breakout = latest['收盘'] > prev_high
         down_breakout = latest['收盘'] < prev_low

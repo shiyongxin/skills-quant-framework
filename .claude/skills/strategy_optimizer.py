@@ -16,8 +16,6 @@ from itertools import product
 import random
 
 try:
-    from sklearn.model_selection import ParameterGrid
-    from scipy.optimize import minimize
     from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod, StopLossMethod
     MODULES_AVAILABLE = True
 except ImportError:
@@ -274,26 +272,39 @@ class StrategyOptimizer:
         # 生成信号
         data_with_signals = self.strategy.generate_signals(data, params)
 
-        # 创建回测引擎
-        engine = BacktestEngine(
-            initial_cash=1000000,
-            position_config=PositionConfig(
-                max_positions=5,
-                position_size_pct=0.2
-            )
-        )
-
-        # 运行回测
+        # 运行回测（引擎方法是 run()，非 run_backtest；结果为 dict，非对象）
         try:
-            result = engine.run_backtest(data_with_signals, data_with_signals)
+            engine = BacktestEngine(
+                initial_cash=1000000,
+                position_config=PositionConfig(
+                    sizing_method=PositionSizingMethod.PERCENT_OF_EQUITY,
+                    sizing_value=0.2,
+                    max_position_pct=0.2
+                )
+            )
+
+            def _strategy_fn(window):
+                if len(window) == 0:
+                    return 0
+                last = window.iloc[-1]
+                if bool(last.get('signal_buy', False)):
+                    return 1
+                if bool(last.get('signal_sell', False)):
+                    return -1
+                return 0
+
+            result = engine.run(data_with_signals, _strategy_fn, symbol='OPT')
+
+            if not isinstance(result, dict) or not result:
+                raise ValueError("回测未产生有效结果")
 
             return {
-                'sharpe_ratio': result.sharpe_ratio if hasattr(result, 'sharpe_ratio') else 0,
-                'annual_return': result.annual_return if hasattr(result, 'annual_return') else 0,
-                'max_drawdown': result.max_drawdown if hasattr(result, 'max_drawdown') else 0,
-                'total_return': result.total_return if hasattr(result, 'total_return') else 0,
-                'win_rate': result.win_rate if hasattr(result, 'win_rate') else 0,
-                'profit_factor': result.profit_factor if hasattr(result, 'profit_factor') else 0
+                'sharpe_ratio': float(result.get('sharpe_ratio', 0) or 0),
+                'annual_return': float(result.get('annualized_return', 0) or 0),
+                'max_drawdown': float(result.get('max_drawdown', 0) or 0),
+                'total_return': float(result.get('total_return', 0) or 0),
+                'win_rate': float(result.get('win_rate', 0) or 0),
+                'profit_factor': float(result.get('profit_factor', 0) or 0)
             }
         except Exception as e:
             print(f"[WARN] 回测失败: {e}")
@@ -336,8 +347,10 @@ class StrategyOptimizer:
 
         count = 0
 
-        # 遍历所有参数组合
-        for params in ParameterGrid(param_grid):
+        # 遍历所有参数组合（itertools.product 替代 sklearn ParameterGrid）
+        _keys = list(param_grid.keys())
+        for _values in product(*param_grid.values()):
+            params = dict(zip(_keys, _values))
             count += 1
 
             if verbose:

@@ -15,9 +15,10 @@ from dataclasses import dataclass
 import warnings
 
 try:
-    from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+    from sklearn.model_selection import cross_val_score, GridSearchCV, TimeSeriesSplit
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression, LinearRegression
+    from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error
     from sklearn.metrics import classification_report, confusion_matrix
@@ -25,6 +26,35 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     warnings.warn("scikit-learn未安装，ML功能将不可用")
+
+
+# =============================================================================
+# 时序切分
+# =============================================================================
+
+def _time_series_split(X: pd.DataFrame, y: pd.Series, test_size: float,
+                       embargo: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """
+    按时间顺序切分（禁止 shuffle，避免随机切分造成标签窗口泄漏与前视）
+
+    Args:
+        X: 特征（须按时间升序）
+        y: 目标（与 X 对齐）
+        test_size: 测试集比例（尾部）
+        embargo: 训练/测试之间的隔离带行数（通常 = forward_days，
+                 保证训练样本的标签窗口不覆盖测试段特征）
+
+    Returns:
+        X_train, X_test, y_train, y_test（时间上严格先后）
+    """
+    n = len(X)
+    if n < 10:
+        raise ValueError(f"有效样本不足: {n} 行（至少需要 10 行）")
+
+    split = max(1, min(int(n * (1 - test_size)), n - 2))
+    test_start = min(split + max(0, int(embargo)), n - 1)
+
+    return X.iloc[:split], X.iloc[test_start:], y.iloc[:split], y.iloc[test_start:]
 
 
 # =============================================================================
@@ -298,12 +328,13 @@ class MLPredictor:
              forward_days: int = 5,
              threshold: float = 0.02) -> ModelEvaluation:
         """
-        训练模型
+        训练模型（时序切分：按时间顺序前段训练、尾部测试，
+        禁止随机 shuffle，避免标签窗口泄漏/前视）
 
         Args:
-            data: 训练数据
-            test_size: 测试集比例
-            forward_days: 向前看的天数
+            data: 训练数据（按时间升序）
+            test_size: 尾部测试集比例
+            forward_days: 向前看的天数（同时用作训练/测试隔离带）
             threshold: 涨跌幅阈值
 
         Returns:
@@ -322,9 +353,9 @@ class MLPredictor:
         # 记录特征名
         self.feature_names = feature_cols
 
-        # 分割数据
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, stratify=y
+        # 时序切分：前段训练、尾部测试，训练段标签窗口与测试段之间留 embargo 隔离
+        X_train, X_test, y_train, y_test = _time_series_split(
+            X, y, test_size, embargo=forward_days
         )
 
         # 标准化
@@ -465,10 +496,11 @@ class MLPredictor:
                        forward_days: int = 5,
                        threshold: float = 0.02) -> Dict[str, float]:
         """
-        交叉验证
+        交叉验证（时间序列安全：scaler 在 Pipeline 内折内拟合，
+        折按时间顺序 TimeSeriesSplit，避免全量 fit scaler 的信息泄漏）
 
         Args:
-            data: 训练数据
+            data: 训练数据（按时间升序）
             cv: 折数
             forward_days: 向前看的天数
             threshold: 涨跌幅阈值
@@ -485,11 +517,16 @@ class MLPredictor:
         X = features[feature_cols].fillna(0)
         y = target
 
-        # 标准化
-        X_scaled = self.scaler.fit_transform(X)
+        # Pipeline：scaler 仅在每折训练段拟合，杜绝全量 fit 造成的泄漏
+        pipeline = Pipeline([
+            ('scaler', StandardScaler()),
+            ('model', self.model)
+        ])
 
-        # 交叉验证
-        scores = cross_val_score(self.model, X_scaled, y, cv=cv, scoring='accuracy')
+        # 时间序列折：前段训练、后段测试
+        scores = cross_val_score(pipeline, X, y,
+                                 cv=TimeSeriesSplit(n_splits=cv),
+                                 scoring='accuracy')
 
         return {
             'accuracy_mean': scores.mean(),
@@ -550,9 +587,9 @@ class RegressionPredictor:
 
         self.feature_names = feature_cols
 
-        # 分割数据
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+        # 时序切分：前段训练、尾部测试，标签窗口留 embargo 隔离
+        X_train, X_test, y_train, y_test = _time_series_split(
+            X, y, test_size=0.2, embargo=forward_days
         )
 
         # 标准化

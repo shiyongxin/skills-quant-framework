@@ -1166,9 +1166,8 @@ def get_stock_logs(code):
     })
 
 
-@app.route('/api/stock-name/<code>', methods=['GET'])
 def get_stock_name_dict():
-    """获取股票代码到名称的映射（带缓存）"""
+    """获取股票代码到名称的映射（带缓存）——普通函数，不注册路由（与 get_stock_name 共用 URL）"""
     global stock_name_cache, stock_name_cache_time
 
     now = datetime.now()

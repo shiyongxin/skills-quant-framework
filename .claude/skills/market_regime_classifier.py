@@ -348,10 +348,12 @@ class MarketRegimeClassifier:
 
         for date in dates:
             # 找到最近的交易日
-            mask = idx_dates <= date
-            if mask.any():
-                last_idx = mask.idxmax()
-                result[date] = regime_series.iloc[last_idx]
+                mask = idx_dates <= date
+                if mask.any():
+                    # 取最近（最晚）一个 ≤ date 的交易日：idxmax 返回首个 True，
+                    # 正序下是历史第一天，需反转后取首个 True
+                    last_idx = mask[::-1].idxmax()
+                    result[date] = regime_series.iloc[last_idx]
 
         return result
 

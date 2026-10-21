@@ -319,8 +319,9 @@ class AdvancedIndicators:
         """
         df = df.copy()
 
-        # 计算ATR
-        df = AdvancedIndicators.atr(df, period)
+        # 仅在无 ATR 时才计算，避免覆写调用方已按自己周期算好的 ATR
+        if 'ATR' not in df.columns:
+            df = AdvancedIndicators.atr(df, period)
 
         # EMA作为中轨
         close = df['收盘']

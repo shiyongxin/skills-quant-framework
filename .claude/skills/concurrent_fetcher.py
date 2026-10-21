@@ -13,13 +13,23 @@ from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
 import pandas as pd
 
-# 导入数据获取模块
+# 导入数据获取模块（各依赖独立守卫，避免一个失败拖垮无关符号绑定）
 try:
     from stock_data_fetcher import StockDataFetcher
-    from cache_manager import CacheManager, get_cache_manager
-    MODULES_AVAILABLE = True
+    _FETCHER_AVAILABLE = True
 except ImportError:
-    MODULES_AVAILABLE = False
+    StockDataFetcher = None
+    _FETCHER_AVAILABLE = False
+
+try:
+    from cache_manager import CacheManager, get_cache_manager
+    _CACHE_AVAILABLE = True
+except ImportError:
+    CacheManager = None
+    get_cache_manager = None
+    _CACHE_AVAILABLE = False
+
+MODULES_AVAILABLE = _FETCHER_AVAILABLE
 
 
 # =============================================================================
@@ -124,7 +134,9 @@ class ConcurrentDataFetcher:
             raise ImportError("必要模块未安装")
 
         self.max_workers = max_workers or FetcherConfig.DEFAULT_MAX_WORKERS
-        self.cache_manager = cache_manager or (get_cache_manager() if use_cache else None)
+        self.cache_manager = cache_manager or (
+            get_cache_manager() if (use_cache and _CACHE_AVAILABLE) else None
+        )
         self.use_cache = use_cache and self.cache_manager is not None
 
         # 创建数据获取器实例池

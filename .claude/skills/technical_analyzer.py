@@ -239,8 +239,8 @@ class TechnicalAnalyzer:
         if candlestick is not None and len(candlestick) > 0:
             # 检查最近的形态
             for col in candlestick.columns:
-                if 'latest' in col and candlestick[col].iloc[-1]:
-                    pattern_name = col.replace('_latest', '')
+                if col.startswith('Pattern_') and candlestick[col].iloc[-1]:
+                    pattern_name = col.replace('Pattern_', '')
                     patterns.append(f"K线: {pattern_name}")
 
         # 价格形态

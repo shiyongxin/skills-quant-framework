@@ -58,7 +58,7 @@ class SignalGenerator:
     def _ma_cross_signal(self, df):
         """均线交叉信号"""
         if 'MA5' not in df or 'MA20' not in df:
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         ma5 = df['MA5']
         ma20 = df['MA20']
@@ -70,23 +70,23 @@ class SignalGenerator:
         # 死叉：MA5下穿MA20
         death_cross = (ma5 < ma20) & (ma5.shift(1) >= ma20.shift(1))
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
         signal[golden_cross] = 1   # 买入信号
         signal[death_cross] = -1  # 卖出信号
 
-        # 趋势确认
+        # 趋势确认（仅填未定档位，不覆盖交叉 1/-1）
         trend_up = (close > ma5) & (ma5 > ma20)
         trend_down = (close < ma5) & (ma5 < ma20)
 
-        signal[trend_up] = signal[trend_up].fillna(0.5)
-        signal[trend_down] = signal[trend_down].fillna(-0.5)
+        signal[trend_up & (signal == 0)] = 0.5
+        signal[trend_down & (signal == 0)] = -0.5
 
         return signal
 
     def _macd_signal(self, df):
         """MACD信号"""
         if 'MACD' not in df or 'MACD_Signal' not in df:
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         macd = df['MACD']
         signal_line = df['MACD_Signal']
@@ -97,23 +97,23 @@ class SignalGenerator:
         # 死叉
         death_cross = (macd < signal_line) & (macd.shift(1) >= signal_line.shift(1))
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
         signal[golden_cross] = 1
         signal[death_cross] = -1
 
-        # 零轴上方
+        # 零轴上方（仅填未定档位）
         above_zero = (macd > 0) & (signal_line > 0)
         below_zero = (macd < 0) & (signal_line < 0)
 
-        signal[above_zero] = signal[above_zero].fillna(0.3)
-        signal[below_zero] = signal[below_zero].fillna(-0.3)
+        signal[above_zero & (signal == 0)] = 0.3
+        signal[below_zero & (signal == 0)] = -0.3
 
         return signal
 
     def _kdj_signal(self, df):
         """KDJ信号"""
         if 'K' not in df or 'D' not in df:
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         k = df['K']
         d = df['D']
@@ -124,27 +124,27 @@ class SignalGenerator:
         # 死叉
         death_cross = (k < d) & (k.shift(1) >= d.shift(1))
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
         signal[golden_cross] = 1
         signal[death_cross] = -1
 
-        # 超买超卖
+        # 超买超卖（仅填未定档位）
         overbought = k > 80
         oversold = k < 20
 
-        signal[overbought] = signal[overbought].fillna(-0.5)  # 超买考虑卖出
-        signal[oversold] = signal[oversold].fillna(0.5)     # 超卖考虑买入
+        signal[overbought & (signal == 0)] = -0.5  # 超买考虑卖出
+        signal[oversold & (signal == 0)] = 0.5     # 超卖考虑买入
 
         return signal
 
     def _rsi_signal(self, df):
         """RSI信号"""
         if 'RSI' not in df:
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         rsi = df['RSI']
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
 
         # 超卖区买入信号
         oversold = (rsi < 30) & (rsi.shift(1) >= 30)
@@ -154,12 +154,12 @@ class SignalGenerator:
         overbought = (rsi > 70) & (rsi.shift(1) <= 70)
         signal[overbought] = -1
 
-        # 强势区
+        # 强势区（仅填未定档位）
         strong = rsi > 50
         weak = rsi < 50
 
-        signal[strong] = signal[strong].fillna(0.2)
-        signal[weak] = signal[weak].fillna(-0.2)
+        signal[strong & (signal == 0)] = 0.2
+        signal[weak & (signal == 0)] = -0.2
 
         return signal
 
@@ -167,13 +167,13 @@ class SignalGenerator:
         """布林带信号"""
         required_cols = ['BB_Upper', 'BB_Lower', '收盘']
         if not all(col in df for col in required_cols):
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         close = df['收盘']
         upper = df['BB_Upper']
         lower = df['BB_Lower']
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
 
         # 突破上轨
         break_upper = close > upper
@@ -196,13 +196,13 @@ class SignalGenerator:
     def _volume_signal(self, df):
         """成交量信号"""
         if '成交量' not in df:
-            return pd.Series(0, index=df.index)
+            return pd.Series(0.0, index=df.index)
 
         volume = df['成交量']
         volume_ma5 = volume.rolling(5).mean()
         volume_ma20 = volume.rolling(20).mean()
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
 
         # 放量
         high_volume = volume > volume_ma5 * 1.5
@@ -220,13 +220,11 @@ class SignalGenerator:
         price_down = close < close.shift(1)
         volume_down = volume < volume_ma5
 
-        # 量增价涨
-        if price_up.iloc[-1] and volume_up.iloc[-1]:
-            signal.iloc[-1] = 0.5
+        # 量增价涨（整列布尔条件，回测序列与当日实盘口径一致）
+        signal[price_up & volume_up] = 0.5
 
         # 量增价跌
-        if price_down.iloc[-1] and volume_up.iloc[-1]:
-            signal.iloc[-1] = -0.5
+        signal[price_down & volume_up] = -0.5
 
         return signal
 
@@ -240,7 +238,7 @@ class SignalGenerator:
         high_20 = high.rolling(20).max()
         low_20 = low.rolling(20).min()
 
-        signal = pd.Series(0, index=df.index)
+        signal = pd.Series(0.0, index=df.index)
 
         # 突破20日高点
         break_high = close > high_20.shift(1)
@@ -310,7 +308,7 @@ class SignalGenerator:
             'signal_breakout'
         ]
 
-        strength = pd.Series(0, index=df.index)
+        strength = pd.Series(0.0, index=df.index)
 
         for sig in signals:
             if sig in df:
