@@ -43,13 +43,18 @@ temp/
 
 # Large files
 *.csv
+!.claude/skills/stock_list.csv
 *.txt
 !requirements.txt
 !web_requirements.txt
 
-# Test scripts
+# Test scripts (ad-hoc, network-dependent — 保留在本地不入库)
 test_*.py
 tests/
+
+# Real test suite (offline-safe, tracked)
+!tests/
+!tests/test_*.py
 
 # Temporary analysis scripts
 analyze_*.py
@@ -94,10 +99,16 @@ holdings_charts/
 *.md
 !README.md
 !CLAUDE.md
+!AGENTS.md
 
 # Optimization packages
 optimization_package/
 optimization_package.zip
+optimization_package_standard.zip
+
+# Analysis artifacts
+skills-quant-framework-analysis.zip
+skills-quant-framework-analysis-extracted/
 
 # Obsidian
 .obsidian/
