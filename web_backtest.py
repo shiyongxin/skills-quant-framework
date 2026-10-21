@@ -8,6 +8,9 @@ from flask import Flask, render_template, request, jsonify
 import sys
 sys.path.append('.claude/skills')
 
+from execution_model import (CostModel, can_buy_at_open, can_sell_at_open,
+                             can_sell_intraday)
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -422,6 +425,11 @@ def detect_reversal_signals(df, params=None):
         signals.append({
             'date': row['日期'].strftime('%Y-%m-%d'),
             'close': float(row['收盘']),
+            # t+1 撮合与涨跌停判定所需: 本根 OHLC + 前一根收盘
+            'open': float(row['开盘']),
+            'high': float(row['最高']),
+            'low': float(row['最低']),
+            'prev_close': float(prev['收盘']),
             'buy_signals': buy_signals,
             'buy_score': float(buy_score),
             'sell_signals': sell_signals,
@@ -490,10 +498,18 @@ def calculate_position_size(buy_score, sell_score, position_config=None):
 
 
 def backtest_stock(code, name, signals_df, params=None, position_config=None):
-    """对单只股票进行回测（带仓位管理 + 止损/止盈/移动止损）。"""
+    """对单只股票进行回测（带仓位管理 + 止损/止盈/移动止损）。
+
+    诚实撮合口径（与 execution_model 四引擎一致）:
+    - 信号在收盘产生 → 次一交易日开盘成交(t+1)；开盘涨停(买)/跌停(卖)挂单顺延，
+      连续3根无法成交则作废(EXPIRED)
+    - 真实费用: 佣金万三(每笔最低5元)+过户费0.001%双边，卖出另加印花税0.05%；滑点买加卖减
+    - 止损/止盈/移动止损按日内 OHLC 判定: 跳空过线按开盘成交；开盘或一字跌停不可卖
+    - 移动止损基准只用本根之前的最高点(无同根未来函数)
+    - 期末持仓按最后收盘价市值计算，不强制平仓
+    """
     p = {**DEFAULT_PARAMS, **(params or {})}
     use_weighted = p.get('use_weighted_scoring', False)
-    # 阈值选择
     if use_weighted:
         buy_threshold = float(p['score_buy_threshold'])
         sell_threshold = float(p['score_sell_threshold'])
@@ -507,29 +523,43 @@ def backtest_stock(code, name, signals_df, params=None, position_config=None):
     min_holding_days  = int(p['min_holding_days'])
     position_size_cap = float(p['position_size_pct'])
 
+    cm = CostModel()
     initial_cash = 100000
     cash = initial_cash
     shares = 0
     trades = []
     position = None
-    daily_logs = []  # 详细日志
+    daily_logs = []
+    pending = None  # 收盘挂单 → 次日开盘执行 {'side','ratio','score','date','ttl'}
 
-    def execute_sell(qty, price, trade_type, reason, signal):
-        """执行卖出，accounting 与原 SELL 分支一致。"""
+    # 日志动作优先级: 风控 > 当日成交 > 决策/挂单
+    EVENT_RANK = {
+        'STOP_LOSS': 3, 'TAKE_PROFIT': 3, 'TRAILING_STOP': 3, 'EXPIRED': 3,
+        'BUY': 2, 'ADD': 2, 'SELL': 2, 'BLOCKED': 2,
+        'HOLD_MIN_DAYS': 1, 'SKIP': 1, 'PENDING': 1,
+        'INFO': 0,
+    }
+
+    def execute_sell(qty, fill_price, trade_type, sell_signal):
+        """卖出成交: fill_price 为已含滑点的成交价，费用从收入中扣。"""
         nonlocal shares, cash, position
-        revenue = qty * price
+        fee = cm.sell_cost(fill_price, qty)
+        revenue = qty * fill_price - fee  # 净收入(与前端现金回放口径一致)
         cash += revenue
         cost_of_sold = position['cost'] * (qty / shares) if shares > 0 else 0
-        profit = revenue - cost_of_sold
-        profit_pct = profit / cost_of_sold * 100 if cost_of_sold > 0 else 0
+        fee_of_sold = position.get('fees', 0.0) * (qty / shares) if shares > 0 else 0
+        profit = revenue - cost_of_sold - fee_of_sold
+        basis = cost_of_sold + fee_of_sold
+        profit_pct = profit / basis * 100 if basis > 0 else 0
         shares_before = shares
         shares -= qty
         trades.append({
             'type': trade_type,
-            'date': signal['date'],
-            'price': float(price),
+            'date': sell_signal['date'],
+            'price': float(fill_price),
             'shares': qty,
             'revenue': revenue,
+            'fee': fee,
             'profit': profit,
             'profit_pct': profit_pct,
             'entry_price': position['entry_price'],
@@ -540,20 +570,33 @@ def backtest_stock(code, name, signals_df, params=None, position_config=None):
             position = None
         else:
             position['cost'] -= cost_of_sold
+            position['fees'] = position.get('fees', 0.0) - fee_of_sold
             position['shares'] = shares
         return profit, profit_pct
 
-    for idx, signal in signals_df.iterrows():
-        price = signal['close']
+    def lots(amount, unit):
+        """按手(100股)向下取整。"""
+        return int(amount / unit / 100) * 100
+
+    for _idx, signal in signals_df.iterrows():
+        close = float(signal['close'])
+        open_px = float(signal.get('open', close))
+        high_px = float(signal.get('high', max(close, open_px)))
+        low_px = float(signal.get('low', min(close, open_px)))
+        prev_close = float(signal.get('prev_close', open_px))
         buy_score = signal['buy_score']
         sell_score = signal['sell_score']
         buy_signals = signal.get('buy_signals', [])
         sell_signals = signal.get('sell_signals', [])
 
-        # 记录当日日志
+        events = []  # [(rank, action, reason, result)]
+
+        def add_event(action, reason, result=''):
+            events.append((EVENT_RANK.get(action, 1), action, reason, result))
+
         daily_log = {
             'date': signal['date'],
-            'price': float(price),
+            'price': close,
             'buy_score': buy_score,
             'sell_score': sell_score,
             'buy_signals': buy_signals,
@@ -563,173 +606,222 @@ def backtest_stock(code, name, signals_df, params=None, position_config=None):
             'position_before': position.copy() if position else None,
             'action': None,
             'action_reason': '',
-            'action_detail': ''
+            'action_detail': '',
         }
 
-        # ---- 持仓期：先检查止损/止盈/移动止损 ----
+        # ---- 1. 执行前一交易日收盘挂下的订单 (t+1 开盘) ----
+        if pending is not None:
+            side = pending['side']
+            dir_cn = '买入' if side == 'buy' else '卖出'
+            open_ok = (can_buy_at_open(open_px, prev_close, code) if side == 'buy'
+                       else can_sell_at_open(open_px, prev_close, code))
+            if open_ok:
+                if side == 'buy':
+                    est_px = cm.buy_price_incl(open_px)  # 估算含费价(纯费率, 供额度)
+                    qty = lots(cash * pending['ratio'], est_px)
+                    if qty > 0:
+                        fill = cm.fill_buy_price(open_px)
+                        fee = cm.buy_cost(fill, qty)
+                        cash -= qty * fill + fee
+                        shares_before = shares
+                        shares += qty
+                        if position is None:
+                            position = {
+                                'entry_date': signal['date'],
+                                'entry_price': fill,      # 除费成交均价(SL/TP基准)
+                                'highest_price': fill,
+                                'shares': shares,
+                                'cost': qty * fill,       # 除费成本(与前端cost字段口径分离)
+                                'fees': fee,
+                                'buy_score': pending['score'],
+                                'buy_ratio': pending['ratio'],
+                            }
+                            trade_type = 'BUY'
+                        else:
+                            position['cost'] += qty * fill
+                            position['fees'] = position.get('fees', 0.0) + fee
+                            position['entry_price'] = position['cost'] / shares
+                            position['highest_price'] = max(
+                                position.get('highest_price', fill), fill)
+                            position['shares'] = shares
+                            position['buy_score'] = max(
+                                position.get('buy_score', 0), pending['score'])
+                            position['buy_ratio'] = pending['ratio']
+                            trade_type = 'ADD'
+                        trades.append({
+                            'type': trade_type,
+                            'date': signal['date'],
+                            'price': fill,
+                            'shares': qty,
+                            'cost': qty * fill + fee,  # 总现金支出(前端现金回放口径)
+                            'fee': fee,
+                            'buy_ratio': pending['ratio'],
+                            'position_size': pending['ratio'],
+                            'shares_before': shares_before,
+                            'shares_after': shares,
+                        })
+                        add_event(trade_type,
+                                  f"信号日{pending['date']}{pending.get('reason', dir_cn)}"
+                                  f" → T+1开盘成交",
+                                  f"成交{qty}股@{fill:.2f}元, 费用{fee:.2f}元")
+                    else:
+                        add_event('SKIP',
+                                  f"信号日{pending['date']}买入挂单执行时资金不足",
+                                  f"现金{cash:.2f}元, {pending['ratio']*100:.0f}%仓位")
+                else:  # sell
+                    qty = lots(shares * pending['ratio'], 1.0)
+                    if qty > 0 and shares > 0:
+                        fill = cm.fill_sell_price(open_px)
+                        reason = (f"信号日{pending['date']}卖出信号"
+                                  f"{pending['score']:.1f}分 → T+1开盘成交")
+                        p_profit, p_pct = execute_sell(qty, fill, 'SELL', signal)
+                        add_event('SELL', reason,
+                                  f"卖出{qty}股@{fill:.2f}元, "
+                                  f"盈亏{p_profit:+.2f}元({p_pct:+.1f}%)")
+                    else:
+                        add_event('SKIP',
+                                  f"信号日{pending['date']}卖出挂单执行时可卖股数为0", '')
+                pending = None
+            else:
+                pending['ttl'] -= 1
+                if pending['ttl'] <= 0:
+                    add_event('EXPIRED',
+                              f"信号日{pending['date']}{dir_cn}挂单连续3根开盘触及"
+                              f"{'涨停' if side == 'buy' else '跌停'}, 作废", '')
+                    pending = None
+                else:
+                    add_event('PENDING',
+                              f"开盘{'涨停无法买入' if side == 'buy' else '跌停无法卖出'}, "
+                              f"挂单顺延(剩{pending['ttl']}次尝试)", '')
+
+        # ---- 2. 风控检查 (日内 OHLC；在开盘挂单执行之后) ----
+        risk_exited = False
         if position and shares > 0:
-            if price > position['highest_price']:
-                position['highest_price'] = price
             holding_days = (datetime.strptime(signal['date'], '%Y-%m-%d')
                             - datetime.strptime(position['entry_date'], '%Y-%m-%d')).days
 
-            # 1) 固定止损（任何时间）
+            # 1) 固定止损: 跳空过线按开盘，盘中触及按止损线价
             if stop_loss_pct > 0:
                 sl_price = position['entry_price'] * (1 - stop_loss_pct)
-                if price <= sl_price:
-                    daily_log['action'] = 'STOP_LOSS'
-                    daily_log['action_reason'] = (
-                        f'触发止损 {stop_loss_pct*100:.1f}% '
-                        f'(现价{price:.2f} ≤ 止损线{sl_price:.2f})'
-                    )
-                    p_profit, p_pct = execute_sell(shares, price, 'STOP_LOSS', daily_log['action_reason'], signal)
-                    daily_log['action_result'] = (
-                        f'止损平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
-                    )
-                    daily_logs.append(daily_log)
-                    continue
+                fill = None
+                if open_px <= sl_price:
+                    if can_sell_at_open(open_px, prev_close, code):
+                        fill = cm.fill_sell_price(open_px)
+                elif low_px <= sl_price:
+                    if can_sell_intraday(open_px, high_px, low_px, close,
+                                         prev_close, code):
+                        fill = cm.fill_sell_price(sl_price)
+                if fill is not None:
+                    reason = (f'触发止损 {stop_loss_pct*100:.1f}% '
+                              f'(开盘/最低价 ≤ 止损线{sl_price:.2f})')
+                    p_profit, p_pct = execute_sell(shares, fill, 'STOP_LOSS', signal)
+                    add_event('STOP_LOSS', reason,
+                              f'止损平仓{shares}股@{fill:.2f}元, '
+                              f'盈亏{p_profit:+.2f}元({p_pct:+.1f}%)')
+                    risk_exited = True
+                elif (open_px <= sl_price or low_px <= sl_price) and not can_sell_intraday(
+                        open_px, high_px, low_px, close, prev_close, code):
+                    add_event('BLOCKED',
+                              f'止损线{sl_price:.2f}已触发但开盘/日内跌停无法卖出',
+                              '持仓顺延, 下一交易日重试')
 
-            # 2) 止盈（受 min_holding_days 约束）
-            if take_profit_pct > 0 and holding_days >= min_holding_days:
+            # 2) 止盈 (受 min_holding_days 约束)
+            if not risk_exited and take_profit_pct > 0 and holding_days >= min_holding_days:
                 tp_price = position['entry_price'] * (1 + take_profit_pct)
-                if price >= tp_price:
-                    daily_log['action'] = 'TAKE_PROFIT'
-                    daily_log['action_reason'] = (
-                        f'触发止盈 {take_profit_pct*100:.1f}% '
-                        f'(现价{price:.2f} ≥ 止盈线{tp_price:.2f}, 已持仓{holding_days}天)'
-                    )
-                    p_profit, p_pct = execute_sell(shares, price, 'TAKE_PROFIT', daily_log['action_reason'], signal)
-                    daily_log['action_result'] = (
-                        f'止盈平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
-                    )
-                    daily_logs.append(daily_log)
-                    continue
+                fill = None
+                if open_px >= tp_price:
+                    if can_sell_at_open(open_px, prev_close, code):
+                        fill = cm.fill_sell_price(open_px)
+                elif high_px >= tp_price:
+                    if can_sell_intraday(open_px, high_px, low_px, close,
+                                         prev_close, code):
+                        fill = cm.fill_sell_price(tp_price)
+                if fill is not None:
+                    reason = (f'触发止盈 {take_profit_pct*100:.1f}% '
+                              f'(开盘/最高价 ≥ 止盈线{tp_price:.2f}, '
+                              f'已持仓{holding_days}天)')
+                    p_profit, p_pct = execute_sell(shares, fill, 'TAKE_PROFIT', signal)
+                    add_event('TAKE_PROFIT', reason,
+                              f'止盈平仓{shares}股@{fill:.2f}元, '
+                              f'盈亏{p_profit:+.2f}元({p_pct:+.1f}%)')
+                    risk_exited = True
 
-            # 3) 移动止损（只在创新高后启动，止损线须在成本价之上）
-            if (trailing_stop_pct > 0
+            # 3) 移动止损: 基准只用本根之前的最高点(无同根未来函数)
+            if (not risk_exited and trailing_stop_pct > 0
                     and position['highest_price'] > position['entry_price']):
                 ts_price = position['highest_price'] * (1 - trailing_stop_pct)
-                if price <= ts_price and ts_price > position['entry_price']:
-                    daily_log['action'] = 'TRAILING_STOP'
-                    daily_log['action_reason'] = (
-                        f'触发移动止损 {trailing_stop_pct*100:.1f}% '
-                        f'(高点{position["highest_price"]:.2f}, 止损线{ts_price:.2f})'
-                    )
-                    p_profit, p_pct = execute_sell(shares, price, 'TRAILING_STOP', daily_log['action_reason'], signal)
-                    daily_log['action_result'] = (
-                        f'移动止损平仓 {shares} 股@{price:.2f}元, 盈亏 {p_profit:+.2f}元({p_pct:+.1f}%)'
-                    )
-                    daily_logs.append(daily_log)
-                    continue
+                if ts_price > position['entry_price']:
+                    fill = None
+                    if open_px <= ts_price:
+                        if can_sell_at_open(open_px, prev_close, code):
+                            fill = cm.fill_sell_price(open_px)
+                    elif low_px <= ts_price:
+                        if can_sell_intraday(open_px, high_px, low_px, close,
+                                             prev_close, code):
+                            fill = cm.fill_sell_price(ts_price)
+                    if fill is not None:
+                        reason = (f'触发移动止损 {trailing_stop_pct*100:.1f}% '
+                                  f'(高点{position["highest_price"]:.2f}, '
+                                  f'止损线{ts_price:.2f})')
+                        p_profit, p_pct = execute_sell(shares, fill, 'TRAILING_STOP',
+                                                       signal)
+                        add_event('TRAILING_STOP', reason,
+                                  f'移动止损平仓{shares}股@{fill:.2f}元, '
+                                  f'盈亏{p_profit:+.2f}元({p_pct:+.1f}%)')
+                        risk_exited = True
 
-        # 卖出逻辑（信号驱动，受 min_holding_days 约束）
-        if sell_score >= sell_threshold and shares > 0:
-            holding_days = 0
-            if position:
+            # 仍持仓 → 用本根最高更新移动止损基准(检查已在更新之前完成)
+            if not risk_exited and position is not None:
+                position['highest_price'] = max(position['highest_price'], high_px)
+
+        # ---- 3. 收盘信号评估 → 生成次日挂单 (风控出场后跳过) ----
+        if not risk_exited:
+            if sell_score >= sell_threshold and shares > 0 and position:
                 holding_days = (datetime.strptime(signal['date'], '%Y-%m-%d')
-                                - datetime.strptime(position['entry_date'], '%Y-%m-%d')).days
-            if holding_days < min_holding_days:
-                daily_log['action'] = 'HOLD_MIN_DAYS'
-                daily_log['action_reason'] = (
-                    f'卖出信号{sell_score:.1f}分但未到最小持仓天数 '
-                    f'({holding_days}/{min_holding_days})'
-                )
-                daily_logs.append(daily_log)
-                continue
-
-            buy_ratio, sell_ratio = calculate_position_size(buy_score, sell_score, position_config)
-            sell_shares = int(shares * sell_ratio / 100) * 100  # 100股取整
-
-            daily_log['action'] = 'SELL'
-            daily_log['action_reason'] = f'卖出信号{sell_score:.1f}分≥阈值{sell_threshold:.1f}|{",".join(sell_signals)}'
-            daily_log['action_detail'] = f'计划卖出{sell_ratio*100:.0f}%仓位'
-
-            if sell_shares > 0 and sell_shares <= shares:
-                p_profit, p_pct = execute_sell(sell_shares, price, 'SELL', daily_log['action_reason'], signal)
-                daily_log['action_result'] = (
-                    f'卖出{sell_shares}股@{price:.2f}元, 收入{p_profit + (position["cost"] * (sell_shares / (sell_shares + shares)) if position else 0):.2f}元, '
-                    f'盈亏{p_profit:+.2f}元({p_pct:+.1f}%)'
-                )
-            else:
-                daily_log['action'] = 'SKIP'
-                daily_log['action_reason'] = f'卖出信号{sell_score:.1f}分但计算卖出股数为0或超过持仓'
-
-        # 买入逻辑 - 支持建仓和加仓
-        elif buy_score >= buy_threshold:
-            buy_ratio, _ = calculate_position_size(buy_score, sell_score, position_config)
-            # 用 position_size_pct 给信号分数档位加一个上限（系统模式生效）
-            if position_size_cap < 1.0:
-                buy_ratio = min(buy_ratio, position_size_cap)
-            cost_per_share = price
-            max_shares = int((cash * buy_ratio) / cost_per_share / 100) * 100  # 100股取整
-
-            daily_log['action'] = 'BUY' if position is None else 'ADD'
-            daily_log['action_reason'] = f'买入信号{buy_score:.1f}分≥阈值{buy_threshold:.1f}|{",".join(buy_signals)}'
-            daily_log['action_detail'] = f'计划使用{buy_ratio*100:.0f}%资金({cash*buy_ratio:.0f}元)'
-
-            if max_shares > 0:
-                shares_before = shares
-                shares += max_shares
-                cost = max_shares * cost_per_share
-                cash -= cost
-
-                # 更新或创建position记录（使用加权平均成本）
-                if position is None:
-                    # 建仓
-                    position = {
-                        'entry_date': signal['date'],
-                        'entry_price': cost_per_share,
-                        'highest_price': cost_per_share,
-                        'shares': shares,
-                        'cost': cost,
-                        'buy_score': buy_score,
-                        'buy_ratio': buy_ratio
-                    }
-                    trade_type = 'BUY'
-                    daily_log['action_result'] = f'建仓买入{max_shares}股@{cost_per_share:.2f}元,成本{cost:.2f}元'
+                                - datetime.strptime(position['entry_date'],
+                                                    '%Y-%m-%d')).days
+                if holding_days < min_holding_days:
+                    add_event('HOLD_MIN_DAYS',
+                              f'卖出信号{sell_score:.1f}分但未到最小持仓天数 '
+                              f'({holding_days}/{min_holding_days})', '')
                 else:
-                    # 加仓 - 更新加权平均成本
-                    total_cost = position['cost'] + cost
-                    total_shares = position['shares'] + max_shares
-                    old_avg_price = position['entry_price']
-                    new_avg_price = total_cost / total_shares
-                    position = {
-                        'entry_date': position['entry_date'],  # 保持首次建仓日期
-                        'entry_price': new_avg_price,  # 更新加权平均价
-                        'highest_price': max(position.get('highest_price', cost_per_share), cost_per_share),
-                        'shares': total_shares,
-                        'cost': total_cost,
-                        'buy_score': max(position.get('buy_score', 0), buy_score),  # 更新最高买入分数
-                        'buy_ratio': buy_ratio
-                    }
-                    trade_type = 'ADD'
-                    daily_log['action_result'] = f'加仓买入{max_shares}股@{cost_per_share:.2f}元,成本{cost:.2f}元,均价{old_avg_price:.2f}→{new_avg_price:.2f}'
-
-                trades.append({
-                    'type': trade_type,
-                    'date': signal['date'],
-                    'price': cost_per_share,
-                    'shares': max_shares,
-                    'cost': cost,
-                    'buy_ratio': buy_ratio,
-                    'position_size': buy_ratio,
-                    'shares_before': shares_before,
-                    'shares_after': shares
-                })
+                    _, sell_ratio = calculate_position_size(buy_score, sell_score,
+                                                            position_config)
+                    pending = {'side': 'sell', 'ratio': sell_ratio,
+                               'score': sell_score, 'date': signal['date'], 'ttl': 3}
+                    add_event('PENDING',
+                              f'卖出信号{sell_score:.1f}分≥阈值{sell_threshold:.1f}|'
+                              f'{",".join(sell_signals)} → '
+                              f'次日开盘卖出{sell_ratio*100:.0f}%仓位', '')
+            elif buy_score >= buy_threshold:
+                buy_ratio, _ = calculate_position_size(buy_score, sell_score,
+                                                       position_config)
+                if position_size_cap < 1.0:
+                    buy_ratio = min(buy_ratio, position_size_cap)
+                pending = {'side': 'buy', 'ratio': buy_ratio, 'score': buy_score,
+                           'date': signal['date'], 'ttl': 3}
+                add_event('PENDING',
+                          f'买入信号{buy_score:.1f}分≥阈值{buy_threshold:.1f}|'
+                          f'{",".join(buy_signals)} → '
+                          f'次日开盘使用{buy_ratio*100:.0f}%资金', '')
             else:
-                daily_log['action'] = 'SKIP'
-                daily_log['action_reason'] = f'买入信号{buy_score:.1f}分但资金不足(现金{cash:.2f}元)'
-        else:
-            # 没有触发买卖信号
-            if buy_score > 0 or sell_score > 0:
-                daily_log['action_reason'] = f'买入{buy_score:.1f}分(阈值{buy_threshold:.1f})|卖出{sell_score:.1f}分(阈值{sell_threshold:.1f})'
-            else:
-                daily_log['action_reason'] = '无买卖信号'
+                if buy_score > 0 or sell_score > 0:
+                    add_event('INFO',
+                              f'买入{buy_score:.1f}分(阈值{buy_threshold:.1f})|'
+                              f'卖出{sell_score:.1f}分(阈值{sell_threshold:.1f})', '')
+                else:
+                    add_event('INFO', '无买卖信号', '')
 
-        # 每日日志记录完成
+        # 日志定稿: 高优先级动作为标签，全部原因/结果按优先级拼接
+        if events:
+            events.sort(key=lambda e: -e[0])
+            top = events[0]
+            daily_log['action'] = top[1] if top[0] > 0 else None
+            daily_log['action_reason'] = '；'.join(e[2] for e in events if e[2])
+            daily_log['action_result'] = '；'.join(e[3] for e in events if e[3])
         daily_logs.append(daily_log)
 
-    # 最终平仓
+    # 期末持仓按最后收盘价市值计算(不强制平仓，与四引擎一致)
     final_value = cash
     if shares > 0 and position:
         last_price = signals_df.iloc[-1]['close']
@@ -741,12 +833,14 @@ def backtest_stock(code, name, signals_df, params=None, position_config=None):
         'initial_cash': initial_cash,
         'final_value': final_value,
         'trades': trades,
-        'trade_count': len([t for t in trades if t['type'] in ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')]),
+        'trade_count': len([t for t in trades if t['type'] in
+                            ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')]),
         'total_profit': final_value - initial_cash,
         'profit_pct': (final_value - initial_cash) / initial_cash * 100,
         'daily_logs': daily_logs,
         'buy_count': len([t for t in trades if t['type'] in ('BUY', 'ADD')]),
-        'sell_count': len([t for t in trades if t['type'] in ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')])
+        'sell_count': len([t for t in trades if t['type'] in
+                           ('SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP')]),
     }
 
 
