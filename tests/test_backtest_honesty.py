@@ -348,10 +348,8 @@ class TestValidatorE:
         exp_exit = cm.sell_price_incl(11.0)     # 第5持有日收盘
         exp_ret = (exp_exit / exp_entry - 1) * 100
         assert abs(ret - exp_ret) < 1e-9, (ret, exp_ret)
-        # 基准按个股真实入场/出场日期对齐: 03-06→03-12
-        exp_csi_entry = cm.buy_price_incl(102.0)
-        exp_csi_exit = cm.sell_price_incl(106.0)
-        exp_csi = (exp_csi_exit / exp_csi_entry - 1) * 100
+        # 基准按个股真实入场/出场日期对齐: 03-06→03-12, 毛收益不扣个股成本
+        exp_csi = (106.0 / 102.0 - 1) * 100
         assert abs(csi_ret - exp_csi) < 1e-9, (csi_ret, exp_csi)
         # 扣成本后收益低于裸价差
         assert ret < (11.0 / 10.2 - 1) * 100

@@ -342,8 +342,10 @@ class HistoricalBacktestValidator:
         if len(csi_aligned) < 2:
             return stock_return, None
 
-        csi_entry = self.cost_model.buy_price_incl(float(csi_aligned.iloc[0]['收盘']))
-        csi_exit = self.cost_model.sell_price_incl(float(csi_aligned.iloc[-1]['收盘']))
+        # 基准取毛收益(指数点位不套用个股往返成本: 无印花税/佣金口径,
+        # 且净策略 vs 毛基准是偏保守方向, 不虚增跑赢比例)
+        csi_entry = float(csi_aligned.iloc[0]['收盘'])
+        csi_exit = float(csi_aligned.iloc[-1]['收盘'])
         if csi_entry <= 0:
             return stock_return, None
         csi_return = (csi_exit / csi_entry - 1) * 100
