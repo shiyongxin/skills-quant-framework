@@ -23,6 +23,10 @@ from enum import Enum
 import warnings
 warnings.filterwarnings('ignore')
 
+from execution_model import (
+    CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday,
+)
+
 
 class PositionSizingMethod(Enum):
     """持仓规模管理方法"""
@@ -93,6 +97,7 @@ class BacktestEngine:
         self.commission = commission
         self.slippage = slippage
         self.position_config = position_config or PositionConfig()
+        self.cost_model = CostModel.from_engine(commission, slippage)
 
         # 回测状态
         self.cash = initial_cash
@@ -100,6 +105,7 @@ class BacktestEngine:
         self.trades = []    # 交易记录
         self.equity = []    # 资金曲线
         self.daily_values = []  # 每日市值
+        self.pending_order: Optional[Dict] = None  # t+1 待撮合订单
 
     def reset(self):
         """重置回测状态"""
@@ -108,6 +114,7 @@ class BacktestEngine:
         self.trades = []
         self.equity = []
         self.daily_values = []
+        self.pending_order = None
 
     def run(self, data: pd.DataFrame, strategy: Callable,
             symbol: str = "STOCK") -> Dict:
@@ -128,20 +135,30 @@ class BacktestEngine:
         if 'ATR' not in data.columns:
             data = self._calculate_atr(data)
 
+        pending = None
+
         for i in range(1, len(data)):
             current_bar = data.iloc[i]
             current_date = current_bar['日期']
+            prev_close = data['收盘'].iloc[i - 1]
 
-            # 获取策略信号
-            signal = strategy(data.iloc[:i+1])
+            # 1) t+1 撮合: 上一根收盘产生的信号在本根开盘成交（含涨跌停拦截）
+            if pending is not None:
+                pending = self._fill_pending(symbol, current_bar, prev_close, pending)
 
-            # 执行交易
-            self._execute_signal(symbol, signal, current_bar, data.iloc[:i+1])
+            # 2) 日内止损止盈（本根开盘刚成交的持仓同样有效；涨跌停封板不可卖出）
+            self._check_stop_loss_take_profit(symbol, current_bar, prev_close, code=symbol)
 
-            # 检查止损止盈
-            self._check_stop_loss_take_profit(symbol, current_bar)
+            # 3) 策略信号（本根收盘判定 → 排队至下一根开盘）
+            signal = strategy(data.iloc[:i + 1])
+            if signal in (1, -1):
+                pending = {
+                    'side': int(signal),
+                    'ttl': 3,  # 涨跌停拦截后最多顺延3根，超时作废
+                    'atr': data['ATR'].iloc[i] if 'ATR' in data.columns else None,
+                }
 
-            # 记录权益
+            # 4) 记录权益
             current_value = self._get_total_value(current_bar['收盘'])
             self.equity.append({
                 'date': current_date,
@@ -237,95 +254,128 @@ class BacktestEngine:
 
         return entry_price * (1 - config.stop_loss_pct)
 
-    def _execute_signal(self, symbol: str, signal: int, bar: pd.Series,
-                       data: pd.DataFrame):
-        """执行交易信号"""
-        price = bar['收盘']
-        atr = data['ATR'].iloc[-1] if 'ATR' in data.columns else None
+    def _fill_pending(self, symbol: str, bar: pd.Series, prev_close: float,
+                      pending: Dict) -> Optional[Dict]:
+        """
+        t+1 开盘撮合待处理订单。
 
-        # 买入信号
-        if signal == 1 and symbol not in self.positions:
-            # 计算持仓数量
-            shares = self._calculate_position_size(price, atr)
+        买入在开盘触及涨停（含一字板）→ 不可成交，顺延最多 ttl 根后作废；
+        卖出在开盘触及跌停 → 同样顺延。
+        返回剩余 pending（None 表示已了结/作废）。
+        """
+        side = pending['side']
+        atr = pending.get('atr')
 
-            if shares > 0:
-                buy_price = price * (1 + self.slippage)
-                cost = shares * buy_price * (1 + self.commission)
+        if side == 1:
+            if symbol in self.positions:
+                return None  # 已有持仓，买入意图作废
+            fill = can_buy_at_open(bar['开盘'], prev_close, symbol) and bar['开盘']
+            if not fill:
+                pending['ttl'] -= 1
+                return pending if pending['ttl'] > 0 else None
+            raw_price = float(fill)
+            shares = self._calculate_position_size(raw_price, atr)
+            shares = (shares // 100) * 100  # A股整手(100股)约束
+            if shares < 100:
+                return None
 
-                if cost <= self.cash:
-                    # 计算止损止盈价格
-                    stop_loss_price = self._calculate_stop_loss_price(buy_price, atr)
-                    take_profit_price = None
-                    if self.position_config.take_profit_enabled:
-                        take_profit_price = buy_price * (1 + self.position_config.take_profit_pct)
+            buy_price = self.cost_model.fill_buy_price(raw_price)
+            notional = shares * buy_price
+            fee = self.cost_model.buy_cost(buy_price, shares)
+            cost = notional + fee
+            while shares >= 100 and cost > self.cash:
+                shares -= 100
+                notional = shares * buy_price
+                fee = self.cost_model.buy_cost(buy_price, shares)
+                cost = notional + fee
+            if shares < 100:
+                return None
 
-                    # 创建持仓
-                    position = Position(
-                        symbol=symbol,
-                        shares=shares,
-                        entry_price=buy_price,
-                        entry_date=bar['日期'],
-                        stop_loss_price=stop_loss_price,
-                        take_profit_price=take_profit_price,
-                        highest_price=buy_price
-                    )
-                    self.positions[symbol] = position
-                    self.cash -= cost
+            # 计算止损止盈价格（基于决策时A股与成交价）
+            stop_loss_price = self._calculate_stop_loss_price(buy_price, atr)
+            take_profit_price = None
+            if self.position_config.take_profit_enabled:
+                take_profit_price = buy_price * (1 + self.position_config.take_profit_pct)
 
-                    self.trades.append({
-                        'date': bar['日期'],
-                        'symbol': symbol,
-                        'action': 'buy',
-                        'price': buy_price,
-                        'shares': shares,
-                        'cost': cost,
-                        'stop_loss': stop_loss_price
-                    })
+            position = Position(
+                symbol=symbol,
+                shares=shares,
+                entry_price=buy_price,
+                entry_date=bar['日期'],
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                highest_price=buy_price
+            )
+            self.positions[symbol] = position
+            self.cash -= cost
 
-        # 卖出信号
-        elif signal == -1 and symbol in self.positions:
-            self._close_position(symbol, bar['日期'], price, 'signal')
+            self.trades.append({
+                'date': bar['日期'],
+                'symbol': symbol,
+                'action': 'buy',
+                'price': buy_price,
+                'shares': shares,
+                'cost': cost,
+                'fee': fee,
+                'stop_loss': stop_loss_price
+            })
+            return None
 
-    def _check_stop_loss_take_profit(self, symbol: str, bar: pd.Series):
-        """检查止损止盈"""
+        # 卖出
+        if symbol not in self.positions:
+            return None
+        if not can_sell_at_open(bar['开盘'], prev_close, symbol):
+            pending['ttl'] -= 1
+            return pending if pending['ttl'] > 0 else None
+        self._close_position(symbol, bar['日期'], float(bar['开盘']), 'signal')
+        return None
+
+    def _check_stop_loss_take_profit(self, symbol: str, bar: pd.Series,
+                                     prev_close: float = None, code: str = None):
+        """检查止损止盈（日内触发；跌停封板当日不可卖出 → 顺延到下一交易日）"""
         if symbol not in self.positions:
             return
 
         position = self.positions[symbol]
-        price = bar['收盘']
-        low = bar['最低']
         high = bar['最高']
+        low = bar['最低']
+        open_price = bar['开盘']
 
-        # 更新最高价 (用于移动止损)
+        # 更新最高价 (用于移动止损; 收盘后生效于下一根, 避免同根高低点未来函数)
         if position.highest_price is None or high > position.highest_price:
             position.highest_price = high
 
-        # 检查止损
-        if position.stop_loss_price is not None:
-            if low <= position.stop_loss_price:
-                self._close_position(symbol, bar['日期'], position.stop_loss_price, 'stop_loss')
+        # 检查止损（跳空低于止损价时按开盘价成交, 而非幻影止损价）
+        if position.stop_loss_price is not None and low <= position.stop_loss_price:
+            if prev_close is None or can_sell_intraday(
+                    open_price, high, low, bar['收盘'], prev_close, code or symbol):
+                fill_price = min(position.stop_loss_price, open_price)
+                self._close_position(symbol, bar['日期'], fill_price, 'stop_loss')
                 return
 
-        # 检查止盈
-        if position.take_profit_price is not None:
-            if high >= position.take_profit_price:
-                self._close_position(symbol, bar['日期'], position.take_profit_price, 'take_profit')
+        # 检查止盈（跳空高于止盈价时按开盘价成交）
+        if position.take_profit_price is not None and high >= position.take_profit_price:
+            if prev_close is None or can_sell_intraday(
+                    open_price, high, low, bar['收盘'], prev_close, code or symbol):
+                fill_price = max(position.take_profit_price, open_price)
+                self._close_position(symbol, bar['日期'], fill_price, 'take_profit')
                 return
 
-        # 移动止损
+        # 移动止损 (基于已收盘bar的最高价, 下一根bar生效)
         if self.position_config.stop_loss_method == StopLossMethod.TRAILING:
             new_stop_loss = position.highest_price * (1 - self.position_config.trailing_stop_pct)
             if new_stop_loss > position.stop_loss_price:
                 position.stop_loss_price = new_stop_loss
 
     def _close_position(self, symbol: str, date: any, price: float, reason: str):
-        """平仓"""
+        """平仓（滑点+佣金+过户费+印花税经 CostModel 统一扣减）"""
         if symbol not in self.positions:
             return
 
         position = self.positions[symbol]
-        sell_price = price * (1 - self.slippage)
-        proceeds = position.shares * sell_price * (1 - self.commission)
+        sell_price = self.cost_model.fill_sell_price(price)
+        fee = self.cost_model.sell_cost(sell_price, position.shares)
+        proceeds = position.shares * sell_price - fee
 
         self.trades.append({
             'date': date,
@@ -334,6 +384,7 @@ class BacktestEngine:
             'price': sell_price,
             'shares': position.shares,
             'proceeds': proceeds,
+            'fee': fee,
             'entry_price': position.entry_price,
             'pnl_pct': (sell_price / position.entry_price - 1) * 100,
             'reason': reason

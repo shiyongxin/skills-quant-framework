@@ -14,9 +14,11 @@ import numpy as np
 import akshare as ak
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
+
+from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
 
 
 @dataclass
@@ -27,6 +29,7 @@ class Trade:
     price: float
     shares: int
     reason: str
+    fee: float = 0.0  # 交易成本(佣金+过户+印花税)
 
 
 @dataclass
@@ -58,6 +61,7 @@ class ReversalBacktester:
 
     def __init__(self, initial_capital: float = 100000):
         self.initial_capital = initial_capital
+        self.cost_model = CostModel()  # 佣金万三(最低5元)+印花税0.05%+过户0.001%+滑点
 
     def get_stock_data(self, code: str, days: int = 365) -> Optional[pd.DataFrame]:
         """获取股票历史数据"""
@@ -228,13 +232,14 @@ class ReversalBacktester:
 
             # 5. 顶背离检测
             if i >= 20:
-                recent = df.iloc[i-20:i+1]
+                recent = df.iloc[i-20:i+1].reset_index(drop=True)
                 price_max_idx = recent['收盘'].idxmax()
                 rsi_max_idx = recent['RSI14'].idxmax()
-                if price_max_idx == i and rsi_max_idx < i - 5:
-                    if recent['RSI14'].iloc[-1] < recent['RSI14'].iloc[rsi_max_idx]:
-                        sell_score += 25
-                        sell_reasons.append('顶背离')
+                if price_max_idx == len(recent) - 1 and rsi_max_idx < len(recent) - 5:
+                    if pd.notna(recent['RSI14'].iloc[-1]) and pd.notna(recent['RSI14'].iloc[rsi_max_idx]):
+                        if recent['RSI14'].iloc[-1] < recent['RSI14'].iloc[rsi_max_idx]:
+                            sell_score += 25
+                            sell_reasons.append('顶背离')
 
             # 设置信号
             if buy_score >= 40:
@@ -267,81 +272,124 @@ class ReversalBacktester:
         last_price = df['收盘'].iloc[-1]
         buy_hold_return = (last_price / first_price - 1) * 100
 
-        # 执行交易
+        # 执行交易 (t+1: 本根收盘信号在下一根开盘成交; 涨跌停拦截+完整成本)
+        pending = None  # {'intent': 'BUY'/'SELL', 'reason': str, 'ttl': int}
+
         for i in range(len(df)):
             row = df.iloc[i]
 
-            # 买入信号 (没有持仓时)
+            # 1) 撮合上一根收盘产生的意图 (本根开盘)
+            if pending is not None and i > 0:
+                prev_close = df['收盘'].iloc[i - 1]
+                open_px = float(row['开盘'])
+                intent = pending['intent']
+
+                if intent == 'BUY' and shares == 0:
+                    if can_buy_at_open(open_px, prev_close, code):
+                        fill_px = self.cost_model.fill_buy_price(open_px)
+                        buy_shares = int(cash / open_px / 100) * 100  # 整手
+                        # 费用感知: 逐档下调直到总成本可负担
+                        while buy_shares >= 100:
+                            fee_try = self.cost_model.buy_cost(fill_px, buy_shares)
+                            if buy_shares * fill_px + fee_try <= cash:
+                                break
+                            buy_shares -= 100
+                        if buy_shares >= 100:
+                            fee = self.cost_model.buy_cost(fill_px, buy_shares)
+                            cost = buy_shares * fill_px + fee
+                            cash -= cost
+                            shares = buy_shares
+
+                            trades.append(Trade(
+                                type='BUY', date=row['日期'], price=fill_px,
+                                shares=buy_shares, reason=pending['reason'], fee=fee))
+                            trade_details.append({
+                                'type': 'BUY',
+                                'date': row['日期'].strftime('%Y-%m-%d'),
+                                'price': fill_px,
+                                'shares': buy_shares,
+                                'fee': fee,
+                                'reason': pending['reason']
+                            })
+                        pending = None
+                    else:
+                        # 开盘涨停买不进 → 顺延(最多3根)
+                        pending['ttl'] -= 1
+                        if pending['ttl'] <= 0:
+                            pending = None
+
+                elif intent == 'SELL' and shares > 0:
+                    if can_sell_at_open(open_px, prev_close, code):
+                        fill_px = self.cost_model.fill_sell_price(open_px)
+                        fee = self.cost_model.sell_cost(fill_px, shares)
+                        revenue = shares * fill_px - fee
+                        cash += revenue
+
+                        trades.append(Trade(
+                            type='SELL', date=row['日期'], price=fill_px,
+                            shares=shares, reason=pending['reason'], fee=fee))
+                        trade_details.append({
+                            'type': 'SELL',
+                            'date': row['日期'].strftime('%Y-%m-%d'),
+                            'price': fill_px,
+                            'shares': shares,
+                            'fee': fee,
+                            'reason': pending['reason']
+                        })
+                        shares = 0
+                        pending = None
+                    else:
+                        # 开盘跌停卖不出 → 顺延(最多3根)
+                        pending['ttl'] -= 1
+                        if pending['ttl'] <= 0:
+                            pending = None
+                else:
+                    pending = None  # 状态已不匹配(如已持仓/已空仓)
+
+            # 2) 本根收盘信号 → 排队下一根开盘
             if shares == 0 and row['buy_signal'] > 0:
-                # 全仓买入
-                buy_shares = int(cash / row['收盘'] / 100) * 100  # 整手
-                if buy_shares > 0:
-                    cost = buy_shares * row['收盘']
-                    cash -= cost
-                    shares = buy_shares
-
-                    trade = Trade(
-                        type='BUY',
-                        date=row['日期'],
-                        price=row['收盘'],
-                        shares=buy_shares,
-                        reason=row['buy_reason']
-                    )
-                    trades.append(trade)
-                    trade_details.append({
-                        'type': 'BUY',
-                        'date': row['日期'].strftime('%Y-%m-%d'),
-                        'price': row['收盘'],
-                        'shares': buy_shares,
-                        'reason': row['buy_reason']
-                    })
-
-            # 卖出信号 (有持仓时)
+                pending = {'intent': 'BUY', 'reason': row['buy_reason'], 'ttl': 3}
             elif shares > 0 and row['sell_signal'] > 0:
-                # 全部卖出
-                revenue = shares * row['收盘']
-                cash += revenue
+                pending = {'intent': 'SELL', 'reason': row['sell_reason'], 'ttl': 3}
 
-                trade = Trade(
-                    type='SELL',
-                    date=row['日期'],
-                    price=row['收盘'],
-                    shares=shares,
-                    reason=row['sell_reason']
-                )
-                trades.append(trade)
+        # 期末清仓 (最后一根封跌停不可卖出 → 不虚构成交, 按收盘市值计入收益)
+        if shares > 0:
+            last = df.iloc[-1]
+            prev_close = df['收盘'].iloc[-2] if len(df) > 1 else last['收盘']
+            if can_sell_intraday(float(last['开盘']), float(last['最高']),
+                                 float(last['最低']), float(last['收盘']),
+                                 prev_close, code):
+                sell_px = self.cost_model.fill_sell_price(float(last['收盘']))
+                fee = self.cost_model.sell_cost(sell_px, shares)
+                cash += shares * sell_px - fee
+                trades.append(Trade(
+                    type='SELL', date=last['日期'], price=sell_px,
+                    shares=shares, reason='期末清仓', fee=fee))
                 trade_details.append({
                     'type': 'SELL',
-                    'date': row['日期'].strftime('%Y-%m-%d'),
-                    'price': row['收盘'],
+                    'date': last['日期'].strftime('%Y-%m-%d'),
+                    'price': sell_px,
                     'shares': shares,
-                    'reason': row['sell_reason']
+                    'fee': fee,
+                    'reason': '期末清仓'
                 })
                 shares = 0
 
-        # 最后如果还持有，按收盘价清仓
-        if shares > 0:
-            cash += shares * df['收盘'].iloc[-1]
-            trades.append(Trade(
-                type='SELL',
-                date=df['日期'].iloc[-1],
-                price=df['收盘'].iloc[-1],
-                shares=shares,
-                reason='期末清仓'
-            ))
-
-        # 计算收益
-        total_return = (cash / self.initial_capital - 1) * 100
+        # 计算收益 (含未清仓部分的收盘市值)
+        total_value = cash + shares * df['收盘'].iloc[-1] if shares > 0 else cash
+        total_return = (total_value / self.initial_capital - 1) * 100
         excess_return = total_return - buy_hold_return
 
-        # 计算胜率
+        # 计算胜率 (按含费净额判定)
         win_trades = 0
         lose_trades = 0
         for i in range(0, len(trades) - 1, 2):
             if i + 1 < len(trades):
                 buy_trade = trades[i]
                 sell_trade = trades[i + 1]
-                if sell_trade.price > buy_trade.price:
+                buy_cost = buy_trade.price * buy_trade.shares + buy_trade.fee
+                sell_net = sell_trade.price * sell_trade.shares - sell_trade.fee
+                if sell_net > buy_cost:
                     win_trades += 1
                 else:
                     lose_trades += 1

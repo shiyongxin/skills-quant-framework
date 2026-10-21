@@ -33,6 +33,7 @@ from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from daily_signal_generator import generate_signal
 from parameter_space import ParameterSpace
+from execution_model import CostModel
 
 
 @dataclass
@@ -81,6 +82,7 @@ class HistoricalBacktestValidator:
         self.data_dir = data_dir
         self.data_manager = HistoricalDataManager(data_dir)
         self.backtester = VectorizedBacktester()
+        self.cost_model = CostModel()  # 前向收益统一扣减A股往返成本
         self.systems = {}  # {regime: IndicatorSystem}
         self._load_systems(optimization_result_file)
 
@@ -310,27 +312,40 @@ class HistoricalBacktestValidator:
         if actual_days < 1:
             return None, None
 
-        entry_price = stock_data.iloc[0]['收盘']
-        exit_price = stock_data.iloc[actual_days]['收盘']
-        if entry_price <= 0:
+        # 入场: pick日收盘出信号 → 次一交易日开盘成交(信号日已在数据中则取其后一根)
+        entry_row = 1 if stock_data.iloc[0]['日期'] <= pick_dt else 0
+        if actual_days <= entry_row:
             return None, None
+
+        raw_entry = stock_data.iloc[entry_row]['开盘']
+        raw_exit = stock_data.iloc[actual_days]['收盘']
+        if raw_entry <= 0:
+            return None, None
+
+        # 往返成本: 滑点+佣金+过户(买) / 另加印花税(卖)
+        entry_price = self.cost_model.buy_price_incl(float(raw_entry))
+        exit_price = self.cost_model.sell_price_incl(float(raw_exit))
         stock_return = (exit_price / entry_price - 1) * 100
 
-        # 沪深300同期收益
+        # 沪深300同期收益 — 与个股入场/出场日期严格对齐(同窗口可比)
         csi_data = self._load_index_data('000300')
         if len(csi_data) == 0:
             return stock_return, None
 
         csi_data['日期'] = pd.to_datetime(csi_data['日期'])
-        csi_data = csi_data[
-            (csi_data['日期'] >= pick_dt) & (csi_data['日期'] <= end_dt)
+        stock_entry_dt = stock_data.iloc[entry_row]['日期']
+        stock_exit_dt = stock_data.iloc[actual_days]['日期']
+        csi_aligned = csi_data[
+            (csi_data['日期'] >= stock_entry_dt) & (csi_data['日期'] <= stock_exit_dt)
         ].reset_index(drop=True)
 
-        if len(csi_data) < 2:
+        if len(csi_aligned) < 2:
             return stock_return, None
 
-        csi_entry = csi_data.iloc[0]['收盘']
-        csi_exit = csi_data.iloc[min(holding_days, len(csi_data)-1)]['收盘']
+        csi_entry = self.cost_model.buy_price_incl(float(csi_aligned.iloc[0]['收盘']))
+        csi_exit = self.cost_model.sell_price_incl(float(csi_aligned.iloc[-1]['收盘']))
+        if csi_entry <= 0:
+            return stock_return, None
         csi_return = (csi_exit / csi_entry - 1) * 100
 
         return stock_return, csi_return
