@@ -26,6 +26,11 @@ from dataclasses import dataclass
 import warnings
 warnings.filterwarnings('ignore')
 
+from reversal_rules import (
+    score_oversold, score_overbought, score_divergence, score_exhaustion,
+    decide_action,
+)
+
 
 @dataclass
 class ReversalAlert:
@@ -146,213 +151,25 @@ class ReversalDetector:
         return df
 
     def detect_oversold(self, df: pd.DataFrame) -> Tuple[bool, List[str], float]:
-        """检测超卖状态（买入机会）"""
-        signals = []
-        score = 0
-
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        # 1. RSI超卖
-        rsi14 = latest['RSI14']
-        if rsi14 < 20:
-            signals.append(f'RSI严重超卖({rsi14:.1f})')
-            score += 30
-        elif rsi14 < 30:
-            signals.append(f'RSI超卖({rsi14:.1f})')
-            score += 20
-        elif rsi14 < 40:
-            signals.append(f'RSI偏低({rsi14:.1f})')
-            score += 10
-
-        # 2. KDJ超卖
-        j = latest['J']
-        if j < 0:
-            signals.append(f'KDJ-J负值({j:.1f})')
-            score += 20
-        elif j < 20:
-            signals.append(f'KDJ超卖(J={j:.1f})')
-            score += 15
-
-        # 3. 触及布林下轨
-        if latest['收盘'] <= latest['BB_Lower'] * 1.02:
-            signals.append('触及布林下轨')
-            score += 15
-
-        # 4. 价格远离均线
-        if latest['收盘'] < latest['MA20'] * 0.9:
-            signals.append('价格低于MA20超10%')
-            score += 15
-
-        # 5. 连续下跌
-        down_days = sum(1 for i in range(1, min(6, len(df))) if df['收盘'].iloc[-i] < df['收盘'].iloc[-i-1])
-        if down_days >= 4:
-            signals.append(f'连续下跌{down_days}天')
-            score += 10
-
-        # 6. 量能萎缩（卖盘枯竭）
-        if latest['成交量'] < latest['Vol_MA20'] * 0.5:
-            signals.append('量能萎缩')
-            score += 10
-
+        """检测超卖状态（买入机会）— 规则走 reversal_rules 单一真相源"""
+        score, signals = score_oversold(df, len(df) - 1)
         return score > 30, signals, min(100, score)
 
     def detect_overbought(self, df: pd.DataFrame) -> Tuple[bool, List[str], float]:
-        """检测超买状态（卖出机会）"""
-        signals = []
-        score = 0
-
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        # 1. RSI超买
-        rsi14 = latest['RSI14']
-        if rsi14 > 80:
-            signals.append(f'RSI严重超买({rsi14:.1f})')
-            score += 30
-        elif rsi14 > 70:
-            signals.append(f'RSI超买({rsi14:.1f})')
-            score += 20
-        elif rsi14 > 60:
-            signals.append(f'RSI偏高({rsi14:.1f})')
-            score += 10
-
-        # 2. KDJ超买
-        j = latest['J']
-        if j > 100:
-            signals.append(f'KDJ-J超100({j:.1f})')
-            score += 20
-        elif j > 80:
-            signals.append(f'KDJ超买(J={j:.1f})')
-            score += 15
-
-        # 3. 触及布林上轨
-        if latest['收盘'] >= latest['BB_Upper'] * 0.98:
-            signals.append('触及布林上轨')
-            score += 15
-
-        # 4. 价格远离均线
-        if latest['收盘'] > latest['MA20'] * 1.15:
-            signals.append('价格高于MA20超15%')
-            score += 15
-
-        # 5. 连续上涨
-        up_days = sum(1 for i in range(1, min(6, len(df))) if df['收盘'].iloc[-i] > df['收盘'].iloc[-i-1])
-        if up_days >= 4:
-            signals.append(f'连续上涨{up_days}天')
-            score += 10
-
-        # 6. 量价背离（价涨量缩）
-        if latest['收盘'] > prev['收盘'] and latest['成交量'] < prev['成交量'] * 0.7:
-            signals.append('量价背离')
-            score += 15
-
+        """检测超买状态（卖出机会）— 规则走 reversal_rules 单一真相源"""
+        score, signals = score_overbought(df, len(df) - 1)
         return score > 30, signals, min(100, score)
 
     def detect_divergence(self, df: pd.DataFrame) -> Tuple[str, List[str], float]:
-        """检测背离（最强转折信号）"""
-        signals = []
-        score = 0
-        divergence_type = 'NONE'
-
+        """检测背离（最强转折信号）— 规则走 reversal_rules 单一真相源"""
         if len(df) < 20:
-            return divergence_type, signals, score
-
-        # 取最近20天数据
-        recent = df.tail(20)
-
-        # 底背离：价格新低但RSI不创新低
-        price_low_idx = recent['收盘'].idxmin()
-        rsi_low_idx = recent['RSI14'].idxmin()
-
-        if price_low_idx == recent.index[-1] or price_low_idx == recent.index[-2]:
-            # 当前价格接近最低点
-            recent_prices = recent['收盘'].values
-            recent_rsi = recent['RSI14'].values
-
-            # 找前一个低点
-            for i in range(len(recent_prices) - 3, 5, -1):
-                if recent_prices[i] < recent_prices[i-1] and recent_prices[i] < recent_prices[i+1]:
-                    # 找到前一个低点
-                    if recent_rsi[-1] > recent_rsi[i] and recent_prices[-1] < recent_prices[i]:
-                        signals.append('RSI底背离')
-                        score += 25
-                        divergence_type = 'BULLISH'
-                        break
-
-        # 顶背离：价格新高但RSI不创新高
-        price_high_idx = recent['收盘'].idxmax()
-        rsi_high_idx = recent['RSI14'].idxmax()
-
-        if price_high_idx == recent.index[-1] or price_high_idx == recent.index[-2]:
-            recent_prices = recent['收盘'].values
-            recent_rsi = recent['RSI14'].values
-
-            for i in range(len(recent_prices) - 3, 5, -1):
-                if recent_prices[i] > recent_prices[i-1] and recent_prices[i] > recent_prices[i+1]:
-                    if recent_rsi[-1] < recent_rsi[i] and recent_prices[-1] > recent_prices[i]:
-                        signals.append('RSI顶背离')
-                        score += 25
-                        divergence_type = 'BEARISH'
-                        break
-
+            return 'NONE', [], 0
+        divergence_type, score, signals = score_divergence(df)
         return divergence_type, signals, score
 
     def detect_trend_exhaustion(self, df: pd.DataFrame) -> Tuple[str, List[str], float]:
-        """检测趋势衰竭"""
-        signals = []
-        score = 0
-        exhaustion_type = 'NONE'
-
-        if len(df) < 10:
-            return exhaustion_type, signals, score
-
-        latest = df.iloc[-1]
-        recent = df.tail(10)
-
-        # 上涨衰竭
-        # 1. 涨幅收窄
-        roc5 = latest['ROC5']
-        roc10 = latest['ROC10']
-
-        if roc10 > 10 and roc5 < roc10 * 0.5:
-            signals.append('上涨动能衰减')
-            score += 15
-            exhaustion_type = 'UP_EXHAUSTION'
-
-        # 2. 连续上影线
-        upper_shadows = 0
-        for i in range(-3, 0):
-            row = df.iloc[i]
-            upper_shadow = row['最高'] - max(row['开盘'], row['收盘'])
-            body = abs(row['收盘'] - row['开盘'])
-            if upper_shadow > body * 0.5:
-                upper_shadows += 1
-
-        if upper_shadows >= 2:
-            signals.append('连续上影线(抛压)')
-            score += 15
-
-        # 下跌衰竭
-        # 1. 跌幅收窄
-        if roc10 < -10 and roc5 > roc10 * 0.5:
-            signals.append('下跌动能衰减')
-            score += 15
-            exhaustion_type = 'DOWN_EXHAUSTION'
-
-        # 2. 连续下影线
-        lower_shadows = 0
-        for i in range(-3, 0):
-            row = df.iloc[i]
-            lower_shadow = min(row['开盘'], row['收盘']) - row['最低']
-            body = abs(row['收盘'] - row['开盘'])
-            if lower_shadow > body * 0.5:
-                lower_shadows += 1
-
-        if lower_shadows >= 2:
-            signals.append('连续下影线(承接)')
-            score += 15
-
+        """检测趋势衰竭 — 规则走 reversal_rules 单一真相源"""
+        exhaustion_type, score, signals = score_exhaustion(df, len(df) - 1)
         return exhaustion_type, signals, score
 
     def find_support_resistance(self, df: pd.DataFrame) -> Dict:
@@ -407,10 +224,9 @@ class ReversalDetector:
         exhaust_type, exhaust_signals, exhaust_score = self.detect_trend_exhaustion(df)
         sr_levels = self.find_support_resistance(df)
 
-        # 综合判断
+        # 综合判断 — 判定闸门走 reversal_rules.decide_action (与回测一致)
         all_signals = []
         total_score = 0
-        alert_type = 'WATCH'
 
         # 买入信号
         buy_score = oversold_score + (div_score if div_type == 'BULLISH' else 0) + \
@@ -420,18 +236,16 @@ class ReversalDetector:
         sell_score = overbought_score + (div_score if div_type == 'BEARISH' else 0) + \
                      (exhaust_score if exhaust_type == 'UP_EXHAUSTION' else 0)
 
-        if buy_score > sell_score and buy_score >= 40:
-            alert_type = 'BUY'
+        alert_type = decide_action(buy_score, sell_score)
+        if alert_type == 'BUY':
             all_signals = oversold_signals + [s for s in div_signals if '底' in s] + \
                          [s for s in exhaust_signals if '下跌' in s or '下影' in s]
             total_score = buy_score
-        elif sell_score > buy_score and sell_score >= 40:
-            alert_type = 'SELL'
+        elif alert_type == 'SELL':
             all_signals = overbought_signals + [s for s in div_signals if '顶' in s] + \
                          [s for s in exhaust_signals if '上涨' in s or '上影' in s]
             total_score = sell_score
         else:
-            alert_type = 'WATCH'
             all_signals = oversold_signals + overbought_signals + div_signals + exhaust_signals
             total_score = max(buy_score, sell_score)
 

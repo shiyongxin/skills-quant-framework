@@ -19,7 +19,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
-from core.indicators import rsi as _core_rsi
+from core.indicators import rsi as _core_rsi, atr as _core_atr
+from reversal_rules import (
+    score_oversold, score_overbought, score_divergence, score_exhaustion,
+    decide_action,
+)
 
 
 @dataclass
@@ -102,13 +106,13 @@ class ReversalBacktester:
             return None
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算技术指标"""
+        """计算技术指标 — 与 ReversalDetector 完全一致 (审计 C-P1-13)"""
         close = df['收盘']
         high = df['最高']
         low = df['最低']
 
         # RSI (core 单一真相源)
-        for period in [6, 14]:
+        for period in [6, 14, 24]:
             df[f'RSI{period}'] = _core_rsi(close, period)
 
         # KDJ
@@ -119,6 +123,13 @@ class ReversalBacktester:
         df['D'] = df['K'].ewm(3).mean()
         df['J'] = 3 * df['K'] - 2 * df['D']
 
+        # MACD
+        ema12 = close.ewm(span=12).mean()
+        ema26 = close.ewm(span=26).mean()
+        df['MACD'] = ema12 - ema26
+        df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
+        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
         # 布林带
         df['BB_Middle'] = close.rolling(20).mean()
         df['BB_Std'] = close.rolling(20).std()
@@ -127,15 +138,29 @@ class ReversalBacktester:
 
         # 均线
         df['MA5'] = close.rolling(5).mean()
+        df['MA10'] = close.rolling(10).mean()
         df['MA20'] = close.rolling(20).mean()
+        df['MA60'] = close.rolling(60).mean()
 
         # 成交量
         df['Vol_MA5'] = df['成交量'].rolling(5).mean()
+        df['Vol_MA20'] = df['成交量'].rolling(20).mean()
+
+        # 价格变化率
+        df['ROC5'] = close.pct_change(5) * 100
+        df['ROC10'] = close.pct_change(10) * 100
+
+        # ATR (core Wilder 单一真相源)
+        df['ATR'] = _core_atr(high, low, close, 14)
 
         return df
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """生成买卖信号"""
+        """
+        生成买卖信号 — 规则走 reversal_rules 单一真相源 (审计 C-P1-13):
+        与 ReversalDetector (实盘) 完全一致的阈值/指标/判定闸门。
+        旧版: 两套阈值 + 死代码块 (自比较恒False) + 同bar可同时买卖 — 均已消除。
+        """
         df = df.copy()
         df['buy_signal'] = 0
         df['sell_signal'] = 0
@@ -143,107 +168,36 @@ class ReversalBacktester:
         df['sell_reason'] = ''
 
         for i in range(30, len(df)):
-            row = df.iloc[i]
-            prev = df.iloc[i-1]
+            # 基础打分 (与实盘完全一致的规则)
+            buy_score, buy_reasons = score_oversold(df, i)
+            sell_score, sell_reasons = score_overbought(df, i)
 
-            buy_score = 0
-            buy_reasons = []
-            sell_score = 0
-            sell_reasons = []
-
-            # === 买入信号 ===
-
-            # 1. RSI超卖
-            rsi14 = row['RSI14']
-            if pd.notna(rsi14):
-                if rsi14 < 25:
-                    buy_score += 30
-                    buy_reasons.append(f'RSI超卖({rsi14:.0f})')
-                elif rsi14 < 30:
-                    buy_score += 20
-                    buy_reasons.append(f'RSI偏低({rsi14:.0f})')
-
-            # 2. KDJ超卖
-            j = row['J']
-            if pd.notna(j) and j < 10:
-                buy_score += 20
-                buy_reasons.append(f'KDJ超卖(J={j:.0f})')
-
-            # 3. 触及布林下轨
-            if row['收盘'] <= row['BB_Lower'] * 1.02:
-                buy_score += 15
-                buy_reasons.append('触及下轨')
-
-            # 4. 连续下跌后放量
-            if i >= 3:
-                down_days = sum(1 for j in range(i-2, i) if df['收盘'].iloc[j-1] < df['收盘'].iloc[j-1])
-                if down_days >= 2 and row['成交量'] > row['Vol_MA5'] * 1.2:
-                    buy_score += 15
-                    buy_reasons.append('下跌后放量')
-
-            # 4. 连续下跌后放量
-            if i >= 3:
-                down_days = sum(1 for j in range(1, 4) if df['收盘'].iloc[i-j] < df['收盘'].iloc[i-j-1])
-                if down_days >= 2 and row['成交量'] > row['Vol_MA5'] * 1.2:
-                    buy_score += 15
-                    buy_reasons.append('下跌后放量')
-
-            # 5. 底背离检测
+            # 背离 (20 bar 窗)
             if i >= 20:
-                recent = df.iloc[i-20:i+1].reset_index(drop=True)
-                price_min_idx = recent['收盘'].idxmin()
-                rsi_min_idx = recent['RSI14'].idxmin()
-                if price_min_idx == len(recent) - 1 and rsi_min_idx < len(recent) - 5:
-                    if pd.notna(recent['RSI14'].iloc[-1]) and pd.notna(recent['RSI14'].iloc[rsi_min_idx]):
-                        if recent['RSI14'].iloc[-1] > recent['RSI14'].iloc[rsi_min_idx]:
-                            buy_score += 25
-                            buy_reasons.append('底背离')
+                div_type, div_score, div_reasons = score_divergence(
+                    df.iloc[i - 19: i + 1].reset_index(drop=True))
+                if div_type == 'BULLISH':
+                    buy_score += div_score
+                    buy_reasons += div_reasons
+                elif div_type == 'BEARISH':
+                    sell_score += div_score
+                    sell_reasons += div_reasons
 
-            # === 卖出信号 ===
+            # 趋势衰竭
+            exhaust_type, exhaust_score, exhaust_reasons = score_exhaustion(df, i)
+            if exhaust_type == 'DOWN_EXHAUSTION':
+                buy_score += exhaust_score
+                buy_reasons += exhaust_reasons
+            elif exhaust_type == 'UP_EXHAUSTION':
+                sell_score += exhaust_score
+                sell_reasons += exhaust_reasons
 
-            # 1. RSI超买
-            if pd.notna(rsi14):
-                if rsi14 > 80:
-                    sell_score += 30
-                    sell_reasons.append(f'RSI超买({rsi14:.0f})')
-                elif rsi14 > 75:
-                    sell_score += 20
-                    sell_reasons.append(f'RSI偏高({rsi14:.0f})')
-
-            # 2. KDJ超买
-            if pd.notna(j) and j > 100:
-                sell_score += 20
-                sell_reasons.append(f'KDJ超买(J={j:.0f})')
-
-            # 3. 触及布林上轨
-            if row['收盘'] >= row['BB_Upper'] * 0.98:
-                sell_score += 15
-                sell_reasons.append('触及上轨')
-
-            # 4. 连续上涨后缩量
-            if i >= 3:
-                up_days = sum(1 for j in range(1, 4) if df['收盘'].iloc[i-j] > df['收盘'].iloc[i-j-1])
-                if up_days >= 2 and row['成交量'] < row['Vol_MA5'] * 0.7:
-                    sell_score += 15
-                    sell_reasons.append('上涨后缩量')
-
-            # 5. 顶背离检测
-            if i >= 20:
-                recent = df.iloc[i-20:i+1].reset_index(drop=True)
-                price_max_idx = recent['收盘'].idxmax()
-                rsi_max_idx = recent['RSI14'].idxmax()
-                if price_max_idx == len(recent) - 1 and rsi_max_idx < len(recent) - 5:
-                    if pd.notna(recent['RSI14'].iloc[-1]) and pd.notna(recent['RSI14'].iloc[rsi_max_idx]):
-                        if recent['RSI14'].iloc[-1] < recent['RSI14'].iloc[rsi_max_idx]:
-                            sell_score += 25
-                            sell_reasons.append('顶背离')
-
-            # 设置信号
-            if buy_score >= 40:
+            # 判定闸门: >=40 且严格大于对侧 (与实盘 decide_action 一致)
+            action = decide_action(buy_score, sell_score)
+            if action == 'BUY':
                 df.loc[df.index[i], 'buy_signal'] = buy_score
                 df.loc[df.index[i], 'buy_reason'] = ', '.join(buy_reasons[:2])
-
-            if sell_score >= 40:
+            elif action == 'SELL':
                 df.loc[df.index[i], 'sell_signal'] = sell_score
                 df.loc[df.index[i], 'sell_reason'] = ', '.join(sell_reasons[:2])
 

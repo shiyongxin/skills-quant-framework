@@ -671,49 +671,6 @@ class FactorModels:
 
         return factors
 
-    @staticmethod
-    def technical_factor(df) -> pd.DataFrame:
-        """
-        技术因子
-        基于技术指标的因子
-
-        Args:
-            df: 包含技术指标的数据
-
-        Returns:
-            因子得分DataFrame
-        """
-        factors = pd.DataFrame()
-
-        # RSI (均值回归，极端值反转)
-        if 'RSI' in df.columns:
-            rsi = df['RSI'].iloc[-1]
-            # RSI在30-70之间为中性，越接近50越好
-            factors['RSI_Mean_Reversion'] = -abs(rsi - 50)
-
-        # MACD (动量)
-        if 'MACD' in df.columns:
-            factors['MACD_Momentum'] = df['MACD'].iloc[-1]
-
-        # 布林带位置
-        if 'BB_Upper' in df.columns and 'BB_Lower' in df.columns and '收盘' in df.columns:
-            bb_width = df['BB_Upper'].iloc[-1] - df['BB_Lower'].iloc[-1]
-            bb_position = (df['收盘'].iloc[-1] - df['BB_Lower'].iloc[-1]) / bb_width
-            # 接近下轨为正（超卖）
-            factors['BB_Position'] = 1 - bb_position
-
-        # ATR (波动率，倒数)
-        if 'ATR' in df.columns:
-            factors['ATR'] = -df['ATR'].iloc[-1]
-
-        # 标准化
-        for col in factors.columns:
-            factors[col] = (factors[col] - factors[col].mean()) / factors[col].std()
-
-        factors['Technical_Score'] = factors.mean(axis=1)
-
-        return factors
-
 
 class MultiFactorSelector:
     """多因子选股器 - 增强版"""

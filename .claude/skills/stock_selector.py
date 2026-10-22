@@ -244,11 +244,6 @@ class StockSelector:
         if latest['涨跌幅'] < change:
             return False
 
-        # 市值
-        if 'min_market_cap' in criteria:
-            # 这里简化处理，实际应该获取市值数据
-            pass
-
         # 技术指标
         if 'trend' in criteria:
             if criteria['trend'] == 'up':

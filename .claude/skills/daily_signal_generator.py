@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timedelta
 import json
+import random
+import subprocess
 import sys
 
 from historical_data_manager import HistoricalDataManager
@@ -312,12 +314,15 @@ class DailySignalGenerator:
             优化结果JSON文件路径
         """
         self.data_manager = HistoricalDataManager(data_dir)
+        self.data_dir = data_dir
         self.systems = {}       # {regime: {name, params, ...}}
         self.default_params = ParameterSpace.get_defaults()
+        self.optimization_result_file = None
         self._index_labels = None
         self._current_regime = None
 
         if optimization_result_file and Path(optimization_result_file).exists():
+            self.optimization_result_file = optimization_result_file
             self.load_systems(optimization_result_file)
 
     def load_systems(self, filepath):
@@ -490,7 +495,7 @@ class DailySignalGenerator:
 
     def generate_daily_report(self, symbols: list = None,
                               n_stocks: int = 50,
-                              top_n: int = 10) -> DailyReport:
+                              seed: int = None) -> DailyReport:
         """
         生成每日推荐报告
 
@@ -499,9 +504,9 @@ class DailySignalGenerator:
         symbols : list or None
             股票列表，None则从股票池随机抽样
         n_stocks : int
-            分析股票数
-        top_n : int
-            推荐TOP N
+            分析股票数 (推荐展示条数由 format_report 控制)
+        seed : int or None
+            随机抽样种子 (审计 C-P1-15: 传入即可复现同一股票池)
 
         Returns:
         --------
@@ -517,12 +522,11 @@ class DailySignalGenerator:
         print(f"[INFO] 当前大盘态势: {regime_cn} ({regime})")
         print(f"[INFO] 使用指标体系: {self.get_system_name_for_regime(regime)}")
 
-        # 获取股票池
+        # 获取股票池 (审计 C-P1-15: 旧 random.sample 无种子 → 不可复现)
         if symbols is None:
             symbols = self.data_manager.get_universe(min_rows=2000)
             if len(symbols) > n_stocks:
-                import random
-                symbols = random.sample(symbols, n_stocks)
+                symbols = random.Random(seed).sample(symbols, n_stocks)
 
         # 生成信号
         params = self.get_params_for_regime(regime)
@@ -556,6 +560,56 @@ class DailySignalGenerator:
 
         return report
 
+    def save_manifest(self, filepath: str, report: DailyReport = None,
+                      seed: int = None) -> bool:
+        """
+        落盘运行清单 (审计 C-P1-15): 时间戳 / git sha / 种子 / 数据目录 /
+        优化结果文件 / 体制 / 该体制实际使用的参数 — 让任一推荐结果可事后复现
+
+        Args:
+            filepath: manifest JSON 输出路径
+            report: generate_daily_report 的返回值 (可选, 有则记入体制与样本数)
+            seed: 本次抽样种子
+
+        Returns:
+            是否成功
+        """
+        try:
+            root = Path(__file__).resolve().parents[2]
+            git_sha = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=str(root),
+                stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            git_sha = 'unknown'
+
+        regime = report.current_regime if report is not None else None
+        try:
+            params = self.get_params_for_regime(regime) if regime else None
+        except Exception:
+            params = None
+
+        manifest = {
+            'timestamp': datetime.now().isoformat(),
+            'git_sha': git_sha,
+            'seed': seed,
+            'data_dir': str(self.data_dir),
+            'optimization_result_file': self.optimization_result_file,
+            'regime': regime,
+            'regime_cn': report.regime_cn if report is not None else None,
+            'system_used': report.system_used if report is not None else None,
+            'n_analyzed': report.total_analyzed if report is not None else None,
+            'regime_switch_alert': (report.regime_switch_alert
+                                    if report is not None else None),
+            'params': params,
+        }
+
+        path = Path(filepath)
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2, default=str)
+        return True
+
     def _check_regime_switch(self) -> str:
         """检查是否有体制切换预警"""
         if self._index_labels is None:
@@ -579,7 +633,7 @@ class DailySignalGenerator:
         return ""
 
     def format_report(self, report: DailyReport,
-                      show_all: bool = False) -> str:
+                      show_all: bool = False, top: int = 10) -> str:
         """格式化每日报告"""
         lines = []
         lines.append("=" * 70)
@@ -601,11 +655,11 @@ class DailySignalGenerator:
         # 买入推荐
         buy_signals = [s for s in report.signals if s.signal == "BUY"]
         if buy_signals:
-            lines.append(f"【买入推荐 TOP {min(10, len(buy_signals))}】")
+            lines.append(f"【买入推荐 TOP {min(top, len(buy_signals))}】")
             lines.append(f"  {'代码':<8} {'名称':<8} {'价格':>8} {'涨跌%':>7} "
                         f"{'买分':>5} {'信号强度':>8} {'原因'}")
             lines.append("  " + "-" * 65)
-            for s in buy_signals[:10]:
+            for s in buy_signals[:top]:
                 reasons_str = ", ".join(s.reasons[:3])
                 lines.append(
                     f"  {s.symbol:<8} {s.name:<8} {s.price:>8.2f} "
@@ -624,7 +678,7 @@ class DailySignalGenerator:
             lines.append(f"  {'代码':<8} {'名称':<8} {'价格':>8} {'涨跌%':>7} "
                         f"{'卖分':>5} {'原因'}")
             lines.append("  " + "-" * 55)
-            for s in sell_signals[:10]:
+            for s in sell_signals[:top]:
                 reasons_str = ", ".join(s.reasons[:3])
                 lines.append(
                     f"  {s.symbol:<8} {s.name:<8} {s.price:>8.2f} "
@@ -668,6 +722,10 @@ def main():
                        help='分析股票数')
     parser.add_argument('--top', type=int, default=10,
                        help='推荐TOP N')
+    parser.add_argument('--seed', type=int, default=None,
+                       help='随机抽样种子 (可复现股票池, 审计 C-P1-15)')
+    parser.add_argument('--manifest',
+                       help='运行清单JSON输出路径 (时间戳/git sha/种子/参数)')
     parser.add_argument('--output', help='输出文件路径')
     parser.add_argument('--show-all', action='store_true',
                        help='显示全部股票详情')
@@ -686,11 +744,17 @@ def main():
     report = generator.generate_daily_report(
         symbols=args.symbols,
         n_stocks=args.n_stocks,
-        top_n=args.top,
+        seed=args.seed,
     )
 
+    # 运行清单 (审计 C-P1-15)
+    if args.manifest:
+        generator.save_manifest(args.manifest, report=report, seed=args.seed)
+        print(f"[INFO] 运行清单已写入: {args.manifest}")
+
     # 格式化输出
-    text = generator.format_report(report, show_all=args.show_all)
+    text = generator.format_report(report, show_all=args.show_all,
+                                   top=args.top)
     print(text)
 
     if args.output:

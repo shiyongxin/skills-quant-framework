@@ -184,7 +184,6 @@ class SignalGenerator:
         signal[touch_lower] = -0.5
 
         # 回归中轨
-        middle = df.get('BB_Middle', close)
         return_from_upper = (close < upper) & (close.shift(1) >= upper.shift(1))
         return_from_lower = (close > lower) & (close.shift(1) <= lower.shift(1))
 
