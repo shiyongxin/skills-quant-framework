@@ -130,6 +130,7 @@ python run_web_app.py
 
 | 文档 | 说明 |
 |------|------|
+| [分层架构](docs/skills_layers.md) | 选股/择时/信号三层边界与列名契约（C-P2-16） |
 | [开发总结](docs/SKILLS_DEVELOPMENT_SUMMARY.md) | 完整开发历程 |
 | [三月完成报告](docs/MARCH_COMPLETION_REPORT.md) | v2.0发布报告 |
 

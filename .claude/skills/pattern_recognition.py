@@ -28,7 +28,7 @@ class CandlestickPatterns:
             threshold: 实体占振幅的比例阈值
 
         Returns:
-            bool: 是否为十字星
+            dict: {'is_doji': bool}
         """
         row = df.iloc[idx]
         open_price = row['开盘']
@@ -40,11 +40,11 @@ class CandlestickPatterns:
         range_price = high - low
 
         if range_price == 0:
-            return False
+            return {'is_doji': False}
 
         body_ratio = body / range_price
 
-        return body_ratio < threshold
+        return {'is_doji': bool(body_ratio < threshold)}
 
     @staticmethod
     def is_hammer(df, idx, body_ratio=0.3, shadow_ratio=2.0):
@@ -182,10 +182,10 @@ class CandlestickPatterns:
             idx: 当前行索引
 
         Returns:
-            bool
+            dict: {'is_morning_star': bool}
         """
         if idx < 2:
-            return False
+            return {'is_morning_star': False}
 
         day1 = df.iloc[idx-2]
         day2 = df.iloc[idx-1]
@@ -204,8 +204,8 @@ class CandlestickPatterns:
         day3_bullish = day3['收盘'] > day3['开盘']
         day3_engulfs = day3['收盘'] > (day1['开盘'] + day1['收盘']) / 2
 
-        return (day1_bearish and day2_small and
-                day3_bullish and day3_engulfs)
+        return {'is_morning_star': bool(day1_bearish and day2_small and
+                day3_bullish and day3_engulfs)}
 
     @staticmethod
     def is_evening_star(df, idx):
@@ -218,10 +218,10 @@ class CandlestickPatterns:
             idx: 当前行索引
 
         Returns:
-            bool
+            dict: {'is_evening_star': bool}
         """
         if idx < 2:
-            return False
+            return {'is_evening_star': False}
 
         day1 = df.iloc[idx-2]
         day2 = df.iloc[idx-1]
@@ -240,8 +240,8 @@ class CandlestickPatterns:
         day3_bearish = day3['收盘'] < day3['开盘']
         day3_engulfs = day3['收盘'] < (day1['开盘'] + day1['收盘']) / 2
 
-        return (day1_bullish and day2_small and
-                day3_bearish and day3_engulfs)
+        return {'is_evening_star': bool(day1_bullish and day2_small and
+                day3_bearish and day3_engulfs)}
 
     @staticmethod
     def is_piercing(df, idx):
@@ -254,10 +254,10 @@ class CandlestickPatterns:
             idx: 当前行索引
 
         Returns:
-            bool
+            dict: {'is_piercing': bool}
         """
         if idx < 1:
-            return False
+            return {'is_piercing': False}
 
         day1 = df.iloc[idx-1]
         day2 = df.iloc[idx]
@@ -273,7 +273,7 @@ class CandlestickPatterns:
         day1_mid = day1['开盘'] - day1_body * 0.5
         piercing = day2_bullish and day2['收盘'] > day1_mid and day2['开盘'] < day1['收盘']
 
-        return day1_bearish and piercing
+        return {'is_piercing': bool(day1_bearish and piercing)}
 
     @staticmethod
     def is_dark_cloud(df, idx):
@@ -286,10 +286,10 @@ class CandlestickPatterns:
             idx: 当前行索引
 
         Returns:
-            bool
+            dict: {'is_dark_cloud': bool}
         """
         if idx < 1:
-            return False
+            return {'is_dark_cloud': False}
 
         day1 = df.iloc[idx-1]
         day2 = df.iloc[idx]
@@ -305,12 +305,12 @@ class CandlestickPatterns:
         day1_mid = day1['开盘'] + day1_body * 0.5
         dark_cloud = day2_bearish and day2['收盘'] < day1_mid and day2['开盘'] > day1['收盘']
 
-        return day1_bullish and dark_cloud
+        return {'is_dark_cloud': bool(day1_bullish and dark_cloud)}
 
     @staticmethod
     def scan_all_patterns(df) -> pd.DataFrame:
         """
-        扫描所有K线形态
+        扫描所有K线形态 (单次 numpy 向量化, 语义与逐行版一致)
 
         Args:
             df: OHLCV数据
@@ -321,53 +321,81 @@ class CandlestickPatterns:
         df = df.copy()
         orig_index = df.index
         df = df.reset_index(drop=True)
-        df['Pattern_Doji'] = False
-        df['Pattern_Hammer'] = None
-        df['Pattern_HangingMan'] = None
-        df['Pattern_BullishEngulfing'] = False
-        df['Pattern_BearishEngulfing'] = False
-        df['Pattern_BullishHarami'] = False
-        df['Pattern_BearishHarami'] = False
-        df['Pattern_MorningStar'] = False
-        df['Pattern_EveningStar'] = False
-        df['Pattern_Piercing'] = False
-        df['Pattern_DarkCloud'] = False
 
-        for i in range(len(df)):
-            # Doji
-            df.loc[i, 'Pattern_Doji'] = CandlestickPatterns.is_doji(df, i)
+        o = df['开盘'].to_numpy(dtype=float)
+        c = df['收盘'].to_numpy(dtype=float)
+        h = df['最高'].to_numpy(dtype=float)
+        lo = df['最低'].to_numpy(dtype=float)
+        n = len(df)
 
-            # Hammer/Hanging Man
-            hammer = CandlestickPatterns.is_hammer(df, i)
-            if hammer['is_hammer']:
-                if hammer['type'] == 'hammer':
-                    df.loc[i, 'Pattern_Hammer'] = True
-                else:
-                    df.loc[i, 'Pattern_HangingMan'] = True
+        body = np.abs(c - o)
+        rng = h - lo
+        upper_shadow = h - np.maximum(o, c)
+        lower_shadow = np.minimum(o, c) - lo
+        with np.errstate(divide='ignore', invalid='ignore'):
+            body_ratio = np.where(rng > 0, body / rng, np.nan)
 
-            # Engulfing
-            engulfing = CandlestickPatterns.is_engulfing(df, i)
-            if engulfing['is_engulfing']:
-                if engulfing['type'] == 'bullish':
-                    df.loc[i, 'Pattern_BullishEngulfing'] = True
-                else:
-                    df.loc[i, 'Pattern_BearishEngulfing'] = True
+        # 前一根K线 (idx<1 处 NaN, 比较结果 False → 与原早退分支一致)
+        prev_o = np.concatenate(([np.nan], o[:-1]))
+        prev_c = np.concatenate(([np.nan], c[:-1]))
+        prev_bear = prev_c < prev_o
+        prev_bull = prev_c > prev_o
 
-            # Harami
-            harami = CandlestickPatterns.is_harami(df, i)
-            if harami['is_harami']:
-                if harami['type'] == 'bullish':
-                    df.loc[i, 'Pattern_BullishHarami'] = True
-                else:
-                    df.loc[i, 'Pattern_BearishHarami'] = True
+        # Doji
+        doji = (rng > 0) & (body_ratio < 0.1)
 
-            # Morning/Evening Star
-            df.loc[i, 'Pattern_MorningStar'] = CandlestickPatterns.is_morning_star(df, i)
-            df.loc[i, 'Pattern_EveningStar'] = CandlestickPatterns.is_evening_star(df, i)
+        # Hammer / Hanging Man (原 prev_trend 分支: idx==0 或前收>=今开 → 'downtrend' → hammer)
+        hammer_pat = ((rng > 0) & (lower_shadow >= body * 2.0) &
+                      (upper_shadow <= body * 0.5) & (body_ratio < 0.3))
+        downtrend = (np.arange(n) == 0) | (prev_c >= o)
+        hammer = hammer_pat & downtrend
+        hanging_man = hammer_pat & ~downtrend
 
-            # Piercing/Dark Cloud
-            df.loc[i, 'Pattern_Piercing'] = CandlestickPatterns.is_piercing(df, i)
-            df.loc[i, 'Pattern_DarkCloud'] = CandlestickPatterns.is_dark_cloud(df, i)
+        # Engulfing
+        curr_bull = c > o
+        curr_bear = c < o
+        bull_eng = prev_bear & curr_bull & (o <= prev_c) & (c >= prev_o)
+        bear_eng = prev_bull & curr_bear & (o >= prev_c) & (c <= prev_o)
+
+        # Harami
+        prev_high = np.maximum(prev_o, prev_c)
+        prev_low = np.minimum(prev_o, prev_c)
+        curr_high = np.maximum(o, c)
+        curr_low = np.minimum(o, c)
+        harami = (curr_high < prev_high) & (curr_low > prev_low)
+        bull_harami = harami & ~prev_bull   # 前阴/平 → bullish
+        bear_harami = harami & prev_bull
+
+        # Morning / Evening Star (idx<2 处 NaN → False)
+        d1_o = np.concatenate((np.full(2, np.nan), o[:-2]))
+        d1_c = np.concatenate((np.full(2, np.nan), c[:-2]))
+        d2_o = np.concatenate(([np.nan], o[:-1]))
+        d2_c = np.concatenate(([np.nan], c[:-1]))
+        d1_body = np.abs(d1_c - d1_o)
+        d2_small = np.abs(d2_c - d2_o) < d1_body * 0.3
+        d1_mid = (d1_o + d1_c) / 2
+        morning = (d1_c < d1_o) & d2_small & curr_bull & (c > d1_mid)
+        evening = (d1_c > d1_o) & d2_small & curr_bear & (c < d1_mid)
+
+        # Piercing (idx<1 → False)
+        day1_mid_p = prev_o - (prev_o - prev_c) * 0.5
+        piercing = prev_bear & curr_bull & (c > day1_mid_p) & (o < prev_c)
+
+        # Dark Cloud (idx<1 → False)
+        day1_mid_d = prev_o + (prev_c - prev_o) * 0.5
+        dark_cloud = prev_bull & curr_bear & (c < day1_mid_d) & (o > prev_c)
+
+        df['Pattern_Doji'] = doji
+        df['Pattern_Hammer'] = np.where(hammer, True, None)
+        df['Pattern_HangingMan'] = np.where(hanging_man, True, None)
+        df['Pattern_BullishEngulfing'] = bull_eng
+        df['Pattern_BearishEngulfing'] = bear_eng
+        df['Pattern_BullishHarami'] = bull_harami
+        df['Pattern_BearishHarami'] = bear_harami
+        df['Pattern_MorningStar'] = morning
+        df['Pattern_EveningStar'] = evening
+        df['Pattern_Piercing'] = piercing
+        df['Pattern_DarkCloud'] = dark_cloud
 
         df.index = orig_index
         return df
@@ -388,7 +416,8 @@ class PricePatterns:
             min_touches: 最小触及次数
 
         Returns:
-            支撑位列表
+            支撑位列表 (按价格降序, 至多5个; 最高者通常离现价最近。
+            现价上方的"支撑"属已跌破位, 由 analyze_patterns 过滤)
         """
         lows = df['最低']
 
@@ -428,7 +457,8 @@ class PricePatterns:
             min_touches: 最小触及次数
 
         Returns:
-            压力位列表
+            压力位列表 (按价格升序, 至多5个; 最低者通常离现价最近。
+            现价下方的"压力"属已突破位, 由 analyze_patterns 过滤)
         """
         highs = df['最高']
 
@@ -569,6 +599,15 @@ class PricePatterns:
         is_consolidating = PricePatterns.detect_consolidation(df)
         breakout = PricePatterns.detect_breakout(df)
 
+        # 审计 B-P2: vs_* 必须基于"价格下方最近支撑 / 上方最近压力"。
+        # 旧实现直接取 support[0](最高支撑)/resistance[0](最低压力), 当这些
+        # 水平在价格错误一侧时产生荒谬值 (实测 vs_resistance = -30.9%)。
+        price = float(df['收盘'].iloc[-1])
+        below_supports = [l for l in support_levels if l <= price]
+        above_resistances = [l for l in resistance_levels if l >= price]
+        nearest_support = max(below_supports) if below_supports else None
+        nearest_resistance = min(above_resistances) if above_resistances else None
+
         return {
             'support_levels': support_levels,
             'resistance_levels': resistance_levels,
@@ -577,8 +616,10 @@ class PricePatterns:
             'breakout': breakout,
             'current_price': df['收盘'].iloc[-1],
             'price_position': {
-                'vs_support': ((df['收盘'].iloc[-1] - support_levels[0]) / support_levels[0] * 100) if support_levels else None,
-                'vs_resistance': ((resistance_levels[0] - df['收盘'].iloc[-1]) / resistance_levels[0] * 100) if resistance_levels else None,
+                'vs_support': ((price - nearest_support) / nearest_support * 100) if nearest_support else None,
+                'vs_resistance': ((nearest_resistance - price) / nearest_resistance * 100) if nearest_resistance else None,
+                'nearest_support': nearest_support,
+                'nearest_resistance': nearest_resistance,
             }
         }
 

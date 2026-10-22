@@ -9,8 +9,6 @@ Trend Indicators Library
 import pandas as pd
 import numpy as np
 
-from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
-
 
 class TrendIndicators:
     """趋势指标集合"""
@@ -134,77 +132,6 @@ class TrendIndicators:
         return df
 
     @staticmethod
-    def adaptive_ma(df, fast=2, slow=30, column='收盘'):
-        """
-        自适应移动平均 (Adaptive Moving Average)
-        根据波动率调整周期
-
-        Args:
-            df: DataFrame
-            fast: 快速周期
-            slow: 慢速周期
-            column: 列名
-
-        Returns:
-            添加KAMA列的DataFrame (Kaufman's Adaptive MA)
-        """
-        df = df.copy()
-
-        # 计算方向性
-        change = df[column].diff().abs()
-        volatility = df[column].diff().abs().rolling(window=10).sum()
-
-        # 效率比率 (ER)
-        er = change / volatility
-        er = er.fillna(0)
-
-        # 平滑常数
-        fastest_sc = 2 / (fast + 1)
-        slowest_sc = 2 / (slow + 1)
-
-        sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
-
-        # KAMA
-        kama = df[column].iloc[0]
-        kama_values = [kama]
-
-        for i in range(1, len(df)):
-            kama = kama + sc.iloc[i] * (df[column].iloc[i] - kama)
-            kama_values.append(kama)
-
-        df['KAMA'] = kama_values
-        return df
-
-    @staticmethod
-    def mcginley_dynamic(df, period=13, column='收盘'):
-        """
-        McGinley动态指标
-        自动调整以适应市场速度
-
-        Args:
-            df: DataFrame
-            period: 周期
-            column: 列名
-
-        Returns:
-            添加MG列的DataFrame
-        """
-        df = df.copy()
-
-        mg = df[column].iloc[0]
-        mg_values = [mg]
-
-        k = 0.6
-
-        for i in range(1, len(df)):
-            ratio = (df[column].iloc[i] - mg) / (mg * k)
-            mg = mg + max(min(ratio, 1.25), 0.8) * k * (df[column].iloc[i] - mg)
-            mg_values.append(mg)
-
-        df['MG'] = mg_values
-        return df
-
-    @staticmethod
     def vwap(df):
         """
         成交量加权平均价 (Volume Weighted Average Price)
@@ -272,103 +199,6 @@ class TrendIndicators:
 
         return df
 
-    @staticmethod
-    def triple_screen(df, trend_period=20, momentum_period=7):
-        """
-        三屏过滤系统 (Triple Screen Trading)
-        结合趋势和动量
-
-        Args:
-            df: DataFrame
-            trend_period: 趋势周期 (周线)
-            momentum_period: 动量周期 (日线)
-
-        Returns:
-            添加信号列的DataFrame
-        """
-        df = df.copy()
-
-        # 第一屏: 趋势 (MACD柱状图)
-        close = df['收盘']
-        ema_fast = close.ewm(span=12, adjust=False).mean()
-        ema_slow = close.ewm(span=26, adjust=False).mean()
-        macd_hist = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=9, adjust=False).mean()
-
-        df['Trend_Force'] = macd_hist
-
-        # 第二屏: 动量 (RSI, core 单一真相源)
-        df['Momentum_Oscillator'] = _core_rsi(close, 14)
-
-        # 第三屏: 突破 (价格突破)
-        df['Breakout_Level'] = close.rolling(window=trend_period).max()
-
-        # 生成信号
-        df['Triple_Screen_Signal'] = 0
-        df.loc[(df['Trend_Force'] > 0) & (df['Momentum_Oscillator'] < 30), 'Triple_Screen_Signal'] = 1
-        df.loc[(df['Trend_Force'] < 0) & (df['Momentum_Oscillator'] > 70), 'Triple_Screen_Signal'] = -1
-
-        return df
-
-    @staticmethod
-    def abands(df, period=20, multiplier=3):
-        """
-        Abohar Bands (类似布林带，但使用ATR)
-        使用ATR代替标准差
-
-        Args:
-            df: DataFrame
-            period: 周期
-            multiplier: ATR倍数
-
-        Returns:
-            添加Abohar Bands列的DataFrame
-        """
-        df = df.copy()
-
-        # Wilder ATR (core 单一真相源, 旧: ewm(span=period) 口径偏快)
-        high = df['最高']
-        low = df['最低']
-        close = df['收盘']
-        atr = _core_atr(high, low, close, period)
-
-        # 中轨 = EMA
-        middle = close.ewm(span=period, adjust=False).mean()
-
-        # 上下轨
-        upper = middle + multiplier * atr
-        lower = middle - multiplier * atr
-
-        df['ABands_Middle'] = middle
-        df['ABands_Upper'] = upper
-        df['ABands_Lower'] = lower
-
-        return df
-
-    @staticmethod
-    def all_trend_indicators(df):
-        """
-        计算所有趋势指标
-
-        Args:
-            df: OHLCV数据
-
-        Returns:
-            添加所有趋势指标的DataFrame
-        """
-        df = TrendIndicators.ema(df, 20)
-        df = TrendIndicators.ema(df, 50)
-        df = TrendIndicators.dema(df, 20)
-        df = TrendIndicators.tema(df, 20)
-        df = TrendIndicators.vwma(df, 20)
-        df = TrendIndicators.hull_ma(df, 20)
-        df = TrendIndicators.adaptive_ma(df)
-        df = TrendIndicators.mcginley_dynamic(df)
-        df = TrendIndicators.vwap(df)
-        df = TrendIndicators.ichimoku(df)
-        df = TrendIndicators.abands(df)
-
-        return df
-
 
 # 便捷函数
 def add_ema(df, period=20):
@@ -392,9 +222,5 @@ if __name__ == "__main__":
     print("- TEMA: Triple EMA")
     print("- VWMA: Volume Weighted MA")
     print("- HMA: Hull Moving Average")
-    print("- KAMA: Kaufman's Adaptive MA")
-    print("- MG: McGinley Dynamic")
     print("- VWAP: Volume Weighted Average Price")
     print("- Ichimoku: Ichimoku Kinko Hyo")
-    print("- Triple Screen: Triple Screen Trading")
-    print("- ABands: Abohar Bands")

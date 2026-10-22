@@ -66,6 +66,7 @@ class PositionAnalyzer:
         ema_slow = close.ewm(span=26, adjust=False).mean()
         data['MACD'] = ema_fast - ema_slow
         data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+        data['MACD_Hist'] = data['MACD'] - data['MACD_Signal']
 
         # RSI（core 权威口径）
         data['RSI'] = _core_rsi(close, 14)
@@ -92,7 +93,8 @@ class PositionAnalyzer:
 
         return data
 
-    def analyze_position(self, symbol, shares, cost_price, stock_name=None):
+    def analyze_position(self, symbol, shares, cost_price, stock_name=None,
+                         days=120):
         """
         分析持仓
 
@@ -101,12 +103,13 @@ class PositionAnalyzer:
             shares: 持股数量
             cost_price: 成本价格
             stock_name: 股票名称（可选）
+            days: 获取天数 (透传给 get_stock_data, 修复静默失效)
 
         Returns:
             dict: 分析结果
         """
         # 获取数据
-        data = self.get_stock_data(symbol)
+        data = self.get_stock_data(symbol, days=days)
         if data is None:
             return None
 
@@ -377,7 +380,8 @@ def analyze_position(symbol, shares, cost_price, stock_name=None, days=120):
         dict: 分析结果
     """
     analyzer = PositionAnalyzer()
-    return analyzer.analyze_position(symbol, shares, cost_price, stock_name)
+    return analyzer.analyze_position(symbol, shares, cost_price, stock_name,
+                                     days=days)
 
 
 def format_position_report(analysis_result):

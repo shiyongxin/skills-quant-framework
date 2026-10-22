@@ -144,22 +144,15 @@ class AdvancedIndicators:
         """
         df = df.copy()
 
-        close = df['收盘']
-        volume = df['成交量']
+        close = df['收盘'].to_numpy(dtype=float)
+        volume = df['成交量'].to_numpy(dtype=float)
 
-        # 价格上涨时OBV增加，下跌时减少
-        obv = pd.Series(index=df.index, dtype=float)
-        obv.iloc[0] = volume.iloc[0]
-
-        for i in range(1, len(df)):
-            if close.iloc[i] > close.iloc[i-1]:
-                obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
-            elif close.iloc[i] < close.iloc[i-1]:
-                obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
-            else:
-                obv.iloc[i] = obv.iloc[i-1]
-
-        df['OBV'] = obv
+        # 价格上涨时OBV增加，下跌时减少 (向量化: 方向符号×成交量累加)
+        # obv[0] = volume[0]; obv[i] = obv[i-1] + sign(Δclose_i)*volume_i
+        direction = np.sign(np.diff(close, prepend=close[0]))
+        delta = direction * volume
+        delta[0] = volume[0]
+        df['OBV'] = np.cumsum(delta)
 
         return df
 
@@ -407,7 +400,8 @@ class AdvancedIndicators:
             indicators = [
                 'atr', 'kdj', 'cci', 'williams_r',
                 'obv', 'ad_line', 'dpo', 'trix',
-                'vwap', 'keltner', 'donchian', 'mfi'
+                'vwap', 'keltner', 'donchian', 'mfi',
+                'mass_index',
             ]
 
         indicator_map = {
@@ -423,6 +417,7 @@ class AdvancedIndicators:
             'keltner': lambda x: AdvancedIndicators.keltner_channel(x),
             'donchian': lambda x: AdvancedIndicators.donchian_channel(x),
             'mfi': lambda x: AdvancedIndicators.money_flow_index(x),
+            'mass_index': lambda x: AdvancedIndicators.mass_index(x),
         }
 
         for ind in indicators:

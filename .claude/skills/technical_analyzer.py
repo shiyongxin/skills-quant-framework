@@ -102,6 +102,7 @@ class TechnicalAnalyzer:
         ema_slow = close.ewm(span=26, adjust=False).mean()
         data['MACD'] = ema_fast - ema_slow
         data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+        data['MACD_Hist'] = data['MACD'] - data['MACD_Signal']
 
         # RSI（core 权威口径，消灭 fill_value=100 分歧）
         data['RSI'] = _core_rsi(close, 14)
@@ -121,6 +122,8 @@ class TechnicalAnalyzer:
 
         # 趋势指标
         data = TrendIndicators.ema(data, 20)
+        # 列名契约 (审计 B-C7): 统一 EMA20, EMA_20 保留为别名
+        data['EMA20'] = data['EMA_20']
         data = TrendIndicators.hull_ma(data, 20)
         data = TrendIndicators.vwap(data)
 

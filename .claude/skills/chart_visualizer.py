@@ -196,7 +196,10 @@ class ChartVisualizer:
         else:
             macd = data['MACD']
             macd_signal = data['MACD_Signal']
-            macd_hist = data['MACD_Hist']
+            # 防御: 旧产出可能缺 MACD_Hist (审计 B-C7; 现 technical_analyzer/
+            # position_analyzer 均已补产, 此处兜底历史数据路径)
+            macd_hist = (data['MACD_Hist'] if 'MACD_Hist' in data.columns
+                         else macd - macd_signal)
 
         x = range(len(macd))
 
@@ -608,9 +611,11 @@ class ChartVisualizer:
         if 'MACD' in plot_data.columns:
             ax_macd.plot(x, plot_data['MACD'], label='MACD', linewidth=1)
             ax_macd.plot(x, plot_data['MACD_Signal'], label='Signal', linewidth=1)
+            macd_hist = (plot_data['MACD_Hist'] if 'MACD_Hist' in plot_data.columns
+                         else plot_data['MACD'] - plot_data['MACD_Signal'])
             colors = [self.style.up_color if v > 0 else self.style.down_color
-                      for v in plot_data['MACD_Hist']]
-            ax_macd.bar(x, plot_data['MACD_Hist'], color=colors, alpha=0.3)
+                      for v in macd_hist]
+            ax_macd.bar(x, macd_hist, color=colors, alpha=0.3)
         ax_macd.set_title("MACD")
         ax_macd.grid(True, color=self.style.grid_color, alpha=0.5)
 
