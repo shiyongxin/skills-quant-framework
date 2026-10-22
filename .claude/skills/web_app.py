@@ -32,6 +32,7 @@ try:
     from backtest_framework import BacktestEngine, PositionConfig
     from portfolio_manager import PortfolioManager
     from real_time_monitor import RealTimeMonitor
+    from realtime_quote import RealTimeQuoteAPI
     MODULES_AVAILABLE = True
 except ImportError:
     MODULES_AVAILABLE = False
@@ -99,13 +100,20 @@ def init_session_state():
         if MODULES_AVAILABLE:
             st.session_state.fetcher = StockDataFetcher()
             st.session_state.generator = SignalGenerator()
-            st.session_state.visualizer = ChartVisualizer()
+            # matplotlib 缺失时 ChartVisualizer() 会 raise — 降级为 None,
+            # 图表区显示提示而非整页崩溃 (对齐可选依赖守卫模式)
+            try:
+                st.session_state.visualizer = ChartVisualizer()
+            except ImportError:
+                st.session_state.visualizer = None
             st.session_state.manager = PortfolioManager()
+            st.session_state.rt_api = RealTimeQuoteAPI()
         else:
             st.session_state.fetcher = None
             st.session_state.generator = None
             st.session_state.visualizer = None
             st.session_state.manager = None
+            st.session_state.rt_api = None
 
     if 'watchlist' not in st.session_state:
         st.session_state.watchlist = ['600519', '000858', '002415']
@@ -220,6 +228,21 @@ def render_dashboard():
         st.error("核心模块未加载，请检查依赖安装")
         return
 
+    # (审计 #18 S1: 旧版 4 个指标里 3 个硬编码假数据 —
+    #  ¥1,000,000/+23.5%/信号5/收益+15.3% 凭空捏造;
+    #  现全部来自 watchlist 真实信号 + 组合管理器真实持仓)
+    signals = get_all_signals(st.session_state.watchlist)
+    buy_count = sum(1 for s in signals if s.get('buy_signal', False))
+    sell_count = sum(1 for s in signals if s.get('sell_signal', False))
+
+    manager = st.session_state.manager
+    total_value = sum(p.total_value for p in manager.portfolios.values())
+    total_pnl_pct = 0.0
+    if manager.portfolios:
+        total_initial = sum(p.initial_cash for p in manager.portfolios.values())
+        if total_initial > 0:
+            total_pnl_pct = (total_value / total_initial - 1) * 100
+
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
@@ -231,23 +254,23 @@ def render_dashboard():
 
     with col2:
         st.metric(
-            label="💰 模拟资金",
-            value="¥1,000,000",
-            delta="+23.5%"
+            label="💰 组合总资产",
+            value=f"¥{total_value:,.2f}",
+            delta=f"{len(manager.portfolios)} 个组合"
         )
 
     with col3:
         st.metric(
-            label="🎯 信号数量",
-            value="5",
-            delta="2个买入"
+            label="🎯 买入信号",
+            value=buy_count,
+            delta=f"{sell_count} 个卖出"
         )
 
     with col4:
         st.metric(
             label="📊 组合收益",
-            value="+15.3%",
-            delta="+2.1%"
+            value=f"{total_pnl_pct:+.2f}%" if manager.portfolios else "—",
+            delta=None if not manager.portfolios else "vs 初始资金"
         )
 
     st.divider()
@@ -307,8 +330,6 @@ def render_dashboard():
 
     # 最新信号
     st.subheader("🎯 最新交易信号")
-
-    signals = get_all_signals(st.session_state.watchlist)
 
     if signals:
         buy_signals = [s for s in signals if s.get('buy_signal', False)]
@@ -473,102 +494,46 @@ def render_analysis():
 
     chart_type = st.selectbox(
         "图表类型",
-        ["K线图", "MACD", "RSI", "布林带", "综合分析"],
+        ["K线图", "MACD", "RSI", "布林带", "综合分析", "信号图"],
         key="analysis_chart_type"
     )
 
+    # (审计 #19: 旧版在此内联重写 4 种 matplotlib 图表 95 行,
+    #  与 chart_visualizer 完全重复且实例化后从未调用 —
+    #  现全部委托 session_state.visualizer, 输出图片后 st.image 展示)
+    viz = st.session_state.visualizer
+    if viz is None:
+        st.warning("matplotlib 未安装，图表功能不可用（pip install matplotlib）")
+        return
+
     try:
-        import matplotlib.pyplot as plt
-        import matplotlib
-        matplotlib.use('Agg')
-
         if chart_type == "K线图":
-            # 绘制K线图
-            fig, ax = plt.subplots(figsize=(12, 6))
-
-            # 简化K线绘制
-            for i in range(len(data)):
-                row = data.iloc[i]
-                color = '#FF4444' if row['收盘'] >= row['开盘'] else '#00AA00'
-
-                # 绘制实体
-                height = abs(row['收盘'] - row['开盘'])
-                bottom = min(row['收盘'], row['开盘'])
-                ax.bar(i, height, bottom=bottom, width=0.6, color=color, alpha=0.8)
-
-            # 绘制均线
-            ax.plot(range(len(data)), data['MA5'], label='MA5', linewidth=1)
-            ax.plot(range(len(data)), data['MA20'], label='MA20', linewidth=1)
-            ax.plot(range(len(data)), data['MA60'], label='MA60', linewidth=1)
-
-            ax.set_title(f"{symbol} K线图")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-            st.pyplot(fig)
-            plt.close()
+            path = viz.plot_candlestick(
+                data, symbol=symbol, ma_periods=[5, 20, 60])
+            st.image(path, use_container_width=True)
 
         elif chart_type == "MACD":
-            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
-
-            # 价格
-            ax1.plot(range(len(data)), data['收盘'], label='收盘价', color='black')
-            ax1.set_title(f"{symbol} MACD分析")
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-
-            # MACD线
-            ax2.plot(range(len(data)), data['MACD'], label='MACD', color='blue')
-            ax2.plot(range(len(data)), data['MACD_Signal'], label='Signal', color='red')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-            # 柱状图
-            colors = ['#FF4444' if x > 0 else '#00AA00' for x in data['MACD_Hist']]
-            ax3.bar(range(len(data)), data['MACD_Hist'], color=colors, alpha=0.6)
-            ax3.axhline(y=0, color='black', linewidth=0.5)
-            ax3.grid(True, alpha=0.3)
-
-            st.pyplot(fig)
-            plt.close()
+            path = viz.plot_macd(data, symbol=symbol)
+            st.image(path, use_container_width=True)
 
         elif chart_type == "RSI":
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
-
-            ax1.plot(range(len(data)), data['收盘'], label='收盘价')
-            ax1.set_title(f"{symbol} RSI分析")
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-
-            ax2.plot(range(len(data)), data['RSI'], label='RSI', color='purple')
-            ax2.axhline(y=70, color='red', linestyle='--', alpha=0.5, label='超买')
-            ax2.axhline(y=30, color='green', linestyle='--', alpha=0.5, label='超卖')
-            ax2.set_ylim(0, 100)
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-            st.pyplot(fig)
-            plt.close()
+            path = viz.plot_rsi(data, symbol=symbol)
+            st.image(path, use_container_width=True)
 
         elif chart_type == "布林带":
-            fig, ax = plt.subplots(figsize=(12, 6))
-
-            ax.plot(range(len(data)), data['收盘'], label='收盘价', color='black')
-            ax.plot(range(len(data)), data['BB_Upper'], label='上轨', color='red', linestyle='--')
-            ax.plot(range(len(data)), data['BB_Middle'], label='中轨', color='blue', linestyle='--')
-            ax.plot(range(len(data)), data['BB_Lower'], label='下轨', color='green', linestyle='--')
-            ax.fill_between(range(len(data)), data['BB_Lower'], data['BB_Upper'], alpha=0.1)
-
-            ax.set_title(f"{symbol} 布林带")
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-
-            st.pyplot(fig)
-            plt.close()
+            path = viz.plot_bollinger_bands(data, symbol=symbol)
+            st.image(path, use_container_width=True)
 
         elif chart_type == "综合分析":
-            st.info("综合分析图包含多个子图，请查看完整的图表功能")
-            # 这里可以添加更复杂的综合图表
+            path = viz.plot_combined_analysis(data, symbol=symbol)
+            st.image(path, use_container_width=True)
+
+        elif chart_type == "信号图":
+            # (审计 #20: 图表买卖点与回测引擎用同一 generate_signals 产出,
+            #  int 0/1 信号列, 不再有独立阈值/映射口径)
+            signals_df = st.session_state.generator.generate_signals(data)
+            path = viz.plot_signals(data, signals_df, symbol=symbol)
+            st.image(path, use_container_width=True)
 
     except Exception as e:
         st.warning(f"图表生成失败: {str(e)}")
@@ -740,30 +705,20 @@ def render_backtest():
                 # 净值曲线
                 st.subheader("📈 净值曲线")
 
-                try:
-                    import matplotlib.pyplot as plt
-                    import matplotlib
-                    matplotlib.use('Agg')
-
-                    fig, ax = plt.subplots(figsize=(12, 6))
-
-                    equity_curve = result.get('equity_curve')
-                    if equity_curve is not None and len(equity_curve) > 0:
-                        equity_values = equity_curve['value'].values
-                        ax.plot(range(len(equity_values)), equity_values, label='策略净值', linewidth=2)
-                        ax.axhline(y=initial_cash, color='red', linestyle='--', label='初始资金')
-
-                    ax.set_title("净值曲线")
-                    ax.set_xlabel("交易日")
-                    ax.set_ylabel("净值")
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-
-                    st.pyplot(fig)
-                    plt.close()
-
-                except Exception as e:
-                    st.warning(f"图表生成失败: {str(e)}")
+                equity_curve = result.get('equity_curve')
+                if equity_curve is not None and len(equity_curve) > 0:
+                    if st.session_state.visualizer is not None:
+                        # (审计 #19: 委托 chart_visualizer, 替换内联 matplotlib)
+                        try:
+                            eq_path = st.session_state.visualizer.plot_equity_curve(
+                                equity_curve, symbol=symbol)
+                            st.image(eq_path, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"图表生成失败: {str(e)}")
+                    else:
+                        st.info("matplotlib 未安装，无法绘制净值曲线")
+                else:
+                    st.info("无净值数据")
 
                 # 交易记录
                 st.subheader("📋 交易记录")
@@ -885,19 +840,52 @@ def render_portfolio():
                 st.divider()
 
                 # 操作按钮
+                # (审计 #18 S4: 旧版三个按钮只弹占位提示, 无真实功能 —
+                #  现接 PortfolioManager 真实 API: 等权再平衡建议 /
+                #  绩效指标 / 标准报告)
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
                     if st.button("🔄 再平衡", key=f"rebalance_{portfolio['id']}"):
-                        st.info("再平衡功能开发中...")
+                        positions = portfolio_obj.positions if portfolio_obj else {}
+                        if not positions:
+                            st.info("暂无持仓，无需再平衡")
+                        else:
+                            equal_w = 1.0 / len(positions)
+                            target_weights = {s: equal_w for s in positions}
+                            try:
+                                adjustments = manager.rebalance(
+                                    portfolio['id'], target_weights)
+                                if adjustments:
+                                    adj_df = pd.DataFrame(
+                                        [{'代码': k, '调整股数': v}
+                                         for k, v in adjustments.items()])
+                                    st.dataframe(adj_df, use_container_width=True)
+                                else:
+                                    st.success("当前持仓已接近等权，无需调整")
+                            except ValueError as e:
+                                st.error(str(e))
 
                 with col2:
                     if st.button("📊 分析", key=f"analyze_{portfolio['id']}"):
-                        st.info("分析功能开发中...")
+                        perf = manager.get_performance(portfolio['id'])
+                        if perf:
+                            pc1, pc2, pc3 = st.columns(3)
+                            pc1.metric("总收益率", f"{perf['total_return']:.2f}%")
+                            pc2.metric("现金占比", f"{perf['cash_ratio']:.2f}%")
+                            pc3.metric("持仓数", perf['position_count'])
+                            if perf['positions']:
+                                st.dataframe(
+                                    pd.DataFrame(perf['positions']),
+                                    use_container_width=True)
 
                 with col3:
                     if st.button("📄 报告", key=f"report_{portfolio['id']}"):
-                        st.info("报告功能开发中...")
+                        report = manager.generate_report(portfolio['id'])
+                        if report:
+                            st.code(report, language=None)
+                        else:
+                            st.info("报告生成失败")
 
                 st.divider()
 
@@ -917,105 +905,113 @@ def render_monitor():
         st.error("核心模块未加载，请检查依赖安装")
         return
 
-    st.info("实时监控功能开发中...")
+    # (审计 #18 S2/S3: 旧版整页是桩 — "开发中" + 硬编码指标 3/12/5/2 +
+    #  3 条假监控列表 (600519/000858/002415 固定条件) —
+    #  现接 realtime_quote 腾讯接口, 拉 watchlist 真实行情并按涨跌幅告警)
+    watchlist = st.session_state.watchlist
 
-    # 监控状态
-    st.subheader("监控状态")
+    if not watchlist:
+        st.info("自选股列表为空，请在侧边栏添加股票")
+        return
+
+    rt_api = st.session_state.rt_api
+
+    with st.spinner("正在获取实时行情..."):
+        quotes = {}
+        try:
+            quotes = rt_api.get_quotes(watchlist)
+        except Exception as e:
+            st.error(f"获取实时行情失败: {str(e)}")
+
+    if not quotes:
+        st.warning("未能获取任何实时行情（非交易时段或网络异常）")
+        return
+
+    # 告警阈值设置
+    alert_threshold = st.slider(
+        "涨跌幅告警阈值 (%)", 1.0, 20.0, 5.0, 0.5, key="monitor_threshold")
+
+    # 统计指标 (真实数据)
+    up_count = sum(1 for q in quotes.values() if q.change_pct > 0)
+    down_count = sum(1 for q in quotes.values() if q.change_pct < 0)
+    alert_count = sum(1 for q in quotes.values()
+                      if abs(q.change_pct) >= alert_threshold)
 
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.metric("监控股票", "3")
-
+        st.metric("监控股票", len(quotes))
     with col2:
-        st.metric("告警条件", "12")
-
+        st.metric("上涨", up_count)
     with col3:
-        st.metric("今日告警", "5")
-
+        st.metric("下跌", down_count)
     with col4:
-        st.metric("未读告警", "2")
+        st.metric("触阈告警", alert_count)
 
     st.divider()
 
-    # 添加监控
-    with st.expander("➕ 添加监控", expanded=False):
-        col1, col2 = st.columns(2)
-
-        with col1:
-            monitor_symbol = st.text_input("股票代码", key="monitor_symbol")
-
-        with col2:
-            alert_type = st.selectbox(
-                "告警类型",
-                ["价格突破", "价格跌破", "涨跌幅", "突破信号"],
-                key="monitor_alert_type"
-            )
-
-        if alert_type == "价格突破":
-            threshold = st.number_input("突破价格", key="monitor_above_price")
-        elif alert_type == "价格跌破":
-            threshold = st.number_input("跌破价格", key="monitor_below_price")
-        else:
-            threshold = st.number_input("阈值(%)", key="monitor_threshold")
-
-        if st.button("添加监控", key="add_monitor_btn"):
-            st.success(f"已添加 {monitor_symbol} 的监控")
-            st.rerun()
-
-    st.divider()
-
-    # 监控列表
+    # 监控列表 (真实行情)
     st.subheader("监控列表")
 
-    monitor_list = [
-        {'symbol': '600519', 'name': '贵州茅台', 'conditions': '价格突破2000', 'status': '正常'},
-        {'symbol': '000858', 'name': '五粮液', 'conditions': '涨幅超过5%', 'status': '告警'},
-        {'symbol': '002415', 'name': '海康威视', 'conditions': '买入信号', 'status': '正常'},
-    ]
-
-    for monitor in monitor_list:
+    for symbol in watchlist:
+        q = quotes.get(symbol)
         with st.container():
-            col1, col2, col3, col4 = st.columns([2, 3, 2, 1])
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
 
             with col1:
-                st.write(f"**{monitor['symbol']}**")
+                st.write(f"**{symbol}** {q.name if q else ''}")
 
-            with col2:
-                st.write(monitor['conditions'])
+            if q is None:
+                with col2:
+                    st.error("无数据")
+            else:
+                with col2:
+                    st.write(f"¥{q.price:.2f}")
 
-            with col3:
-                if monitor['status'] == '告警':
-                    st.error(monitor['status'])
-                else:
-                    st.success(monitor['status'])
+                with col3:
+                    st.metric(
+                        "涨跌幅", f"{q.change_pct:+.2f}%",
+                        delta=f"{q.change:+.2f}",
+                        delta_color="normal"
+                    )
 
-            with col4:
-                if st.button("删除", key=f"del_{monitor['symbol']}"):
-                    st.rerun()
+                with col4:
+                    st.write(f"成交量 {q.volume:,.0f} 手")
 
-            st.divider()
+                with col5:
+                    if abs(q.change_pct) >= alert_threshold:
+                        st.error(f"⚠️ 触发告警")
+                    else:
+                        st.success("正常")
+
+        st.divider()
 
 
 # =============================================================================
 # 辅助函数
 # =============================================================================
 
+_STOCK_NAME_CACHE: Optional[Dict[str, str]] = None
+
+
+def _load_stock_names() -> Dict[str, str]:
+    """懒加载 stock_list.csv (5523 只) → {代码: 名称}, 模块级缓存"""
+    global _STOCK_NAME_CACHE
+    if _STOCK_NAME_CACHE is None:
+        names: Dict[str, str] = {}
+        csv_path = os.path.join(_SKILLS_DIR, 'stock_list.csv')
+        try:
+            df = pd.read_csv(csv_path, dtype={'code': str})
+            names = dict(zip(df['code'].str.zfill(6), df['name']))
+        except Exception:
+            names = {}
+        _STOCK_NAME_CACHE = names
+    return _STOCK_NAME_CACHE
+
+
 def get_stock_name(symbol: str) -> str:
-    """获取股票名称"""
-    name_map = {
-        '600519': '贵州茅台',
-        '000858': '五粮液',
-        '002415': '海康威视',
-        '600036': '招商银行',
-        '000001': '平安银行',
-        '601318': '中国平安',
-        '600276': '恒瑞医药',
-        '002304': '洋河股份',
-        '000333': '美的集团',
-        '600887': '伊利股份'
-    }
-    return name_map.get(symbol, symbol)
+    """获取股票名称 (审计 #18: 替换硬编码 10 只 → stock_list.csv 全量)"""
+    return _load_stock_names().get(str(symbol).zfill(6), symbol)
 
 
 def get_stock_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:

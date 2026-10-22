@@ -123,8 +123,8 @@ CSV 路径死代码）、`database_manager.py`（无 psycopg2 驱动、0 生产�
 `concurrent_fetcher.py` + `cache_manager.py`（并行取数/缓存从未接入主链）、
 `batch_query_sectors.py`（纯死代码）**已删除**，连同对应测试与文档入口。
 
-保留的孤岛：`realtime_quote.py`（与 stock_data_fetcher 的实时接口同源但为真批量
-解析；A-P1-4 修复成果保留，未来可接入 web_app 实时监控页）。
+保留的孤岛：无。`realtime_quote.py`（与 stock_data_fetcher 的实时接口同源但为真批量
+解析；A-P1-4 修复成果保留）已接入 web_app 实时监控页（审计 #18 批次）。
 
 ## 变更守则
 

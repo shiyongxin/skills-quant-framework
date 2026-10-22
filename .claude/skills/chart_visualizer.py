@@ -510,9 +510,11 @@ class ChartVisualizer:
         ax1.plot(plot_data['date_num'], ma20, label='MA20', linewidth=1, alpha=0.8)
 
         # 标注买卖信号
+        # (审计 #20: generate_signals 产出 int 0/1, 旧代码 == True 在
+        #  int 列上语义脆弱 — 统一 astype 布尔化, 与回测引擎同源同判)
         if 'signal_buy' in signals.columns:
-            buy_signals = signals[signals['signal_buy'] == True]
-            for date in buy_signals['日期']:
+            buy_mask = signals['signal_buy'].fillna(0).astype(bool)
+            for date in signals.loc[buy_mask, '日期']:
                 idx = plot_data[plot_data['日期'] == date].index
                 if len(idx) > 0:
                     price = plot_data.loc[idx[0], '最低']
@@ -520,8 +522,8 @@ class ChartVisualizer:
                               marker='^', color='red', s=200, zorder=5, label='Buy')
 
         if 'signal_sell' in signals.columns:
-            sell_signals = signals[signals['signal_sell'] == True]
-            for date in sell_signals['日期']:
+            sell_mask = signals['signal_sell'].fillna(0).astype(bool)
+            for date in signals.loc[sell_mask, '日期']:
                 idx = plot_data[plot_data['日期'] == date].index
                 if len(idx) > 0:
                     price = plot_data.loc[idx[0], '最高']

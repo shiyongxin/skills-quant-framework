@@ -58,7 +58,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 
 **Data layer**
 - `stock_data_fetcher.py` — historical quotes via akshare `stock_zh_a_daily` (新浪财经源; 旧文档误称"腾讯接口", 已订正) + Tencent `qt.gtimg.cn` realtime; cache in `stock_data/quotes/`
-- `realtime_quote.py` — Tencent `qt.gtimg.cn` real-time quotes (no production callers — island, 项15)
+- `realtime_quote.py` — Tencent `qt.gtimg.cn` real-time quotes (wired into web_app 实时监控页, 审计 #18)
 - `stock_list_manager.py` / `stock_list.csv` — A-share universe
 
 **Analysis layer**
