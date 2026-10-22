@@ -61,11 +61,11 @@ Pytest is configured via `pytest.ini` with `pythonpath = .` and `testpaths = tes
 All core modules live flat in `.claude/skills/`. The framework imports them by bare filename (relies on `sys.path` / `pythonpath = .`), **not** as a package — there is no `__init__.py`.
 
 **Data layer**
-- `stock_data_fetcher.py` — historical quotes via akshare + Tencent API; cache in `stock_data/quotes/`
-- `concurrent_fetcher.py` — multi-threaded fetcher (10x speedup)
-- `cache_manager.py` — Redis cache with 7 strategies; degrades without Redis
-- `database_manager.py` — PostgreSQL persistence (6 tables, optional)
-- `realtime_quote.py` — Tencent real-time quotes
+- `stock_data_fetcher.py` — historical quotes via akshare `stock_zh_a_daily` (新浪财经源; 旧文档误称"腾讯接口", 已订正) + Tencent `qt.gtimg.cn` realtime; cache in `stock_data/quotes/`
+- `concurrent_fetcher.py` — multi-threaded fetcher (per-dep import guards; no production callers — island, 项15)
+- `cache_manager.py` — Redis cache with 7 strategies; import-safe without Redis (only referenced by `concurrent_fetcher` itself — 项15)
+- `database_manager.py` — PostgreSQL schema helpers (6 tables); import-safe without SQLAlchemy (**no production callers — island, 项15**)
+- `realtime_quote.py` — Tencent `qt.gtimg.cn` real-time quotes (no production callers — island, 项15)
 - `stock_list_manager.py` / `stock_list.csv` — A-share universe
 
 **Analysis layer**

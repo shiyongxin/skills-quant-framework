@@ -1,6 +1,6 @@
 """
 中国股市股票数据获取工具 - 修正版
-使用可靠的数据源（腾讯接口替代失效的东方财富接口）
+使用可靠的数据源（新浪接口 stock_zh_a_daily 替代失效的东方财富接口）
 
 作者: AI Assistant
 日期: 2025-02-03
@@ -8,10 +8,11 @@
 
 问题说明:
 - 东方财富接口 (stock_zh_a_hist, stock_zh_a_spot_em) 连接失败
-- 解决方案: 使用腾讯接口 (stock_zh_a_daily) 作为主要数据源
+- 解决方案: 使用新浪接口 (ak.stock_zh_a_daily, 新浪财经源) 作为主要数据源
+  (订正: 旧文档误称"腾讯接口"; 腾讯 qt.gtimg.cn 仅用于实时行情 get_realtime_quote)
 
 主要功能:
-1. 获取股票历史行情（使用腾讯接口）
+1. 获取股票历史行情（使用新浪接口; 实时行情另行使用腾讯 qt.gtimg.cn）
 2. 获取财务指标
 3. 批量获取数据
 4. 数据自动存储到本地
@@ -56,13 +57,13 @@ class StockDataFetcher:
 
     def _format_symbol(self, symbol):
         """
-        格式化股票代码为腾讯接口格式
+        格式化股票代码为 sh/sz/bj 前缀格式 (新浪财经接口要求)
 
         Args:
             symbol: 股票代码 (如 "600036" 或 "000001")
 
         Returns:
-            腾讯接口格式的代码 (如 "sh600036" 或 "sz000001")
+            带前缀的代码 (如 "sh600036" 或 "sz000001")
         """
         if len(symbol) == 6:
             if symbol.startswith('6'):
@@ -105,7 +106,7 @@ class StockDataFetcher:
 
     def get_quote_data(self, symbol, start_date=None, end_date=None, days=252):
         """
-        获取历史行情数据 - 使用腾讯接口
+        获取历史行情数据 - 使用新浪接口 (ak.stock_zh_a_daily)
 
         Args:
             symbol: 股票代码 (例如: "000001" 或 "600036")
@@ -119,7 +120,7 @@ class StockDataFetcher:
         print(f"[INFO] 获取 {symbol} 行情数据...")
 
         # 格式化股票代码
-        tencent_symbol = self._format_symbol(symbol)
+        sina_symbol = self._format_symbol(symbol)
 
         # 计算日期范围
         if end_date is None:
@@ -133,15 +134,15 @@ class StockDataFetcher:
             start_date = datetime.strptime(start_date, "%Y%m%d")
 
         try:
-            # 使用腾讯接口
+            # 使用新浪接口 (ak.stock_zh_a_daily)
             df = ak.stock_zh_a_daily(
-                symbol=tencent_symbol,
+                symbol=sina_symbol,
                 start_date=start_date.date(),
                 end_date=end_date.date()
             )
 
             if df is not None and len(df) > 0:
-                # 标准化列名（腾讯接口返回英文列名）
+                # 标准化列名（新浪接口返回英文列名）
                 column_mapping = {
                     'date': '日期',
                     'open': '开盘',
@@ -586,9 +587,9 @@ if __name__ == "__main__":
     # 创建数据获取器
     fetcher = StockDataFetcher(data_dir="./stock_data")
 
-    # 示例1: 获取单只股票行情（使用腾讯接口）
+    # 示例1: 获取单只股票行情（使用新浪接口）
     print("\n" + "="*50)
-    print("示例1: 获取平安银行(000001)历史行情 - 腾讯接口")
+    print("示例1: 获取平安银行(000001)历史行情 - 新浪接口")
     print("="*50)
     quote_data = fetcher.get_quote_data(
         symbol="000001",

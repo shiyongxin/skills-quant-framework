@@ -527,7 +527,7 @@ while True:
 ## 下一步
 
 1. 查看 [API 参考文档](API_REFERENCE.md) 了解详细API
-2. 查看 [使用示例](USAGE_EXAMPLES.md) 学习更多用法
+2. 查看 [使用示例](docs/USAGE_EXAMPLES.md) 学习更多用法
 3. 运行 [examples](.claude/skills/examples/) 目录下的示例代码
 4. 根据自己的需求定制策略
 

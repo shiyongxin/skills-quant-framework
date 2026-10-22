@@ -20,7 +20,7 @@ Skills是一个完整的Python股票量化分析框架，提供从数据获取�
 - **9,200+行代码** - 高质量Python代码
 - **50+使用示例** - 快速上手
 - **Web交互界面** - Streamlit驱动的可视化平台
-- **10倍性能提升** - 并发获取 + 智能缓存
+- **并发获取 + 智能缓存** - 多线程取数（无基准测试支撑的倍数宣称已移除）
 
 ---
 
@@ -72,7 +72,7 @@ python run_web_app.py
 | 模块 | 文件 | 功能 | 文档 |
 |------|------|------|------|
 | 数据获取 | stock_data_fetcher.py | 历史行情、实时数据、财务数据 | [API参考](API_REFERENCE_V2.md#1-数据获取) |
-| 并发获取 | concurrent_fetcher.py | 多线程数据获取、10倍性能 | [API参考](API_REFERENCE_V2.md#9-并发获取器) |
+| 并发获取 | concurrent_fetcher.py | 多线程数据获取（worker内限速/失败计数；暂无生产调用方） | [API参考](API_REFERENCE_V2.md#9-并发获取器) |
 | 缓存管理 | cache_manager.py | Redis缓存、7种缓存策略 | [API参考](API_REFERENCE_V2.md#10-缓存管理器) |
 
 ### 分析层 (5个模块)
@@ -98,13 +98,13 @@ python run_web_app.py
 | 模块 | 文件 | 功能 | 文档 |
 |------|------|------|------|
 | 数据可视化 | chart_visualizer.py | 8种图表类型、自定义样式 | [API参考](API_REFERENCE_V2.md#8-数据可视化) |
-| Web应用 | web_app.py | Streamlit交互式平台 | [用户手册](USER_MANUAL_V2.md#web应用) |
+| Web应用 | web_app.py | Streamlit交互式平台 | [用户手册](docs/USER_MANUAL_V2.md#web应用) |
 
 ### 数据层 (1个模块)
 
 | 模块 | 文件 | 功能 | 文档 |
 |------|------|------|------|
-| 数据库管理 | database_manager.py | PostgreSQL持久化、6张表 | [API参考](API_REFERENCE_V2.md#13-数据库管理器) |
+| 数据库管理 | database_manager.py | PostgreSQL持久化辅助、6张表（暂无生产调用方，孤岛待决 — 项15） | [API参考](API_REFERENCE_V2.md#13-数据库管理器) |
 
 ---
 
@@ -115,14 +115,14 @@ python run_web_app.py
 | 文档 | 说明 | 适用对象 |
 |------|------|----------|
 | [快速入门指南](QUICK_START_GUIDE.md) | 5分钟上手教程 | 新手 |
-| [常见问题 (FAQ)](FAQ.md) | 常见问题解答 | 所有用户 |
+| [常见问题 (FAQ)](docs/FAQ.md) | 常见问题解答 | 所有用户 |
 
 ### 核心文档
 
 | 文档 | 说明 | 适用对象 |
 |------|------|----------|
 | [v2.0 API参考](API_REFERENCE_V2.md) | 完整API参考 | 开发者 |
-| [v2.0 用户手册](USER_MANUAL_V2.md) | 详细使用指南 | 所有用户 |
+| [v2.0 用户手册](docs/USER_MANUAL_V2.md) | 详细使用指南 | 所有用户 |
 | [部署指南](DEPLOYMENT_GUIDE.md) | 安装和部署 | 运维人员 |
 | [更新日志](CHANGELOG.md) | 版本更新记录 | 所有用户 |
 
@@ -130,8 +130,8 @@ python run_web_app.py
 
 | 文档 | 说明 |
 |------|------|
-| [开发总结](SKILLS_DEVELOPMENT_SUMMARY.md) | 完整开发历程 |
-| [三月完成报告](MARCH_COMPLETION_REPORT.md) | v2.0发布报告 |
+| [开发总结](docs/SKILLS_DEVELOPMENT_SUMMARY.md) | 完整开发历程 |
+| [三月完成报告](docs/MARCH_COMPLETION_REPORT.md) | v2.0发布报告 |
 
 ---
 
@@ -315,8 +315,7 @@ streamlit run .claude/skills/web_app.py
 - ✅ 策略优化器 (strategy_optimizer.py)
 
 **性能优化：**
-- ✅ 数据获取性能提升10倍
-- ✅ 并发处理支持
+- ✅ 并发获取支持
 - ✅ 智能缓存机制
 
 **改进修复：**
@@ -375,10 +374,10 @@ Stocks/
 
 ### 文档未解决问题？
 
-1. 查看 [FAQ](FAQ.md) 常见问题
+1. 查看 [FAQ](docs/FAQ.md) 常见问题
 2. 查看 [API参考](API_REFERENCE_V2.md) 详细说明
-3. 查看 [使用示例](USAGE_EXAMPLES.md) 实用代码
-4. 查看 [开发总结](SKILLS_DEVELOPMENT_SUMMARY.md) 了解详情
+3. 查看 [使用示例](docs/USAGE_EXAMPLES.md) 实用代码
+4. 查看 [开发总结](docs/SKILLS_DEVELOPMENT_SUMMARY.md) 了解详情
 
 ### 贡献指南
 

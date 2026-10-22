@@ -13,12 +13,18 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import sys
 import os
+import traceback
 
-# 添加模块路径
-sys.path.append('.')
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+# 模块路径: 基于 __file__, 不依赖启动时的工作目录
+# (修复审计 F-P1: 旧实现 sys.path.append('.') 与 '../..' 换目录即断)
+_SKILLS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(os.path.dirname(_SKILLS_DIR))
+for _p in (_SKILLS_DIR, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-# 导入核心模块
+# 导入核心模块 (失败时保留完整 traceback, 由 render_import_error 显式展示)
+IMPORT_ERROR: Optional[str] = None
 try:
     from stock_data_fetcher import StockDataFetcher
     from signal_generator import SignalGenerator
@@ -27,9 +33,20 @@ try:
     from portfolio_manager import PortfolioManager
     from real_time_monitor import RealTimeMonitor
     MODULES_AVAILABLE = True
-except ImportError as e:
-    print(f"Warning: Could not import modules: {e}")
+except ImportError:
     MODULES_AVAILABLE = False
+    IMPORT_ERROR = traceback.format_exc()
+
+
+def render_import_error():
+    """显式错误页: 模块导入失败时展示完整 traceback
+
+    修复审计 F-P1: 旧实现仅 print 一行 Warning 后静默降级,
+    5 个页面各自 st.error 一句无诊断价值的提示。
+    """
+    st.error("核心模块导入失败 — 功能不可用")
+    st.code(IMPORT_ERROR or "未知导入错误", language="text")
+    st.caption(f"skills 目录: {_SKILLS_DIR}")
 
 
 # =============================================================================
@@ -1064,6 +1081,11 @@ def main():
     """主应用入口"""
     # 配置页面
     setup_page_config()
+
+    # 导入失败 → 显式错误页 + 完整 traceback, 不再静默降级 (审计 F-P1)
+    if not MODULES_AVAILABLE:
+        render_import_error()
+        st.stop()
 
     # 初始化Session State
     init_session_state()

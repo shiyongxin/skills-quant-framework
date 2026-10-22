@@ -9,6 +9,7 @@ Real-Time Quote Module
 
 import requests
 import pandas as pd
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Union
 from dataclasses import dataclass
@@ -140,15 +141,21 @@ class RealTimeQuoteAPI:
             content = response.text.strip()
 
             # 解析每只股票
+            # (审计 A-P1-4: 按内容中的代码正则匹配, 不用行号 —
+            #  否则 API 少返回一只/多出空行 → 后续全体错位静默污染)
             results = {}
-            lines = content.split('\n')
+            orig_by_fmt = {fmt: orig for orig, fmt in zip(codes, formatted_codes)}
 
-            for i, line in enumerate(lines):
-                if 'v_' in line:
-                    code = codes[i] if i < len(codes) else formatted_codes[i]
-                    quote = self._parse_quote(formatted_codes[i], line)
-                    if quote:
-                        results[code] = quote
+            for line in content.splitlines():
+                m = re.search(r'v_([a-z]{2}\d{6})\s*=', line)
+                if not m:
+                    continue
+                fmt_code = m.group(1)
+                if fmt_code not in orig_by_fmt:
+                    continue  # 非请求代码, 忽略
+                quote = self._parse_quote(fmt_code, line)
+                if quote:
+                    results[orig_by_fmt[fmt_code]] = quote
 
             return results
 
