@@ -324,6 +324,10 @@ class VectorizedBacktester:
         stop_loss_pct = float(params.get('stop_loss_pct', 0.08))
         take_profit_pct = float(params.get('take_profit_pct', 0.20))
         position_size_pct = float(params.get('position_size_pct', 0.8))
+        # 单票仓位硬上限 (审计项 20): 默认1.0不改变历史行为;
+        # 显式传入时与 position_size_pct 取小
+        max_position_pct = float(params.get('max_position_pct', 1.0))
+        position_size_pct = min(position_size_pct, max_position_pct)
         trailing_stop_pct = float(params.get('trailing_stop_pct', 0.05))
         min_holding = int(params.get('min_holding_days', 20))
         is_st = bool(params.get('is_st', False))

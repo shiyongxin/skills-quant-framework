@@ -65,6 +65,14 @@ class PositionConfig:
     take_profit_pct: float = 0.20       # 止盈百分比
     take_profit_enabled: bool = False   # 是否启用止盈
 
+    def __post_init__(self):
+        if self.max_position_pct >= 1.0:
+            import warnings
+            warnings.warn(
+                f"PositionConfig.max_position_pct={self.max_position_pct} "
+                f"为无上限配置(单票可满仓), 实盘建议 ≤0.5 (审计项 20)",
+                stacklevel=2)
+
 
 @dataclass
 class Position:
@@ -1025,6 +1033,7 @@ def get_conservative_config() -> PositionConfig:
     return PositionConfig(
         sizing_method=PositionSizingMethod.PERCENT_OF_EQUITY,
         sizing_value=0.5,              # 50%仓位
+        max_position_pct=0.5,          # 单票上限=仓位 (审计项 20: 显式约束)
         stop_loss_method=StopLossMethod.PERCENTAGE,
         stop_loss_pct=0.05,            # 5%止损
         take_profit_pct=0.10,          # 10%止盈
@@ -1037,6 +1046,7 @@ def get_balanced_config() -> PositionConfig:
     return PositionConfig(
         sizing_method=PositionSizingMethod.PERCENT_OF_EQUITY,
         sizing_value=0.8,              # 80%仓位
+        max_position_pct=0.8,          # 单票上限=仓位 (审计项 20: 显式约束)
         stop_loss_method=StopLossMethod.PERCENTAGE,
         stop_loss_pct=0.08,            # 8%止损
         take_profit_pct=0.20,          # 20%止盈
@@ -1049,6 +1059,7 @@ def get_aggressive_config() -> PositionConfig:
     return PositionConfig(
         sizing_method=PositionSizingMethod.PERCENT_OF_EQUITY,
         sizing_value=0.95,             # 95%仓位
+        max_position_pct=1.0,          # 显式声明满仓意图 (会触发 __post_init__ 警告)
         stop_loss_method=StopLossMethod.TRAILING,
         stop_loss_pct=0.10,            # 10%止损
         trailing_stop_pct=0.05,        # 5%移动止损
@@ -1060,6 +1071,7 @@ def get_kelly_config() -> PositionConfig:
     """凯利公式配置"""
     return PositionConfig(
         sizing_method=PositionSizingMethod.KELLY,
+        max_position_pct=1.0,          # 显式声明满仓意图 (会触发 __post_init__ 警告)
         stop_loss_method=StopLossMethod.ATR,
         atr_multiplier=2.0,
         take_profit_pct=0.25,

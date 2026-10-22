@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 
+from risk_management import PortfolioRiskMonitor, StopLossManager
+
 
 class RebalanceMethod(Enum):
     """再平衡方法"""
@@ -103,17 +105,31 @@ class Portfolio:
 
 
 class PortfolioManager:
-    """组合管理器"""
+    """组合管理器
 
-    def __init__(self, data_dir: str = None):
+    风控接入 (审计项 20): 下单路径经 PortfolioRiskMonitor 集中度约束
+    (max_position_pct) 与现金约束阻断; StopLossManager 提供持仓级
+    止损/止盈/移动止损检查。
+    """
+
+    def __init__(self, data_dir: str = None,
+                 max_position_pct: float = 0.33,
+                 risk_block: bool = True):
         """
         初始化组合管理器
 
         Args:
             data_dir: 组合数据存储目录
+            max_position_pct: 单一持仓市值占组合总值上限 (默认33%)
+            risk_block: 是否阻断违反约束的下单 (True=拒绝并返回False;
+                False=仅打印WARN, 不阻断 — 旧行为)
         """
         self.portfolios: Dict[str, Portfolio] = {}
         self.data_dir = data_dir or "portfolio_data"
+        self.max_position_pct = max_position_pct
+        self.risk_block = risk_block
+        self.risk_monitor = PortfolioRiskMonitor()
+        self.stop_monitor = StopLossManager()
 
     def create_portfolio(self, name: str, initial_cash: float = 100000) -> Portfolio:
         """
@@ -154,7 +170,9 @@ class PortfolioManager:
         return list(self.portfolios.keys())
 
     def add_position(self, portfolio_name: str, symbol: str, name: str = "",
-                    shares: int = 0, price: float = 0.0) -> bool:
+                     shares: int = 0, price: float = 0.0,
+                     stop_loss_pct: float = None, take_profit_pct: float = None,
+                     trailing_stop_pct: float = None) -> bool:
         """
         添加或更新持仓
 
@@ -164,9 +182,12 @@ class PortfolioManager:
             name: 股票名称
             shares: 增持股数（正数买入，负数卖出）
             price: 交易价格
+            stop_loss_pct: 固定止损比例 (注册到 StopLossManager)
+            take_profit_pct: 止盈比例
+            trailing_stop_pct: 移动止损比例
 
         Returns:
-            是否成功
+            是否成功 (risk_block=True 时, 违反现金/集中度约束返回 False)
         """
         portfolio = self.get_portfolio(portfolio_name)
         if not portfolio:
@@ -175,7 +196,27 @@ class PortfolioManager:
         # 计算交易金额
         trade_value = shares * price
 
-        # 更新持仓（无资金限制）
+        # 风控闸门 (审计项 20): 买入受现金与单票集中度约束
+        # 旧逻辑注释"无资金限制" — 允许透支与满仓单票
+        if shares > 0 and price > 0 and portfolio.total_value > 0:
+            current_mv = (portfolio.positions[symbol].market_value
+                          if symbol in portfolio.positions else 0.0)
+            projected_weight = (current_mv + trade_value) / portfolio.total_value
+            over_cash = trade_value > portfolio.cash + 1e-9
+            over_conc = projected_weight > self.max_position_pct + 1e-9
+            if over_cash or over_conc:
+                reasons = []
+                if over_cash:
+                    reasons.append(f"买入金额 {trade_value:,.2f} 超过可用现金 {portfolio.cash:,.2f}")
+                if over_conc:
+                    reasons.append(f"买入后单票权重 {projected_weight:.1%} 超过上限 {self.max_position_pct:.1%}")
+                msg = f"{symbol}: " + "; ".join(reasons)
+                if self.risk_block:
+                    print(f"[WARN] 风控阻断 {msg}")
+                    return False
+                print(f"[WARN] 风控告警 {msg} (risk_block=False 未阻断)")
+
+        # 更新持仓
         if symbol in portfolio.positions:
             position = portfolio.positions[symbol]
             total_shares = position.shares + shares
@@ -184,6 +225,7 @@ class PortfolioManager:
                 # 清仓
                 portfolio.cash += -shares * price
                 del portfolio.positions[symbol]
+                self.stop_monitor.positions.pop(symbol, None)
             else:
                 # 加仓或减仓，更新成本价
                 old_cost = position.shares * position.cost_price
@@ -200,7 +242,6 @@ class PortfolioManager:
             if shares <= 0:
                 return False
 
-            # 移除资金限制检查
             position = Position(
                 symbol=symbol,
                 name=name,
@@ -213,9 +254,33 @@ class PortfolioManager:
             portfolio.positions[symbol] = position
             portfolio.cash -= trade_value
 
+        # 止损注册: 提供任一止损/止盈参数即接入 StopLossManager
+        if shares > 0 and any(v is not None for v in
+                              (stop_loss_pct, take_profit_pct, trailing_stop_pct)):
+            self.stop_monitor.add_position(
+                symbol, price, portfolio.positions[symbol].shares,
+                stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+                trailing_stop_pct=trailing_stop_pct)
+
         portfolio.last_updated = datetime.now()
         self._update_portfolio_values(portfolio)
         return True
+
+    def check_stop_losses(self, price_dict: Dict[str, float]) -> Dict[str, Dict]:
+        """
+        持仓级止损/止盈检查 (接线 risk_management.StopLossManager)
+
+        Args:
+            price_dict: 最新价格 {代码: 价格}
+
+        Returns:
+            {symbol: check_stop_loss 结果} — action=='sell' 即触发
+        """
+        results = {}
+        for symbol, price in price_dict.items():
+            if symbol in self.stop_monitor.positions:
+                results[symbol] = self.stop_monitor.check_stop_loss(symbol, price)
+        return results
 
     def remove_position(self, portfolio_name: str, symbol: str,
                        shares: int = None, price: float = 0.0) -> bool:
@@ -254,6 +319,7 @@ class PortfolioManager:
         if shares == position.shares:
             # 全部清仓
             del portfolio.positions[symbol]
+            self.stop_monitor.positions.pop(symbol, None)
         else:
             # 部分卖出
             position.shares -= shares
@@ -312,6 +378,17 @@ class PortfolioManager:
         portfolio = self.get_portfolio(portfolio_name)
         if not portfolio:
             return {}
+
+        # 风控闸门 (审计项 20): 目标权重超单票上限即阻断
+        # 旧逻辑仅返回调整建议, 阈值只出现在报告文本
+        if self.risk_block:
+            oversized = {s: w for s, w in target_weights.items()
+                         if w > self.max_position_pct + 1e-9}
+            if oversized:
+                detail = ", ".join(f"{s}={w:.1%}" for s, w in oversized.items())
+                raise ValueError(
+                    f"风控阻断再平衡: 目标权重超过单票上限 "
+                    f"{self.max_position_pct:.1%} — {detail}")
 
         total_value = portfolio.total_value
 
@@ -409,20 +486,31 @@ class PortfolioManager:
         weights = [pos.weight for pos in portfolio.positions.values()]
         weights.sort(reverse=True)
 
+        # 计算集中度 — 统一走 risk_management.PortfolioRiskMonitor (审计项 20)
+        # HHI 刻度: get_concentration_risk 返回 0–1; 本模块对外 hhi 保持
+        # 0–10000 传统口径 (报告阈值 >1000), 另附 hhi_normalized (0–1)
+        positions_value = {pos.symbol: pos.market_value
+                           for pos in portfolio.positions.values()}
+        if positions_value:
+            conc = self.risk_monitor.get_concentration_risk(positions_value)
+            hhi_01 = conc['hhi']
+            max_position = conc['max_concentration'] * 100
+            concentration_level = conc['concentration_level']
+        else:
+            hhi_01 = 0.0
+            max_position = 0.0
+            concentration_level = 'LOW'
+
         # 前十大持仓占比
         top10_concentration = sum(weights[:10]) * 100
-
-        # 最大单一持仓占比
-        max_position = max(weights) * 100 if weights else 0
-
-        # 赫芬达尔指数（HHI）
-        hhi = sum(w ** 2 for w in weights) * 10000
 
         risk_metrics = {
             'position_count': len(portfolio.positions),
             'max_position': max_position,
             'top10_concentration': top10_concentration,
-            'hhi': hhi,
+            'hhi': hhi_01 * 10000,
+            'hhi_normalized': hhi_01,
+            'concentration_level': concentration_level,
             'cash_ratio': portfolio.cash / portfolio.total_value * 100
         }
 
@@ -444,6 +532,28 @@ class PortfolioManager:
             })
 
         return risk_metrics
+
+    def check_risk(self, portfolio_name: str,
+                   returns_df: pd.DataFrame) -> Dict:
+        """
+        组合级 VaR 风险检查 (接线 risk_management.PortfolioRiskMonitor)
+
+        Args:
+            portfolio_name: 组合名称
+            returns_df: 各持仓的日收益率 DataFrame (列=代码)
+
+        Returns:
+            check_portfolio_risk 报告 — within_limit=False 即超限
+        """
+        portfolio = self.get_portfolio(portfolio_name)
+        if not portfolio:
+            return {}
+        positions_value = {pos.symbol: pos.market_value
+                           for pos in portfolio.positions.values()}
+        if not positions_value:
+            return {'within_limit': True, 'risk_level': 'LOW',
+                    'portfolio_value': portfolio.total_value}
+        return self.risk_monitor.check_portfolio_risk(positions_value, returns_df)
 
     def generate_report(self, portfolio_name: str, report_type: str = 'standard') -> str:
         """
