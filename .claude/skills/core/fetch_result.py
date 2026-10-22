@@ -3,8 +3,8 @@
 统一数据获取结果类型 (审计路线图项 11 / P0-2)
 
 背景: 上游接口失败被 `except` 吞掉后返回空 DataFrame，与"该股真的无数据"
-在下游无法区分 —— 导致 optimization_engine 打印"成功加载 0 只股票"、
-concurrent_fetcher 失败计数恒 0 等假成功。
+在下游无法区分 —— 导致 optimization_engine 打印"成功加载 0 只股票"等假成功
+（历史案例: concurrent_fetcher 失败计数恒 0，该模块已随孤岛清理删除）。
 
 约定:
 - 失败必须携带 error 信息 (ok=False)，不再静默返回空 DF 假装成功

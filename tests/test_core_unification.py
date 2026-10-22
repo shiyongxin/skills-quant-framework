@@ -7,12 +7,7 @@
 - walk_forward IS 拟合 / OOS 评估训练步
 - trend_indicators Chikou 无未来函数
 - technical_analyzer MACD 真交叉（不再水平比较冒充金叉）
-- database_manager batch_save_stock_quotes symbol 参数化
-- cache_manager 股票缓存 key 含 days 维度
 """
-from contextlib import contextmanager
-from unittest.mock import MagicMock
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -179,48 +174,3 @@ class TestMacdTrueCross:
         if i + 1 < len(df):
             # 次根: 不再是金叉(旧 bug 水平比较会持续误标)
             assert 'MACD金叉' not in ta._analyze_signals(df.iloc[:i + 2].copy())
-
-
-class TestDatabaseSymbolParam:
-    def test_batch_save_quotes_needs_symbol(self):
-        pytest.importorskip("sqlalchemy")
-        from database_manager import DatabaseManager
-        dm = DatabaseManager.__new__(DatabaseManager)
-        dm._connected = True
-        session = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = None
-
-        @contextmanager
-        def fake_get_session():
-            yield session
-
-        dm.get_session = fake_get_session
-        df = pd.DataFrame({
-            '日期': ['2024-01-02'], '开盘': [10.0], '最高': [10.5],
-            '最低': [9.5], '收盘': [10.2], '成交量': [100000],
-        })
-        # 旧 bug: 永远从 data 提取 symbol → 恒 0 行
-        assert dm.batch_save_stock_quotes(df) == 0
-        assert dm.batch_save_stock_quotes(df, symbol='600519') == 1
-        assert session.add.call_count == 1
-
-
-class TestCacheKeyDimensions:
-    def test_days_dimension_changes_key(self):
-        import cache_manager as cm_mod
-        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
-        keys = []
-        cm.set = lambda key, val, ttl=None: keys.append(key) or True
-        cm.cache_stock_data('600519', pd.DataFrame(), days=60)
-        cm.cache_stock_data('600519', pd.DataFrame(), days=120)
-        assert keys[0] != keys[1]
-
-    def test_get_matches_set_with_same_dims(self):
-        import cache_manager as cm_mod
-        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
-        set_keys, get_keys = [], []
-        cm.set = lambda key, val, ttl=None: set_keys.append(key) or True
-        cm.get = lambda key: get_keys.append(key)
-        cm.cache_stock_data('600519', pd.DataFrame(), days=60, adjust='qfq')
-        cm.get_stock_data('600519', days=60, adjust='qfq')
-        assert get_keys == set_keys

@@ -3,17 +3,10 @@
 Stage 2 回归测试（commit 34e6a41 批次修复）:
 - market_regime_classifier: get_regime_for_dates 反向 idxmax（取最近交易日）
 - advanced_indicators: keltner_channel 外部 ATR 守卫（不覆写）
-- database_manager: save_position 运算优先级 (current_price or avg_cost) - avg_cost
-- concurrent_fetcher: 拆分 import 守卫（fetcher 失败不级联 CacheManager NameError）
 - signal_generator: 趋势档 0.5/-0.5 语义、向量化量价、pandas>=3 可执行
 - strategy_optimizer: evaluate_params 真实回测（非 -999 哨兵）
 - multi_factor_selection: 横截面动量/波动率因子
 """
-import importlib
-import sys
-from contextlib import contextmanager
-from unittest.mock import MagicMock
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -72,68 +65,6 @@ class TestKeltnerAtrGuard:
         assert 'ATR' in out.columns
         assert out['ATR'].notna().any()
         assert out['ATR'].dropna().gt(0).all()
-
-
-class TestSavePositionPriority:
-    @staticmethod
-    def _dm():
-        pytest.importorskip("sqlalchemy")
-        from database_manager import DatabaseManager
-        dm = DatabaseManager.__new__(DatabaseManager)
-        dm._connected = True
-        session = MagicMock()
-
-        @contextmanager
-        def fake_get_session():
-            yield session
-
-        dm.get_session = fake_get_session
-        return dm, session
-
-    def test_insert_branch_market_value_and_pl(self):
-        dm, session = self._dm()
-        session.query.return_value.filter.return_value.first.return_value = None
-        ok = dm.save_position(1, '600519', shares=100, avg_cost=10.0,
-                              current_price=15.0)
-        assert ok is True
-        pos = session.add.call_args[0][0]
-        # 旧 bug: (current_price or avg_cost - avg_cost) * shares → 1500
-        assert pos.market_value == 1500.0
-        assert pos.profit_loss == 500.0
-        assert pos.profit_pct == pytest.approx(50.0)
-
-    def test_update_branch_assigns_recomputed_fields(self):
-        dm, session = self._dm()
-        mock_pos = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = mock_pos
-        ok = dm.save_position(1, '600519', shares=100, avg_cost=10.0,
-                              current_price=15.0)
-        assert ok is True
-        assert mock_pos.profit_loss == 500.0
-        assert mock_pos.market_value == 1500.0
-
-    def test_none_current_price_falls_back_to_avg_cost(self):
-        dm, session = self._dm()
-        session.query.return_value.filter.return_value.first.return_value = None
-        ok = dm.save_position(1, '600519', shares=100, avg_cost=10.0,
-                              current_price=None)
-        assert ok is True
-        pos = session.add.call_args[0][0]
-        assert pos.profit_loss == 0.0
-        assert pos.market_value == 1000.0
-        assert pos.current_price == 10.0
-
-
-class TestConcurrentFetcherGuards:
-    def test_fetcher_failure_does_not_cascade(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, 'stock_data_fetcher', None)
-        sys.modules.pop('concurrent_fetcher', None)
-        cf = importlib.import_module('concurrent_fetcher')
-        # 旧 bug: 两段导入在同一个 try 块 → fetcher 缺失时 CacheManager 未绑定 NameError
-        assert cf._FETCHER_AVAILABLE is False
-        assert 'CacheManager' in vars(cf)
-        assert 'get_cache_manager' in vars(cf)
-        assert cf._CACHE_AVAILABLE is True
 
 
 class TestSignalGeneratorRegression:

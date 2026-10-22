@@ -16,7 +16,6 @@ The previous version of this file referenced `quant_analysis_workflow.py` and `s
 |---|---|
 | 7-stage workflow orchestrator | `.claude/skills/quant_workflow.py` (`QuantWorkflow` class) |
 | Streamlit web app (entry script) | `run_web_app.py` (root) → `.claude/skills/web_app.py` |
-| Flask backtest web UI | `web_backtest.py` (root) — `http://localhost:5000` |
 | Stock picking | `.claude/skills/stock_selector.py`, `.claude/skills/long_term_selector.py` |
 | Position analysis | `.claude/skills/position_analyzer.py` |
 | One-off analysis scripts | `temp/` directory (ad-hoc scripts — not part of the core framework) |
@@ -29,7 +28,7 @@ The previous version of this file referenced `quant_analysis_workflow.py` and `s
 # Install dependencies (core only)
 pip install pandas numpy akshare matplotlib
 # Optional but recommended
-pip install streamlit redis psycopg2-binary scikit-learn scipy
+pip install streamlit scikit-learn scipy
 # Web stack
 pip install -r web_requirements.txt
 
@@ -37,9 +36,6 @@ pip install -r web_requirements.txt
 python run_web_app.py
 # or directly
 streamlit run .claude/skills/web_app.py
-
-# Run Flask backtest UI (port 5000)
-python web_backtest.py
 
 # Run all tests
 python -m pytest tests/ -v
@@ -62,9 +58,6 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 
 **Data layer**
 - `stock_data_fetcher.py` — historical quotes via akshare `stock_zh_a_daily` (新浪财经源; 旧文档误称"腾讯接口", 已订正) + Tencent `qt.gtimg.cn` realtime; cache in `stock_data/quotes/`
-- `concurrent_fetcher.py` — multi-threaded fetcher (per-dep import guards; no production callers — island, 项15)
-- `cache_manager.py` — Redis cache with 7 strategies; import-safe without Redis (only referenced by `concurrent_fetcher` itself — 项15)
-- `database_manager.py` — PostgreSQL schema helpers (6 tables); import-safe without SQLAlchemy (**no production callers — island, 项15**)
 - `realtime_quote.py` — Tencent `qt.gtimg.cn` real-time quotes (no production callers — island, 项15)
 - `stock_list_manager.py` / `stock_list.csv` — A-share universe
 
@@ -97,7 +90,6 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 - `quant_workflow.py` — `QuantWorkflow` class wires all 7 stages end-to-end
 - `position_analyzer.py` — analyzes an existing portfolio CSV
 - `parameter_space.py` / `optimization_config.py` / `optimization_engine.py` — optuna-style search
-- `cache_manager.py`, `concurrent_fetcher.py` — perf infra
 
 ## 7-Stage Pipeline (in `quant_workflow.py`)
 
@@ -138,7 +130,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 |---|---|---|
 | Core | `pandas`, `numpy`, `akshare`, `matplotlib` | yes |
 | Web | `streamlit`, `altair`, `plotly` | for `web_app.py` only |
-| Persistence | `redis`, `psycopg2-binary`, `SQLAlchemy` | optional |
+| Persistence | (none — Parquet via pyarrow is the backtest source of truth) | — |
 | ML/Opt | `scikit-learn`, `scipy` | optional |
 
 Pinned versions in `web_requirements.txt`; framework imports succeed even if all optional deps are missing.

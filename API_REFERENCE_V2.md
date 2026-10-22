@@ -28,129 +28,7 @@ python run_web_app.py
 
 ---
 
-### 10. 缓存管理器 (cache_manager.py)
-
-Redis缓存管理，提升数据访问速度。
-
-```python
-from cache_manager import CacheManager, get_cache_manager
-
-# 初始化
-cache = CacheManager(host='localhost', port=6379)
-
-# 基础操作
-cache.set(key, value, ttl=3600)
-value = cache.get(key)
-cache.delete(key)
-cache.invalidate("pattern:*")
-
-# 股票数据缓存
-cache.cache_stock_data(symbol, df, ttl=86400)
-data = cache.get_stock_data(symbol)
-
-# 技术指标缓存
-cache.cache_indicators(symbol, df, ttl=3600)
-indicators = cache.get_indicators(symbol)
-
-# 实时报价缓存
-cache.cache_quote(symbol, quote, ttl=60)
-quote = cache.get_quote(symbol)
-```
-
-**缓存策略：**
-| 数据类型 | TTL | 说明 |
-|----------|-----|------|
-| 股票数据 | 24小时 | 历史行情 |
-| 技术指标 | 1小时 | 计算后的指标 |
-| 实时报价 | 1分钟 | 最新价格 |
-| 信号数据 | 5分钟 | 交易信号 |
-| 因子数据 | 2小时 | 多因子数据 |
-
----
-
-### 11. 并发获取器 (concurrent_fetcher.py)
-
-多线程并发数据获取，性能提升10倍。
-
-```python
-from concurrent_fetcher import ConcurrentDataFetcher, BatchFetcher
-
-# 初始化
-fetcher = ConcurrentDataFetcher(
-    max_workers=10,
-    use_cache=True
-)
-
-# 获取单只股票
-data = fetcher.fetch_one('600519', days=120)
-
-# 并发获取多只
-results = fetcher.fetch_stocks_parallel(
-    symbols=['600519', '000858', '002415'],
-    days=120
-)
-
-# 带重试获取
-results = fetcher.fetch_with_retry(
-    symbols=symbols,
-    max_retries=3
-)
-
-# 限速获取
-results = fetcher.fetch_with_limit(
-    symbols=symbols,
-    rate_limit=100
-)
-
-# 获取并计算指标
-results = fetcher.fetch_and_calculate(symbols, days=120)
-```
-
-**性能对比：**
-| 股票数 | 串行耗时 | 并发耗时 | 提升 |
-|--------|----------|----------|------|
-| 10 | 30秒 | 5秒 | 6x |
-| 50 | 150秒 | 20秒 | 7.5x |
-| 100 | 300秒 | 30秒 | 10x |
-
----
-
-### 12. 数据库管理器 (database_manager.py)
-
-PostgreSQL数据库集成。
-
-```python
-from database_manager import DatabaseManager
-
-# 初始化
-db = DatabaseManager(
-    host='localhost',
-    port=5432,
-    database='stocks_db',
-    user='postgres',
-    password='password'
-)
-
-# 创建表
-db.create_tables()
-# 表: stocks, stock_quotes, signals, backtest_results, portfolios
-
-# 保存数据
-db.save_stock_info('600519', '贵州茅台', market='SH')
-db.batch_save_stock_quotes(data_df)
-
-# 查询数据
-data = db.query_stock_quotes('600519', start_date, end_date)
-quote = db.get_latest_quote('600519')
-
-# 组合操作
-portfolio_id = db.create_portfolio('我的策略', 1000000)
-db.save_position(portfolio_id, '600519', 100, 1800)
-```
-
----
-
-### 13. ML预测器 (ml_predictor.py)
+### 10. ML预测器 (ml_predictor.py)
 
 机器学习股票预测。
 
@@ -192,7 +70,7 @@ predicted_return = regressor.predict_return(data)
 
 ---
 
-### 14. 策略优化器 (strategy_optimizer.py)
+### 11. 策略优化器 (strategy_optimizer.py)
 
 策略参数自动优化。
 
@@ -246,28 +124,14 @@ result3 = optimizer.bayesian_optimize(
 
 ## 依赖安装
 
-### 完整依赖
-
 ```bash
 pip install streamlit
-pip install redis
-pip install sqlalchemy psycopg2-binary
 pip install scikit-learn scipy
 ```
 
-### 数据库服务
-
-```bash
-# Redis
-redis-server
-
-# PostgreSQL
-pg_ctl start
-# 或
-sudo service postgresql start
-```
+注：`cache_manager`/`concurrent_fetcher`/`database_manager`/`web_backtest` 已随孤岛清理删除（项 15），Redis/PostgreSQL 依赖不再需要。
 
 ---
 
 **文档版本：** v2.0
-**最后更新：** 2026-02-06
+**最后更新：** 2026-10-22

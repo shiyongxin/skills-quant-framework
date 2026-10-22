@@ -64,9 +64,6 @@ pip install pandas numpy matplotlib akshare openpyxl
 # Web应用依赖
 pip install streamlit
 
-# 缓存和数据库
-pip install redis psycopg2-binary sqlalchemy
-
 # 机器学习
 pip install scikit-learn scipy
 ```
@@ -78,84 +75,7 @@ pip install -r requirements.txt
 pip install -r web_requirements.txt
 ```
 
-### 3. 安装Redis
-
-#### Windows
-
-```bash
-# 使用Chocolatey
-choco install redis
-
-# 或下载MSI安装包
-# https://github.com/microsoftarchive/redis/releases
-```
-
-#### Linux
-
-```bash
-sudo apt update
-sudo apt install redis-server
-sudo systemctl start redis
-```
-
-#### macOS
-
-```bash
-brew install redis
-brew services start redis
-```
-
-验证Redis：
-
-```bash
-redis-cli ping
-# 应返回: PONG
-```
-
-### 4. 安装PostgreSQL（可选）
-
-#### Windows
-
-```bash
-# 下载安装包
-# https://www.enterprisedb.com/downloads/postgresql-install/
-
-# 或使用Chocolatey
-choco install postgresql
-```
-
-#### Linux
-
-```bash
-sudo apt install postgresql postgresql-contrib
-sudo systemctl start postgresql
-```
-
-#### macOS
-
-```bash
-brew install postgresql
-brew services start postgresql
-```
-
-创建数据库：
-
-```bash
-# 切换到postgres用户
-sudo -u postgres psql
-
-# 创建数据库
-CREATE DATABASE stocks_db;
-
-# 创建用户
-CREATE USER stocks_user WITH PASSWORD 'your_password';
-
-# 授权
-GRANT ALL PRIVILEGES ON DATABASE stocks_db TO stocks_user;
-
-# 退出
-\q
-```
+> 注：Redis/PostgreSQL 不再需要——`cache_manager`/`database_manager` 已随孤岛清理删除（项 15），回测数据真相为本地 Parquet。
 
 ---
 
@@ -166,17 +86,6 @@ GRANT ALL PRIVILEGES ON DATABASE stocks_db TO stocks_user;
 创建 `.env` 文件：
 
 ```ini
-# 数据库配置
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=stocks_db
-DB_USER=stocks_user
-DB_PASSWORD=your_password
-
-# Redis配置
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
 # 应用配置
 DATA_DIR=./stock_data
 CHARTS_DIR=./charts
@@ -269,11 +178,6 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    gcc g++ libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # 复制依赖文件
 COPY requirements.txt web_requirements.txt ./
 
@@ -304,40 +208,10 @@ services:
     build: .
     ports:
       - "8501:8501"
-    environment:
-      - REDIS_HOST=redis
-      - DB_HOST=db
-    depends_on:
-      - redis
-      - db
     volumes:
       - ./stock_data:/app/stock_data
       - ./charts:/app/charts
     restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_DB=stocks_db
-      - POSTGRES_USER=stocks_user
-      - POSTGRES_PASSWORD=your_password
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-volumes:
-  redis_data:
-  postgres_data:
 ```
 
 启动：
@@ -350,54 +224,10 @@ docker-compose up -d
 
 ## 性能优化
 
-### 1. Redis配置
-
-编辑 `redis.conf`：
-
-```conf
-# 最大内存限制
-maxmemory 2gb
-
-# 淘汰策略
-maxmemory-policy allkeys-lru
-
-# 持久化
-save 900 1
-save 300 10
-save 60 10000
-```
-
-### 2. PostgreSQL配置
-
-编辑 `postgresql.conf`：
-
-```conf
-# 连接数
-max_connections = 200
-
-# 内存配置
-shared_buffers = 256MB
-effective_cache_size = 1GB
-
-# 查询优化
-random_page_cost = 1.1
-effective_io_concurrency = 200
-
-# WAL配置
-wal_buffers = 16MB
-checkpoint_completion_target = 0.9
-```
-
-### 3. 应用优化
-
 ```python
 # 并发配置
 import os
 os.environ['OMP_NUM_THREADS'] = '4'
-
-# 内存限制
-import resource
-resource.setrlimit(resource.RLIMIT_AS, (2 * 1024**3, 4 * 1024**3))
 ```
 
 ---
@@ -419,56 +249,11 @@ logging.basicConfig(
 )
 ```
 
-### 性能监控
-
-```python
-# 缓存统计
-from cache_manager import get_cache_manager
-
-cache = get_cache_manager()
-stats = cache.get_stats()
-print(f"缓存命中率: {stats['hit_rate']:.2%}")
-
-# 数据库统计
-from database_manager import DatabaseManager
-
-db = DatabaseManager()
-stats = db.get_table_stats()
-print(f"数据记录数: {stats}")
-```
-
 ---
 
 ## 故障排查
 
-### 问题1：Redis连接失败
-
-```bash
-# 检查Redis状态
-redis-cli ping
-
-# 启动Redis
-# Windows
-redis-server
-
-# Linux
-sudo systemctl start redis
-```
-
-### 问题2：数据库连接失败
-
-```bash
-# 检查PostgreSQL状态
-sudo systemctl status postgresql
-
-# 启动PostgreSQL
-sudo systemctl start postgresql
-
-# 检查连接
-psql -h localhost -U stocks_user -d stocks_db
-```
-
-### 问题3：端口被占用
+### 问题：端口被占用
 
 ```bash
 # 查看端口占用
@@ -482,7 +267,7 @@ lsof -i :8501
 streamlit run web_app.py --server.port 8502
 ```
 
-### 问题4：模块导入错误
+### 问题：模块导入错误
 
 ```bash
 # 确认Python路径

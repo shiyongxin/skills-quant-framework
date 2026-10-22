@@ -2,7 +2,6 @@
 """
 P0-2/项11/P0-5 回归测试:
 - FetchResult 类型 (ok/error/as_of) + get_quote_result 结构化返回
-- concurrent_fetcher 空数据计入 failed (旧逻辑恒 0)
 - historical_data_manager API失败不再静默 (打印WARN, 返回旧数据有提示)
 - optimization_engine load_data 0只成功 → RuntimeError (旧假成功)
 - market_regime_classifier: bull/bear_trend_pct 生效 + 迟滞合并短段
@@ -56,42 +55,6 @@ class TestFetchResult:
         res = fetcher.get_quote_result('600519', days=30)
         assert res.ok and len(res.data) == 2
         assert '收盘' in res.data.columns
-
-
-class TestConcurrentFetcherStats:
-    @staticmethod
-    def _mk_fetcher():
-        import concurrent_fetcher as cf_mod
-        fetcher = cf_mod.ConcurrentDataFetcher.__new__(cf_mod.ConcurrentDataFetcher)
-        fetcher.use_cache = False
-        fetcher.cache_manager = None
-        fetcher._stats = {'total_fetched': 0, 'cache_hits': 0,
-                          'api_calls': 0, 'failed': 0}
-        return fetcher
-
-    def test_empty_data_counts_as_failed(self, monkeypatch):
-        fetcher = self._mk_fetcher()
-
-        class _Stub:
-            def get_quote_data(self, symbol, days=120):
-                return pd.DataFrame()  # 上游吞异常返回的空DF
-
-        monkeypatch.setattr(fetcher, '_get_fetcher', lambda: _Stub())
-        result = fetcher.fetch_one('600519')
-        assert result is None
-        assert fetcher._stats['failed'] == 1  # 旧逻辑恒 0
-
-    def test_exception_counts_as_failed(self, monkeypatch):
-        fetcher = self._mk_fetcher()
-
-        class _Boom:
-            def get_quote_data(self, symbol, days=120):
-                raise RuntimeError('api down')
-
-        monkeypatch.setattr(fetcher, '_get_fetcher', lambda: _Boom())
-        result = fetcher.fetch_one('600519')
-        assert result is None
-        assert fetcher._stats['failed'] == 1
 
 
 class TestHistoricalDataManager:
@@ -367,53 +330,3 @@ class TestFetchResultCallers:
         mon.fetcher = self._failing_fetcher()
         assert mon.check_conditions('600519') == []
         assert '监控数据获取失败' in capsys.readouterr().out
-
-    def test_cache_warmup_reports_and_keys_days(self, monkeypatch, capsys):
-        from core.fetch_result import FetchResult
-        import stock_data_fetcher as sdf_mod
-
-        class _StubFetcher:
-            def get_quote_result(self, symbol, start_date=None, end_date=None,
-                                 days=120):
-                return FetchResult.failure('api down', source='test')
-
-        monkeypatch.setattr(sdf_mod, 'StockDataFetcher', lambda: _StubFetcher())
-
-        import cache_manager as cm_mod
-        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
-        cached = {}
-
-        def fake_cache(symbol, data, ttl=None, days=None, adjust=None, period=None):
-            cached['days'] = days
-            return True
-
-        cm.cache_stock_data = fake_cache
-        results = cm.warm_up(['600519'], days=60)
-        assert results == {'600519': False}
-        assert '预热 600519 无数据' in capsys.readouterr().out
-        assert 'days' not in cached  # 失败时不写缓存
-
-    def test_cache_warmup_passes_days_on_success(self, monkeypatch):
-        from core.fetch_result import FetchResult
-        import stock_data_fetcher as sdf_mod
-        df = _mk_ohlcv(n=90, seed=4)
-
-        class _StubFetcher:
-            def get_quote_result(self, symbol, start_date=None, end_date=None,
-                                 days=120):
-                return FetchResult.success(df.copy(), source='test')
-
-        monkeypatch.setattr(sdf_mod, 'StockDataFetcher', lambda: _StubFetcher())
-
-        import cache_manager as cm_mod
-        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
-        cached = {}
-
-        def fake_cache(symbol, data, ttl=None, days=None, adjust=None, period=None):
-            cached['days'] = days
-            return True
-
-        cm.cache_stock_data = fake_cache
-        results = cm.warm_up(['600519'], days=60)
-        assert results == {'600519': True}
-        assert cached['days'] == 60  # 旧bug: 省略days → 缓存进默认key

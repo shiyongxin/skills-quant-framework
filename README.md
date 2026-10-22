@@ -67,13 +67,11 @@ python run_web_app.py
 
 ## 模块索引
 
-### 数据层 (3个模块)
+### 数据层 (1个模块)
 
 | 模块 | 文件 | 功能 | 文档 |
 |------|------|------|------|
 | 数据获取 | stock_data_fetcher.py | 历史行情、实时数据、财务数据 | [API参考](API_REFERENCE_V2.md#1-数据获取) |
-| 并发获取 | concurrent_fetcher.py | 多线程数据获取（worker内限速/失败计数；暂无生产调用方） | [API参考](API_REFERENCE_V2.md#9-并发获取器) |
-| 缓存管理 | cache_manager.py | Redis缓存、7种缓存策略 | [API参考](API_REFERENCE_V2.md#10-缓存管理器) |
 
 ### 分析层 (5个模块)
 
@@ -99,12 +97,6 @@ python run_web_app.py
 |------|------|------|------|
 | 数据可视化 | chart_visualizer.py | 8种图表类型、自定义样式 | [API参考](API_REFERENCE_V2.md#8-数据可视化) |
 | Web应用 | web_app.py | Streamlit交互式平台 | [用户手册](docs/USER_MANUAL_V2.md#web应用) |
-
-### 数据层 (1个模块)
-
-| 模块 | 文件 | 功能 | 文档 |
-|------|------|------|------|
-| 数据库管理 | database_manager.py | PostgreSQL持久化辅助、6张表（暂无生产调用方，孤岛待决 — 项15） | [API参考](API_REFERENCE_V2.md#13-数据库管理器) |
 
 ---
 
@@ -309,9 +301,9 @@ streamlit run .claude/skills/web_app.py
 
 **新增模块：**
 - ✅ Web应用 (web_app.py)
-- ✅ 缓存管理器 (cache_manager.py)
-- ✅ 并发获取器 (concurrent_fetcher.py)
-- ✅ 数据库管理器 (database_manager.py)
+- ~~缓存管理器 (cache_manager.py)~~（孤岛清理已删除 — 项15）
+- ~~并发获取器 (concurrent_fetcher.py)~~（孤岛清理已删除 — 项15）
+- ~~数据库管理器 (database_manager.py)~~（孤岛清理已删除 — 项15）
 - ✅ ML预测器 (ml_predictor.py)
 - ✅ 策略优化器 (strategy_optimizer.py)
 
@@ -355,9 +347,6 @@ Stocks/
 │       ├── real_time_monitor.py
 │       ├── chart_visualizer.py
 │       ├── web_app.py
-│       ├── cache_manager.py
-│       ├── concurrent_fetcher.py
-│       ├── database_manager.py
 │       ├── ml_predictor.py
 │       ├── strategy_optimizer.py
 │       └── examples/         # 示例代码
