@@ -21,7 +21,7 @@ import sys
 from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
-from core.indicators import rsi as _core_rsi
+from core.indicators import rsi as _core_rsi, atr as _core_atr
 
 
 # ==================== 数据结构 ====================
@@ -130,13 +130,9 @@ def compute_indicators(data: pd.DataFrame, params: dict) -> pd.DataFrame:
     df['BB_Upper'] = df['BB_Mid'] + bb_std_mult * bb_std
     df['BB_Lower'] = df['BB_Mid'] - bb_std_mult * bb_std
 
-    # ATR
+    # ATR (core Wilder 单一真相源, 旧: SMA)
     atr_period = int(params.get('atr_period', 14))
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(atr_period).mean()
+    df['ATR'] = _core_atr(high, low, close, atr_period)
 
     # 成交量均线
     df['Vol_MA5'] = volume.rolling(5).mean()

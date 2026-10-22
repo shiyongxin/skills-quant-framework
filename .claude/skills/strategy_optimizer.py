@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from itertools import product
 import random
 
+from core.indicators import rsi as _core_rsi
+
 try:
     from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod, StopLossMethod
     MODULES_AVAILABLE = True
@@ -176,12 +178,8 @@ class RSIStrategy(StrategyTemplate):
 
         data = data.copy()
 
-        # 计算RSI
-        delta = data['收盘'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        data['RSI'] = 100 - (100 / (1 + rs))
+        # 计算RSI (core 单一真相源)
+        data['RSI'] = _core_rsi(data['收盘'], period)
 
         # 生成信号
         data['signal_buy'] = (

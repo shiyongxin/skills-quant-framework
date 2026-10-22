@@ -22,6 +22,7 @@ import copy
 from parameter_space import ParameterSpace
 from vectorized_backtest import VectorizedBacktester, BacktestMetrics
 from historical_data_manager import HistoricalDataManager
+from optimization_config import FitnessConfig
 from core import metrics as _core_metrics
 
 
@@ -77,22 +78,33 @@ class FitnessEvaluator:
     聚合结果计算适应度分数。
     """
 
-    def __init__(self, backtester=None, target_return=10.0,
-                 target_probability=0.80, max_drawdown_limit=25.0):
+    def __init__(self, backtester=None, target_return=None,
+                 target_probability=None, max_drawdown_limit=None,
+                 fitness_config=None):
         """
         Parameters:
         -----------
-        target_return : float
-            目标收益率(%)
-        target_probability : float
-            目标达标概率
-        max_drawdown_limit : float
-            最大回撤限制(%)
+        target_return : float or None
+            目标收益率(%) — None 时取 FitnessConfig 默认 (10.0)
+        target_probability : float or None
+            目标达标概率 — None 时取 FitnessConfig 默认 (0.80)
+        max_drawdown_limit : float or None
+            最大回撤限制(%) — None 时取 FitnessConfig 默认 (25.0)
+        fitness_config : FitnessConfig or None
+            适应度权重来源 (w_target_rate/w_return/w_sharpe/w_drawdown) —
+            旧实现这4个权重硬编码于 _compute_fitness, 配置字段恒死参数
         """
+        cfg = fitness_config or FitnessConfig()
         self.backtester = backtester or VectorizedBacktester()
-        self.target_return = target_return
-        self.target_probability = target_probability
-        self.max_drawdown_limit = max_drawdown_limit
+        self.target_return = cfg.target_return if target_return is None else target_return
+        self.target_probability = cfg.target_probability if target_probability is None else target_probability
+        self.max_drawdown_limit = cfg.max_drawdown_limit if max_drawdown_limit is None else max_drawdown_limit
+        self.weights = {
+            'target_rate': cfg.w_target_rate,
+            'return': cfg.w_return,
+            'sharpe': cfg.w_sharpe,
+            'drawdown': cfg.w_drawdown,
+        }
 
     def evaluate(self, params: dict, stock_data: dict,
                  regime_labels: dict = None,
@@ -303,8 +315,12 @@ class FitnessEvaluator:
         """
         从回测指标列表计算适应度
 
-        适应度 = 0.40*达标率 + 0.25*中位收益 + 0.20*中位夏普 + 0.15*回撤惩罚
+        fitness = (w_target_rate*达标率 + w_return*中位收益分
+                   + w_sharpe*中位夏普分 + w_drawdown*回撤分) * 交易次数惩罚
+
+        权重来自 FitnessConfig (self.weights), 不再硬编码 (审计项 19)。
         """
+        w = self.weights
         returns = [m.total_return for m in metrics_list]
         sharpes = [m.sharpe_ratio for m in metrics_list]
         drawdowns = [m.max_drawdown for m in metrics_list]
@@ -337,12 +353,12 @@ class FitnessEvaluator:
         else:
             trade_penalty = 1.0
 
-        # 综合适应度
+        # 综合适应度 (权重来自 FitnessConfig)
         fitness = (
-            0.40 * target_rate +
-            0.25 * max(0, ret_score) +
-            0.20 * max(0, sharpe_score) +
-            0.15 * dd_penalty
+            w['target_rate'] * target_rate +
+            w['return'] * max(0, ret_score) +
+            w['sharpe'] * max(0, sharpe_score) +
+            w['drawdown'] * dd_penalty
         ) * trade_penalty
 
         details = {

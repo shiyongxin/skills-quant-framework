@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Callable, Optional, Tuple, Union
 
 from core import metrics as _core_metrics
+from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
 from dataclasses import dataclass
 from enum import Enum
 import warnings
@@ -185,12 +186,9 @@ class BacktestEngine:
 
         data['prev_close'] = close.shift(1)
 
-        tr1 = high - low
-        tr2 = abs(high - data['prev_close'])
-        tr3 = abs(low - data['prev_close'])
-
-        data['TR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        data['ATR'] = data['TR'].rolling(window=period).mean()
+        # Wilder ATR (core 单一真相源, 旧: SMA)
+        data['TR'] = _core_true_range(high, low, close)
+        data['ATR'] = _core_atr(high, low, close, period)
 
         return data
 
@@ -616,13 +614,8 @@ class StrategyFactory:
             if len(data) < period + 1:
                 return 0
 
-            # 计算RSI
-            close = data['收盘']
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
+            # 计算RSI (core 单一真相源)
+            rsi = _core_rsi(data['收盘'], period)
 
             latest_rsi = rsi.iloc[-1]
             prev_rsi = rsi.iloc[-2]

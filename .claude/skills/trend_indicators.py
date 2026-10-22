@@ -9,6 +9,8 @@ Trend Indicators Library
 import pandas as pd
 import numpy as np
 
+from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
+
 
 class TrendIndicators:
     """趋势指标集合"""
@@ -294,12 +296,8 @@ class TrendIndicators:
 
         df['Trend_Force'] = macd_hist
 
-        # 第二屏: 动量 (RSI)
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['Momentum_Oscillator'] = 100 - (100 / (1 + rs))
+        # 第二屏: 动量 (RSI, core 单一真相源)
+        df['Momentum_Oscillator'] = _core_rsi(close, 14)
 
         # 第三屏: 突破 (价格突破)
         df['Breakout_Level'] = close.rolling(window=trend_period).max()
@@ -327,16 +325,11 @@ class TrendIndicators:
         """
         df = df.copy()
 
-        # 计算ATR
+        # Wilder ATR (core 单一真相源, 旧: ewm(span=period) 口径偏快)
         high = df['最高']
         low = df['最低']
         close = df['收盘']
-
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.ewm(span=period, adjust=False).mean()
+        atr = _core_atr(high, low, close, period)
 
         # 中轨 = EMA
         middle = close.ewm(span=period, adjust=False).mean()

@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 import warnings
 
+from core.indicators import rsi as _core_rsi
+
 try:
     from sklearn.model_selection import cross_val_score, GridSearchCV, TimeSeriesSplit
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
@@ -128,12 +130,8 @@ class FeatureEngineer:
         features['momentum_10'] = features['收盘'] / features['收盘'].shift(10) - 1
         features['momentum_20'] = features['收盘'] / features['收盘'].shift(20) - 1
 
-        # RSI特征
-        delta = features['收盘'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        features['rsi'] = 100 - (100 / (1 + rs))
+        # RSI特征 (core 单一真相源)
+        features['rsi'] = _core_rsi(features['收盘'], 14)
 
         # MACD特征
         ema12 = features['收盘'].ewm(span=12, adjust=False).mean()

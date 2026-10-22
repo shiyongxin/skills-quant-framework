@@ -14,6 +14,8 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import warnings
 
+from core.indicators import rsi as _core_rsi
+
 # Matplotlib imports
 try:
     import matplotlib
@@ -255,13 +257,9 @@ class ChartVisualizer:
 
         fig.patch.set_facecolor(self.style.bg_color)
 
-        # 计算RSI
+        # 计算RSI (core 单一真相源)
         close = data['收盘']
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        rsi = _core_rsi(close, period)
 
         x = range(len(rsi))
 
@@ -621,12 +619,7 @@ class ChartVisualizer:
         if 'RSI' in plot_data.columns:
             ax_rsi.plot(x, plot_data['RSI'], label='RSI', color='purple', linewidth=1)
         else:
-            close = plot_data['收盘']
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
+            rsi = _core_rsi(plot_data['收盘'], 14)
             ax_rsi.plot(x, rsi, label='RSI', color='purple', linewidth=1)
         ax_rsi.axhline(y=70, color='red', linestyle='--', alpha=0.5)
         ax_rsi.axhline(y=30, color='green', linestyle='--', alpha=0.5)

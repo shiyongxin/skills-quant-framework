@@ -19,6 +19,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
+from core.indicators import rsi as _core_rsi
 
 
 @dataclass
@@ -106,13 +107,9 @@ class ReversalBacktester:
         high = df['最高']
         low = df['最低']
 
-        # RSI
+        # RSI (core 单一真相源)
         for period in [6, 14]:
-            delta = close.diff()
-            gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-            rs = gain / loss
-            df[f'RSI{period}'] = 100 - (100 / (1 + rs))
+            df[f'RSI{period}'] = _core_rsi(close, period)
 
         # KDJ
         low_n = low.rolling(9).min()

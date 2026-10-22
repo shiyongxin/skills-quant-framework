@@ -9,6 +9,8 @@ Advanced Technical Indicators Library
 import pandas as pd
 import numpy as np
 
+from core.indicators import atr as _core_atr, true_range as _core_true_range
+
 
 class AdvancedIndicators:
     """高级技术指标集合"""
@@ -32,15 +34,9 @@ class AdvancedIndicators:
         low = df['最低']
         close = df['收盘']
 
-        # 计算真实波幅
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # ATR = TR的指数移动平均
-        df['ATR'] = tr.ewm(span=period, adjust=False).mean()
+        # Wilder ATR (core 单一真相源, 旧: ewm(span) 口径偏快)
+        df['TR'] = _core_true_range(high, low, close)
+        df['ATR'] = _core_atr(high, low, close, period)
 
         return df
 

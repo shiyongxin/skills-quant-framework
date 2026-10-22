@@ -242,10 +242,14 @@ class RealTimeMonitor:
 **核心类：**
 ```python
 class ChartVisualizer:
-    def plot_candlestick(data, style)    # K线图
-    def plot_macd(data)                  # MACD图
-    def plot_kdj(data)                   # KDJ图
-    def plot_equity_curve(equity_data)   # 净值曲线
+    def plot_candlestick(data, symbol, ...)          # K线图
+    def plot_macd(data, symbol, ...)                 # MACD图
+    def plot_combined_analysis(data, symbol, ...)    # 综合图(含KDJ/RSI/成交量)
+    def plot_rsi(data, symbol, ...)                  # RSI图
+    def plot_bollinger_bands(data, symbol, ...)      # 布林带
+    def plot_equity_curve(equity_curve, symbol, ...) # 净值曲线
+    def plot_drawdown(equity_curve, symbol, ...)     # 回撤曲线
+    def plot_signals(data, signals, symbol, ...)     # 信号标注K线
 ```
 
 ---

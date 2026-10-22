@@ -5,17 +5,26 @@ description: Stock chart visualization for Chinese markets with candlestick char
 
 # Stock Visualization
 
-Comprehensive chart generation for Chinese stock analysis.
+Comprehensive chart generation for Chinese stock analysis (`chart_visualizer.py`).
 
 ## Quick Start
 
+Run from the repo root (imports rely on repo-relative paths):
+
 ```python
 import sys
-sys.path.append('F:/Users/shiyo/80.soft_dev/Stocks/.claude/skills')
+sys.path.append('.claude/skills')
+
+import pandas as pd
 from chart_visualizer import ChartVisualizer
 
+# 所有 plot_* 方法接收 DataFrame (列: 日期/开盘/最高/最低/收盘/成交量),
+# 不自己拉数据 — 先用 StockDataFetcher.get_quote_data(symbol) 取数:
+# from stock_data_fetcher import StockDataFetcher
+# data = StockDataFetcher().get_quote_data('600519', days=120)
+
 visualizer = ChartVisualizer()
-visualizer.plot_candlestick('600519', days=120, save_path='chart.png')
+visualizer.plot_candlestick(data, symbol='600519', save_path='chart.png')
 ```
 
 ## Chart Types
@@ -24,10 +33,10 @@ visualizer.plot_candlestick('600519', days=120, save_path='chart.png')
 
 ```python
 visualizer.plot_candlestick(
+    data,                      # OHLCV DataFrame
     symbol='600519',
-    days=120,
-    show_ma=True,      # Show moving averages
-    show_volume=True,  # Show volume
+    title=None,                # 默认自动生成
+    ma_periods=[5, 10, 20, 60],  # 均线周期列表, None 用默认
     save_path='candlestick.png'
 )
 ```
@@ -35,66 +44,89 @@ visualizer.plot_candlestick(
 ### MACD Chart
 
 ```python
-visualizer.plot_macd(
+visualizer.plot_macd(data, symbol='600519', save_path='macd.png')
+# data 需含 MACD/MACD_Signal/MACD_Hist 列
+# (technical_analyzer._calculate_indicators 或 stock_data_fetcher.add_technical_indicators 可生成)
+```
+
+### RSI Chart
+
+```python
+visualizer.plot_rsi(
+    data,
     symbol='600519',
-    days=120,
-    save_path='macd.png'
+    period=14,
+    oversold=30,
+    overbought=70,
+    save_path='rsi.png'
 )
 ```
 
-### KDJ Chart
+### Bollinger Bands
 
 ```python
-visualizer.plot_kdj(
+visualizer.plot_bollinger_bands(
+    data, symbol='600519',
+    period=20, std=2,
+    save_path='bollinger.png'
+)
+```
+
+### Combined Analysis (multi-panel)
+
+KDJ、RSI、成交量等内联在此图中 — 没有独立的 KDJ 绘图方法:
+
+```python
+visualizer.plot_combined_analysis(data, symbol='600519', save_path='combined.png')
+```
+
+### Signals Overlay
+
+```python
+visualizer.plot_signals(
+    data,                      # OHLCV DataFrame
+    signals,                   # 含买卖信号标注的 DataFrame
     symbol='600519',
-    days=120,
-    save_path='kdj.png'
+    save_path='signals.png'
 )
 ```
 
-### Combined Chart
+## Backtest Charts
 
 ```python
-visualizer.plot_combined(
-    symbol='600519',
-    days=120,
-    indicators=['ma', 'macd', 'volume'],
-    save_path='combined.png'
-)
-```
-
-## Multi-Stock Comparison
-
-```python
-# Compare multiple stocks
-symbols = ['600519', '000858', '002415']
-visualizer.plot_comparison(
-    symbols=symbols,
-    days=120,
-    normalize=True,    # Normalize to percentage
-    save_path='comparison.png'
-)
-```
-
-## Equity Curve
-
-```python
-# For backtest results
-equity_data = backtest_result['equity_curve']
+# equity_curve: 含 date 与 value 列的 DataFrame
 visualizer.plot_equity_curve(
-    equity_data=equity_data,
+    equity_curve, symbol='组合A',
+    benchmark_return=10.0,     # 基准收益率(%), 可选
     save_path='equity_curve.png'
 )
+
+visualizer.plot_drawdown(equity_curve, symbol='组合A', save_path='drawdown.png')
 ```
 
-## Custom Styling
+## Convenience Function
 
 ```python
-visualizer = ChartVisualizer(
-    style='dark',        # 'dark' or 'light'
-    figsize=(14, 8),
-    dpi=100
+from chart_visualizer import plot_stock_chart
+
+plot_stock_chart(
+    data, symbol='600519',
+    chart_type='candlestick',  # candlestick/macd/rsi/bollinger/equity/drawdown/signals/combined
+    save_dir='charts'
 )
 ```
 
-See [chart_types.md](references/chart_types.md) for all available chart options and styling.
+## Styling
+
+样式通过 `ChartStyle` 对象传入 (不接受样式名字符串):
+
+```python
+from chart_visualizer import ChartVisualizer, ChartStyle
+
+style = ChartStyle()
+style.figure_size = (14, 8)
+style.dpi = 100
+# 可改: up_color/down_color/bg_color/grid_color/text_color/font_family/...
+
+visualizer = ChartVisualizer(style=style, output_dir='charts')
+```

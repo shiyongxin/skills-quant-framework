@@ -11,7 +11,7 @@ from datetime import datetime
 
 from stock_data_fetcher import StockDataFetcher
 from risk_management import RiskMetrics
-from core.indicators import rsi as _core_rsi
+from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
 
 
 class PositionAnalyzer:
@@ -77,12 +77,9 @@ class PositionAnalyzer:
         data['BB_Upper'] = data['BB_Middle'] + 2 * data['BB_Std']
         data['BB_Lower'] = data['BB_Middle'] - 2 * data['BB_Std']
 
-        # ATR
-        data['TR'] = np.maximum(
-            high - low,
-            np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1)))
-        )
-        data['ATR'] = data['TR'].rolling(window=14).mean()
+        # ATR (core Wilder 单一真相源, 旧: SMA14)
+        data['TR'] = _core_true_range(high, low, close)
+        data['ATR'] = _core_atr(high, low, close, 14)
 
         # 涨跌幅
         data['涨跌幅'] = close.pct_change() * 100

@@ -10,6 +10,8 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple
 
+from core.indicators import atr as _core_atr
+
 
 class CandlestickPatterns:
     """K线形态识别"""
@@ -525,17 +527,13 @@ class PricePatterns:
         if len(df) < period + 1:
             return {'breakout': False, 'direction': None, 'strength': 0}
 
-        # 计算ATR
+        # 计算ATR (core Wilder 单一真相源; 旧: tr.iloc[-1].mean() 是单根TR, 量纲错误)
+        # 用全量历史算 ATR — recent 窗口不足 period 根时会是 NaN
+        atr_val = _core_atr(df['最高'], df['最低'], df['收盘'], period=14).iloc[-1]
+        if not np.isfinite(atr_val) or atr_val <= 0:
+            return {'breakout': False, 'direction': None, 'strength': 0}
+        atr = atr_val
         recent = df.tail(period + 1)
-        high = recent['最高']
-        low = recent['最低']
-        close = recent['收盘']
-
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.iloc[-1].mean()
 
         # 检查突破（不含当日：取最近 period 根历史 bar）
         latest = df.iloc[-1]

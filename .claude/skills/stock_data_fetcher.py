@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from core.fetch_result import FetchResult
+from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
 
 
 class StockDataFetcher:
@@ -198,7 +199,7 @@ class StockDataFetcher:
             return FetchResult.success(df, source=f"stock_zh_a_daily:{symbol}")
         return FetchResult.failure(f"{symbol} 获取失败(未知原因)", source=f"stock_zh_a_daily:{symbol}")
 
-    def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust="qfq"):
+    def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust=""):
         """
         获取历史行情数据 - 备用方法（尝试东方财富接口）
 
@@ -207,7 +208,8 @@ class StockDataFetcher:
             start_date: 开始日期
             end_date: 结束日期
             period: 周期
-            adjust: 复权方式
+            adjust: 复权方式 — 默认 ""(不复权), 与主路径 stock_zh_a_daily 对齐
+                    (审计R4: 旧默认 "qfq" 与主路径混用会产生除权跳空)
 
         Returns:
             行情数据 DataFrame
@@ -224,6 +226,10 @@ class StockDataFetcher:
             )
 
             if df is not None and len(df) > 0:
+                # 单位对齐 (审计R4): stock_zh_a_hist 成交量单位=手,
+                # 主路径 stock_zh_a_daily 单位=股 → 统一换算为股
+                if '成交量' in df.columns:
+                    df['成交量'] = df['成交量'] * 100
                 print(f"[OK] 备用源获取到 {len(df)} 条记录")
                 return df
         except Exception as e:
@@ -335,6 +341,9 @@ class StockDataFetcher:
                 if '~' in data:
                     parts = data.split('~')
                     if len(parts) > 40:
+                        # 腾讯字段表: 30=时间(YYYYMMDDHHMMSS), 33/34=高/低,
+                        # 36=成交量(手), 37=成交额(万元) — 统一到"元" (审计R10)
+                        dt_str = parts[30]
                         result = {
                             '代码': symbol,
                             '名称': parts[1],
@@ -344,9 +353,9 @@ class StockDataFetcher:
                             '最高': float(parts[33]) if parts[33] else 0,
                             '最低': float(parts[34]) if parts[34] else 0,
                             '成交量': int(parts[36]) if parts[36] else 0,
-                            '成交额': float(parts[37]) if parts[37] else 0,
-                            '日期': parts[30],
-                            '时间': parts[31],
+                            '成交额': (float(parts[37]) * 10000) if parts[37] else 0,
+                            '日期': dt_str[:8] if len(dt_str) >= 8 else dt_str,
+                            '时间': dt_str[8:14] if len(dt_str) >= 14 else dt_str,
                             '涨跌': float(parts[3]) - float(parts[4]) if parts[3] and parts[4] else 0,
                             '涨跌幅': ((float(parts[3]) / float(parts[4]) - 1) * 100) if parts[3] and parts[4] else 0
                         }
@@ -471,12 +480,8 @@ class StockDataFetcher:
         df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
         df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-        # RSI
-        delta = close.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        # RSI (core 单一真相源)
+        df['RSI'] = _core_rsi(close, 14)
 
         # KDJ
         low_n = low.rolling(window=9).min()
@@ -492,12 +497,9 @@ class StockDataFetcher:
         df['BB_Upper'] = df['BB_Middle'] + 2 * df['BB_Std']
         df['BB_Lower'] = df['BB_Middle'] - 2 * df['BB_Std']
 
-        # ATR
-        df['TR'] = np.maximum(
-            high - low,
-            np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1)))
-        )
-        df['ATR'] = df['TR'].rolling(window=14).mean()
+        # ATR (core Wilder 单一真相源, 旧: SMA14)
+        df['TR'] = _core_true_range(high, low, close)
+        df['ATR'] = _core_atr(high, low, close, 14)
 
         # 成交量移动平均
         df['VOL_MA5'] = df['成交量'].rolling(window=5).mean()

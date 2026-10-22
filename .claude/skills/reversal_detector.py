@@ -106,7 +106,7 @@ class ReversalDetector:
         df['MA60'] = close.rolling(60).mean()
 
         # RSI (多个周期, core 权威口径)
-        from core.indicators import rsi as _core_rsi
+        from core.indicators import rsi as _core_rsi, atr as _core_atr
         for period in [6, 14, 24]:
             df[f'RSI{period}'] = _core_rsi(close, period)
 
@@ -140,9 +140,8 @@ class ReversalDetector:
         df['ROC5'] = close.pct_change(5) * 100
         df['ROC10'] = close.pct_change(10) * 100
 
-        # ATR
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
+        # ATR (core Wilder 单一真相源, 旧: SMA14)
+        df['ATR'] = _core_atr(high, low, close, 14)
 
         return df
 
