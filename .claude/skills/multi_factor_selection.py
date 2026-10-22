@@ -18,6 +18,41 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def filter_point_in_time(financial_df: pd.DataFrame, as_of) -> pd.DataFrame:
+    """point-in-time 财务数据契约 (审计 C-P0-7 止血版)
+
+    只保留『公告日 ≤ as_of』的财报行 — 消除两类泄露:
+    ①使用后来重述的财报值; ②把尚未公告的财报当作当日可得。
+
+    Args:
+        financial_df: 财务数据 (index=股票代码, 必须含『公告日』列)
+        as_of: 截止日 (回测/选股的当前日期, str/datetime 均可)
+
+    Returns:
+        过滤后的 financial_df
+
+    Raises:
+        ValueError: 缺『公告日』列或未提供 as_of 时**拒绝运行**
+                    (而非静默使用可能未公告的数据)
+    """
+    if '公告日' not in financial_df.columns:
+        raise ValueError(
+            "point-in-time 财务契约(C-P0-7): financial_df 缺少『公告日』列, "
+            "拒绝运行 — 无公告日无法判断财报是否已披露, 直接使用会引入"
+            "未来信息泄露。请在数据层补充公告日后再调用 select_stocks。"
+        )
+    if as_of is None:
+        raise ValueError(
+            "point-in-time 财务契约(C-P0-7): 必须提供 as_of 截止日"
+            "(回测/选股当前日期), 否则无法按『公告日 ≤ as_of』过滤。"
+        )
+
+    dates = pd.to_datetime(financial_df['公告日'], errors='coerce')
+    # 公告日缺失(NaT)的行无法证明已披露 → 一并剔除
+    mask = dates.notna() & (dates <= pd.Timestamp(as_of))
+    return financial_df.loc[mask]
+
+
 @dataclass
 class FactorTestResult:
     """因子测试结果"""
@@ -823,20 +858,27 @@ class MultiFactorSelector:
 
     def select_stocks(self, financial_df: pd.DataFrame, price_df: pd.DataFrame = None,
                       top_n: int = 20, min_score: float = None,
-                      returns: pd.Series = None) -> pd.DataFrame:
+                      returns: pd.Series = None, as_of=None) -> pd.DataFrame:
         """
         选股
 
         Args:
-            financial_df: 财务数据
+            financial_df: 财务数据 (必须含『公告日』列, C-P0-7 point-in-time 契约)
             price_df: 价格数据 (可选)
             top_n: 返回前N只股票
             min_score: 最低得分要求 (None表示不限制)
             returns: 收益率数据 (用于动态加权)
+            as_of: 截止日 (必填: 只使用公告日 ≤ as_of 的财报)
 
         Returns:
             选股结果DataFrame
+
+        Raises:
+            ValueError: 缺『公告日』列或未提供 as_of (拒绝静默泄露)
         """
+        # C-P0-7: 按公告日过滤, 拒绝无公告日/无截止日的调用
+        financial_df = filter_point_in_time(financial_df, as_of)
+
         # 计算因子
         factors_df = self.calculate_factors(financial_df, price_df)
 
@@ -1239,10 +1281,14 @@ class SmartBetaStrategy:
 
 
 # 便捷函数
-def multi_factor_select(financial_df, price_df=None, top_n=20, weighting_method='custom'):
-    """多因子选股（默认 'custom'：使用构造器默认 factor_weights）"""
+def multi_factor_select(financial_df, price_df=None, top_n=20, weighting_method='custom',
+                        as_of=None):
+    """多因子选股（默认 'custom'：使用构造器默认 factor_weights）
+
+    as_of 必填 (C-P0-7): 只使用公告日 ≤ as_of 的财报。
+    """
     selector = MultiFactorSelector(weighting_method=weighting_method)
-    return selector.select_stocks(financial_df, price_df, top_n)
+    return selector.select_stocks(financial_df, price_df, top_n, as_of=as_of)
 
 
 def test_factor_effectiveness(factors_df, returns):

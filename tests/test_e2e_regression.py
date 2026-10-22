@@ -77,6 +77,7 @@ def mk_financial(n_stocks=8, seed=3):
         '资产负债率': rng.uniform(10, 80, n_stocks),
         '流动比率': rng.uniform(0.5, 5, n_stocks),
         '速动比率': rng.uniform(0.3, 4, n_stocks),
+        '公告日': pd.to_datetime(['2024-04-30'] * n_stocks),
     }, index=codes)
 
 
@@ -137,7 +138,8 @@ class TestOutputStructure:
     def test_s3_mfs_select_stocks(self):
         from multi_factor_selection import MultiFactorSelector
         fin = mk_financial()
-        selected = MultiFactorSelector().select_stocks(fin, top_n=3)
+        selected = MultiFactorSelector().select_stocks(
+            fin, top_n=3, as_of='2024-06-30')  # C-P0-7: as_of 必填
         assert isinstance(selected, pd.DataFrame)
         assert len(selected) <= 3
         assert 'Composite_Score' in selected.columns

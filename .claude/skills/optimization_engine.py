@@ -18,6 +18,9 @@ from datetime import datetime
 import json
 import time
 import copy
+import random
+import zlib
+import hashlib
 
 from parameter_space import ParameterSpace
 from vectorized_backtest import VectorizedBacktester, BacktestMetrics
@@ -498,21 +501,28 @@ class GeneticAlgorithm:
                 population, evaluate_fn, current_mutation, rng
             )
 
+        # E-P0-4: 最优解强制 repair + validate, 确保落盘参数合法
+        if best_individual is not None:
+            best_individual.params = ParameterSpace.repair(best_individual.params)
+            valid, violations = ParameterSpace.validate(best_individual.params)
+            if not valid:
+                raise ValueError(f"repair后最优参数仍非法: {violations}")
+
         return best_individual, population, convergence_gen
 
     def _init_population(self, seed_params, rng):
         """初始化种群"""
         population = []
 
-        # 加入种子参数
+        # 加入种子参数 (E-P0-4: 种子也强制 repair)
         if seed_params:
             for params in seed_params:
-                ind = Individual(params=copy.deepcopy(params))
+                ind = Individual(params=ParameterSpace.repair(copy.deepcopy(params)))
                 population.append(ind)
 
-        # 随机填充剩余
+        # 随机填充剩余 (E-P0-4: 独立采样约84%违反关系约束 → 采样后立即 repair)
         while len(population) < self.population_size:
-            params = ParameterSpace.random_sample(rng)
+            params = ParameterSpace.repair(ParameterSpace.random_sample(rng))
             ind = Individual(params=params)
             population.append(ind)
 
@@ -543,9 +553,14 @@ class GeneticAlgorithm:
                 child1_params = copy.deepcopy(parent1.params)
                 child2_params = copy.deepcopy(parent2.params)
 
-            # 变异
-            child1_params = ParameterSpace.mutate(child1_params, mutation_rate, rng)
-            child2_params = ParameterSpace.mutate(child2_params, mutation_rate, rng)
+            # 变异 + repair (E-P0-4: 交叉/变异可能破坏关系约束,
+            # ParameterSpace.repair 的 docstring 本就要求在此调用)
+            child1_params = ParameterSpace.repair(
+                ParameterSpace.mutate(child1_params, mutation_rate, rng)
+            )
+            child2_params = ParameterSpace.repair(
+                ParameterSpace.mutate(child2_params, mutation_rate, rng)
+            )
 
             next_gen.append(Individual(params=child1_params))
             if len(next_gen) < self.population_size:
@@ -571,7 +586,7 @@ class OptimizationEngine:
     阶段3: 混合策略优化 → 跨体制稳健参数
     """
 
-    def __init__(self, data_dir="./stock_data", n_workers=4):
+    def __init__(self, data_dir="./stock_data", n_workers=4, seed=None):
         """
         Parameters:
         -----------
@@ -579,11 +594,17 @@ class OptimizationEngine:
             数据目录
         n_workers : int
             并行工作线程数
+        seed : int or None
+            随机种子 (E-P0-3): 同 seed 同数据 → 结果逐位可复现。
+            各阶段(global/regime/robust/iterative)由 seed+阶段名派生
+            独立子流, 与调用顺序无关; None 时保持非确定性。
         """
         self.data_manager = HistoricalDataManager(data_dir)
         self.backtester = VectorizedBacktester()
         self.evaluator = FitnessEvaluator(self.backtester)
         self.n_workers = n_workers
+        self.seed = seed
+        self._ga_runs = []  # 各阶段GA运行元数据, save_results 落盘
 
         self.results = {}       # {regime: OptimizationResult}
         self.stock_data = {}    # {symbol: DataFrame}
@@ -699,12 +720,15 @@ class OptimizationEngine:
         print("=" * 70)
 
         # 抽样股票
-        sample_data = self._get_sample(stock_sample, n_stocks)
+        sample_data = self._get_sample(stock_sample, n_stocks,
+                                       self._stage_py_rng('global'))
         if not sample_data:
             print("[ERROR] 无可用股票数据")
             return None
 
         print(f"  样本股票: {len(sample_data)} 只")
+        if self.seed is not None:
+            print(f"  随机种子: {self.seed} (阶段: global)")
 
         # GA配置
         ga_cfg = {
@@ -715,8 +739,11 @@ class OptimizationEngine:
         if ga_params:
             ga_cfg.update(ga_params)
 
-        # 评估函数
+        # 评估函数 (计数, 落盘用)
+        evals = {'n': 0}
+
         def evaluate(params):
+            evals['n'] += 1
             return self.evaluator.evaluate(params, sample_data)
 
         # 运行GA
@@ -727,8 +754,10 @@ class OptimizationEngine:
             print(f"  GA配置: pop={ga_cfg['population_size']}, "
                   f"max_gen={ga_cfg['max_generations']}")
 
-        best, all_inds, conv_gen = ga.run(evaluate, verbose=verbose)
+        best, all_inds, conv_gen = ga.run(evaluate, rng=self._stage_rng('global'),
+                                          verbose=verbose)
         total_time = time.time() - start_time
+        self._record_ga_run('global', ga_cfg, conv_gen, total_time, evals['n'])
 
         # 构建结果
         system = IndicatorSystem(
@@ -783,7 +812,8 @@ class OptimizationEngine:
             print("[ERROR] 无体制标签，请先加载体制标签文件")
             return {}
 
-        sample_data = self._get_sample(stock_sample, n_stocks)
+        sample_data = self._get_sample(stock_sample, n_stocks,
+                                       self._stage_py_rng('regime'))
         if not sample_data:
             return {}
 
@@ -800,6 +830,8 @@ class OptimizationEngine:
         print(f"  活跃体制: {active_regimes}")
         print(f"  体制数据量: {regime_counts}")
         print(f"  样本股票: {len(sample_data)} 只")
+        if self.seed is not None:
+            print(f"  随机种子: {self.seed} (阶段: regime)")
 
         ga_cfg = {
             'population_size': 60,
@@ -819,7 +851,10 @@ class OptimizationEngine:
                 'CRASH': '暴跌', 'RECOVERY': '反弹'
             }.get(regime, regime)
 
+            evals = {'n': 0}
+
             def evaluate(params, r=regime):
+                evals['n'] += 1
                 return self.evaluator.evaluate(
                     params, sample_data, self.regime_labels, r
                 )
@@ -827,8 +862,13 @@ class OptimizationEngine:
             ga = GeneticAlgorithm(**ga_cfg)
             start_time = time.time()
 
-            best, all_inds, conv_gen = ga.run(evaluate, verbose=verbose)
+            # 各体制独立子流: 与体制循环顺序无关, 同 seed 同体制可复现
+            best, all_inds, conv_gen = ga.run(
+                evaluate, rng=self._stage_rng(f'regime:{regime}'), verbose=verbose
+            )
             total_time = time.time() - start_time
+            self._record_ga_run(f'regime:{regime}', ga_cfg, conv_gen,
+                                total_time, evals['n'])
 
             system = IndicatorSystem(
                 name=f"{regime_name_cn}专用型",
@@ -876,7 +916,8 @@ class OptimizationEngine:
         print("  阶段3: 稳健策略优化 (Robust Optimization)")
         print("=" * 70)
 
-        sample_data = self._get_sample(stock_sample, n_stocks)
+        sample_data = self._get_sample(stock_sample, n_stocks,
+                                       self._stage_py_rng('robust'))
         if not sample_data:
             return None
 
@@ -891,6 +932,8 @@ class OptimizationEngine:
 
         print(f"  样本股票: {len(sample_data)} 只")
         print(f"  体制: {all_regimes}")
+        if self.seed is not None:
+            print(f"  随机种子: {self.seed} (阶段: robust)")
 
         ga_cfg = {
             'population_size': 80,
@@ -900,8 +943,11 @@ class OptimizationEngine:
         if ga_params:
             ga_cfg.update(ga_params)
 
+        evals = {'n': 0}
+
         def evaluate_robust(params):
             """稳健适应度: 各体制fitness的最小值(忽略无数据体制)"""
+            evals['n'] += 1
             if not all_regimes or not self.regime_labels:
                 return self.evaluator.evaluate(params, sample_data)
 
@@ -936,8 +982,11 @@ class OptimizationEngine:
         ga = GeneticAlgorithm(**ga_cfg)
         start_time = time.time()
 
-        best, all_inds, conv_gen = ga.run(evaluate_robust, verbose=verbose)
+        best, all_inds, conv_gen = ga.run(evaluate_robust,
+                                          rng=self._stage_rng('robust'),
+                                          verbose=verbose)
         total_time = time.time() - start_time
+        self._record_ga_run('robust', ga_cfg, conv_gen, total_time, evals['n'])
 
         regime_scores = best.fitness_details.get('regime_fitnesses', {})
         regimes_used = best.fitness_details.get('regimes_used', [])
@@ -994,9 +1043,13 @@ class OptimizationEngine:
         print(f"  多轮迭代优化 ({n_rounds} 轮)")
         print("=" * 70)
 
-        sample_data = self._get_sample(stock_sample, n_stocks)
+        sample_data = self._get_sample(stock_sample, n_stocks,
+                                       self._stage_py_rng('iterative'))
         if not sample_data:
             return []
+
+        if self.seed is not None:
+            print(f"  随机种子: {self.seed} (阶段: iterative)")
 
         # 各轮配置
         round_configs = [
@@ -1010,6 +1063,8 @@ class OptimizationEngine:
 
         all_round_results = []
         seed_params = None
+        # 单条流贯穿各轮 (轮次顺序固定 → 可复现)
+        rng = self._stage_rng('iterative')
 
         for round_idx in range(min(n_rounds, len(round_configs))):
             cfg = round_configs[round_idx]
@@ -1018,7 +1073,10 @@ class OptimizationEngine:
                   f"max_gen={cfg['max_generations']}, "
                   f"mut_rate={cfg['mutation_rate']}")
 
+            evals = {'n': 0}
+
             def evaluate(params):
+                evals['n'] += 1
                 return self.evaluator.evaluate(params, sample_data)
 
             ga = GeneticAlgorithm(
@@ -1030,9 +1088,11 @@ class OptimizationEngine:
 
             start_time = time.time()
             best, all_inds, conv_gen = ga.run(
-                evaluate, seed_params=seed_params, verbose=verbose
+                evaluate, seed_params=seed_params, rng=rng, verbose=verbose
             )
             total_time = time.time() - start_time
+            self._record_ga_run(f'iterative:r{round_idx + 1}', cfg, conv_gen,
+                                total_time, evals['n'])
 
             result = {
                 'round': round_idx + 1,
@@ -1088,8 +1148,43 @@ class OptimizationEngine:
 
         return all_round_results
 
-    def _get_sample(self, stock_sample, n_stocks):
-        """获取股票样本"""
+    def _stage_rng(self, stage: str) -> np.random.Generator:
+        """按阶段派生独立可复现随机流 (E-P0-3): seed+阶段名 → 子流"""
+        if self.seed is None:
+            return np.random.default_rng()
+        return np.random.default_rng([int(self.seed), zlib.crc32(stage.encode())])
+
+    def _stage_py_rng(self, stage: str) -> random.Random:
+        """stdlib 随机流 (分层抽样用), 派生规则与 _stage_rng 一致"""
+        if self.seed is None:
+            return random.Random()
+        return random.Random(f"{self.seed}:{stage}")
+
+    def _record_ga_run(self, stage, ga_cfg, conv_gen, time_sec, n_evals):
+        """记录一次GA运行的元数据 (save_results 落盘 — E-P0-3)"""
+        self._ga_runs.append({
+            'stage': stage,
+            'population_size': ga_cfg.get('population_size'),
+            'max_generations': ga_cfg.get('max_generations'),
+            'convergence_threshold': ga_cfg.get('convergence_threshold'),
+            'mutation_rate': ga_cfg.get('mutation_rate'),
+            'convergence_gen': conv_gen,
+            'n_evals': n_evals,
+            'time_sec': round(time_sec, 3),
+        })
+
+    @staticmethod
+    def _param_space_signature() -> dict:
+        """参数空间指纹 (版本): 个数+名称+边界/默认值摘要 — 落盘审计用"""
+        names = ParameterSpace.get_param_names()
+        defaults = ParameterSpace.get_defaults()
+        digest = hashlib.sha256(
+            repr({'names': names, 'defaults': defaults}).encode('utf-8')
+        ).hexdigest()[:16]
+        return {'n_params': len(names), 'names': names, 'digest': digest}
+
+    def _get_sample(self, stock_sample, n_stocks, py_rng=None):
+        """获取股票样本 (py_rng: 分层抽样随机源, 传入时可复现)"""
         if stock_sample:
             return {s: self.stock_data[s] for s in stock_sample if s in self.stock_data}
 
@@ -1100,8 +1195,10 @@ class OptimizationEngine:
         if len(all_symbols) <= n_stocks:
             return dict(self.stock_data)
 
+        if py_rng is None:
+            py_rng = random.Random()
+
         # 分层抽样: 优先选择有体制标签的
-        import random
         labeled = [s for s in all_symbols if s in self.regime_labels]
         unlabeled = [s for s in all_symbols if s not in self.regime_labels]
 
@@ -1110,9 +1207,9 @@ class OptimizationEngine:
         n_unlabeled = n_stocks - n_labeled
 
         if n_labeled > 0:
-            sample.extend(random.sample(labeled, n_labeled))
+            sample.extend(py_rng.sample(labeled, n_labeled))
         if n_unlabeled > 0 and unlabeled:
-            sample.extend(random.sample(unlabeled, min(n_unlabeled, len(unlabeled))))
+            sample.extend(py_rng.sample(unlabeled, min(n_unlabeled, len(unlabeled))))
 
         return {s: self.stock_data[s] for s in sample}
 
@@ -1138,9 +1235,25 @@ class OptimizationEngine:
         return systems
 
     def save_results(self, filepath):
-        """保存优化结果"""
+        """保存优化结果 (含 seed/适应度权重/参数空间指纹/数据起止/GA运行 — E-P0-3)"""
+        # 数据起止日
+        data_start = data_end = None
+        for df in self.stock_data.values():
+            if '日期' not in df.columns or len(df) == 0:
+                continue
+            d_min, d_max = df['日期'].min(), df['日期'].max()
+            data_start = d_min if data_start is None else min(data_start, d_min)
+            data_end = d_max if data_end is None else max(data_end, d_max)
+
         output = {
             'timestamp': datetime.now().isoformat(),
+            'seed': self.seed,
+            'n_stocks': len(self.stock_data),
+            'data_start': str(data_start) if data_start is not None else None,
+            'data_end': str(data_end) if data_end is not None else None,
+            'fitness_weights': dict(self.evaluator.weights),
+            'param_space': self._param_space_signature(),
+            'ga_runs': list(self._ga_runs),
             'systems': []
         }
 
@@ -1167,7 +1280,7 @@ class OptimizationEngine:
 
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
-        print(f"[OK] 优化结果已保存: {filepath}")
+        print(f"[OK] 优化结果已保存: {filepath} (seed={self.seed})")
 
     def load_results(self, filepath):
         """加载优化结果"""
@@ -1262,13 +1375,18 @@ def main():
     p_iter.add_argument('--save', default='stock_data/optimization_result.json',
                         help='保存路径')
 
+    # E-P0-3: 所有子命令支持 --seed (默认42 → 命令行运行默认可复现)
+    for _p in (p_global, p_regime, p_robust, p_full, p_iter):
+        _p.add_argument('--seed', type=int, default=42,
+                        help='随机种子 (同种子同数据可复现)')
+
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
         return
 
-    engine = OptimizationEngine()
+    engine = OptimizationEngine(seed=args.seed)
 
     if args.command in ('global', 'regime', 'robust', 'full', 'iterative'):
         labels_file = getattr(args, 'regime_labels', None)
