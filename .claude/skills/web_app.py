@@ -1012,10 +1012,11 @@ def get_stock_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:
     # 获取数据
     if st.session_state.fetcher:
         try:
-            data = st.session_state.fetcher.get_quote_data(symbol, days=days)
-            if data is not None and len(data) > 0:
-                st.session_state.data_cache[cache_key] = data
-                return data
+            result = st.session_state.fetcher.get_quote_result(symbol, days=days)
+            if result.ok and len(result.data) > 0:
+                st.session_state.data_cache[cache_key] = result.data
+                return result.data
+            st.error(f"获取 {symbol} 数据失败: {result.error or '无数据'}")
         except Exception as e:
             st.error(f"获取数据失败: {str(e)}")
 

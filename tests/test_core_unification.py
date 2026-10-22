@@ -77,6 +77,10 @@ class TestCoreRSI:
             def get_quote_data(self, symbol, days=120):
                 return df.copy()
 
+            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120):
+                from core.fetch_result import FetchResult
+                return FetchResult.success(df.copy(), source='test')
+
         from position_analyzer import PositionAnalyzer
         got_pa = PositionAnalyzer(fetcher=_StubFetcher()).get_stock_data('600519')['RSI']
         assert np.allclose(got_pa.values, expected.values, equal_nan=True)

@@ -107,6 +107,10 @@ class TestAtrUnification:
             def get_quote_data(self, symbol, days=120):
                 return df.copy()
 
+            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120):
+                from core.fetch_result import FetchResult
+                return FetchResult.success(df.copy(), source='test')
+
         got = PositionAnalyzer(fetcher=_StubFetcher()).get_stock_data('600519')
         expected = core_atr(df['最高'], df['最低'], df['收盘'], 14)
         assert np.allclose(got['ATR'].values, expected.values, equal_nan=True)

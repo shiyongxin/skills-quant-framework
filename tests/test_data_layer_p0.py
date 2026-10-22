@@ -271,3 +271,149 @@ class TestRegimeClassifier:
         query = pd.DatetimeIndex([index_data['日期'].iloc[-1]])
         result = clf.get_regime_for_dates(query)
         assert result.iloc[0] == 'BULL'  # 旧bug: idxmax 返回第一天的标签
+
+
+def _mk_ohlcv(n=80, seed=0, base=10.0):
+    rng = np.random.default_rng(seed)
+    close = base * np.cumprod(1 + rng.normal(0, 0.01, n))
+    return pd.DataFrame({
+        '日期': pd.date_range('2024-01-01', periods=n, freq='B'),
+        '开盘': close * (1 + rng.normal(0, 0.002, n)),
+        '最高': close * 1.01, '最低': close * 0.99, '收盘': close,
+        '成交量': rng.integers(1e6, 2e6, n).astype(float),
+    })
+
+
+class TestFetchResultCallers:
+    """调用方迁移: 失败可观测, 不再静默 None/空DF"""
+
+    @staticmethod
+    def _failing_fetcher():
+        from core.fetch_result import FetchResult
+
+        class _F:
+            def get_quote_data(self, symbol, days=120, **k):
+                return pd.DataFrame()
+
+            def get_quote_result(self, symbol, start_date=None, end_date=None,
+                                 days=120):
+                return FetchResult.failure('network down', source='test')
+
+        return _F()
+
+    def test_technical_analyzer_surfaces_failure(self, capsys):
+        import technical_analyzer as ta_mod
+        ta = ta_mod.TechnicalAnalyzer(fetcher=self._failing_fetcher())
+        assert ta.analyze('600519') is None
+        assert '数据获取失败' in capsys.readouterr().out
+
+    def test_technical_analyzer_surfaces_insufficient(self, capsys):
+        from core.fetch_result import FetchResult
+        short_df = _mk_ohlcv(n=30, seed=1)
+
+        class _F:
+            def get_quote_result(self, symbol, start_date=None, end_date=None,
+                                 days=120):
+                return FetchResult.success(short_df.copy(), source='test')
+
+        import technical_analyzer as ta_mod
+        ta = ta_mod.TechnicalAnalyzer(fetcher=_F())
+        assert ta.analyze('600519') is None
+        assert '数据不足60根' in capsys.readouterr().out
+
+    def test_position_analyzer_surfaces_failure(self, capsys):
+        from position_analyzer import PositionAnalyzer
+        pa = PositionAnalyzer(fetcher=self._failing_fetcher())
+        assert pa.get_stock_data('600519') is None
+        assert '数据获取失败' in capsys.readouterr().out
+
+    def test_quant_workflow_second_fetch_failure(self):
+        import quant_workflow as qw_mod
+        wf = qw_mod.QuantWorkflow.__new__(qw_mod.QuantWorkflow)
+        wf.fetcher = self._failing_fetcher()
+        wf.stock_list = type('S', (), {'get_name': lambda self, c: '茅台'})()
+        wf.technical_analyzer = type('T', (), {
+            'analyze': lambda self, s, days=120: {'latest_price': 100.0}
+        })()
+        out = wf.quick_analysis('600519')
+        assert 'error' in out and '数据获取失败' in out['error']
+
+    def test_multi_stock_backtester_reports_skips(self, capsys):
+        import multi_stock_backtester as msb_mod
+        bt = msb_mod.MultiStockBacktester.__new__(msb_mod.MultiStockBacktester)
+        bt.backtester = None  # 不会走到回测: 两只都被跳过
+
+        good = _mk_ohlcv(n=300, seed=2)
+        short = _mk_ohlcv(n=100, seed=3)
+
+        class _Mgr:
+            def load(self, sym):
+                return {'good': good, 'short': short, 'empty': pd.DataFrame()}[sym]
+
+        bt.data_manager = _Mgr()
+        try:
+            bt.evaluate_system({}, symbols=['good', 'short', 'empty'])
+        except Exception:
+            pass  # 后续聚合可能因空结果报错 — 只关心跳过统计已打印
+        out = capsys.readouterr().out
+        assert '跳过统计' in out
+        assert '数据缺失 1' in out
+        assert '不足252天 1' in out
+
+    def test_real_time_monitor_surfaces_failure(self, capsys):
+        import real_time_monitor as rtm_mod
+        mon = rtm_mod.RealTimeMonitor.__new__(rtm_mod.RealTimeMonitor)
+        mon.stocks = {'600519': object()}
+        mon.fetcher = self._failing_fetcher()
+        assert mon.check_conditions('600519') == []
+        assert '监控数据获取失败' in capsys.readouterr().out
+
+    def test_cache_warmup_reports_and_keys_days(self, monkeypatch, capsys):
+        from core.fetch_result import FetchResult
+        import stock_data_fetcher as sdf_mod
+
+        class _StubFetcher:
+            def get_quote_result(self, symbol, start_date=None, end_date=None,
+                                 days=120):
+                return FetchResult.failure('api down', source='test')
+
+        monkeypatch.setattr(sdf_mod, 'StockDataFetcher', lambda: _StubFetcher())
+
+        import cache_manager as cm_mod
+        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
+        cached = {}
+
+        def fake_cache(symbol, data, ttl=None, days=None, adjust=None, period=None):
+            cached['days'] = days
+            return True
+
+        cm.cache_stock_data = fake_cache
+        results = cm.warm_up(['600519'], days=60)
+        assert results == {'600519': False}
+        assert '预热 600519 无数据' in capsys.readouterr().out
+        assert 'days' not in cached  # 失败时不写缓存
+
+    def test_cache_warmup_passes_days_on_success(self, monkeypatch):
+        from core.fetch_result import FetchResult
+        import stock_data_fetcher as sdf_mod
+        df = _mk_ohlcv(n=90, seed=4)
+
+        class _StubFetcher:
+            def get_quote_result(self, symbol, start_date=None, end_date=None,
+                                 days=120):
+                return FetchResult.success(df.copy(), source='test')
+
+        monkeypatch.setattr(sdf_mod, 'StockDataFetcher', lambda: _StubFetcher())
+
+        import cache_manager as cm_mod
+        cm = cm_mod.CacheManager.__new__(cm_mod.CacheManager)
+        cached = {}
+
+        def fake_cache(symbol, data, ttl=None, days=None, adjust=None, period=None):
+            cached['days'] = days
+            return True
+
+        cm.cache_stock_data = fake_cache
+        results = cm.warm_up(['600519'], days=60)
+        assert results == {'600519': True}
+        assert cached['days'] == 60  # 旧bug: 省略days → 缓存进默认key

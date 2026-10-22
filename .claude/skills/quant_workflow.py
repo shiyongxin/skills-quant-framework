@@ -55,9 +55,15 @@ class QuantWorkflow:
                 'error': '无法获取数据'
             }
 
-        # 信号生成
-        data = self.fetcher.get_quote_data(symbol, days=days)
-        data = self.fetcher.calculate_technical_indicators(data)
+        # 信号生成 (二次取数也必须校验 — 旧逻辑对空DF直接算指标会崩溃)
+        result = self.fetcher.get_quote_result(symbol, days=days)
+        if not result.ok or len(result.data) == 0:
+            return {
+                'symbol': symbol,
+                'name': name,
+                'error': f'数据获取失败: {result.error}'
+            }
+        data = self.fetcher.calculate_technical_indicators(result.data)
         signal = self.signal_generator.get_latest_signal(data)
 
         # 综合判断

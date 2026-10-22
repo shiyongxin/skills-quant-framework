@@ -111,9 +111,16 @@ class MultiStockBacktester:
         print(f"[INFO] 评估参数在 {len(symbols)} 只股票上的表现...")
 
         stock_results = []
+        skipped_empty = 0
+        skipped_short = 0
+        backtest_failed = 0
         for i, sym in enumerate(symbols):
             data = self.data_manager.load(sym)
+            if data is None or len(data) == 0:
+                skipped_empty += 1  # 旧逻辑静默 continue, 失败不可观测
+                continue
             if len(data) < 252:
+                skipped_short += 1
                 continue
 
             try:
@@ -124,10 +131,15 @@ class MultiStockBacktester:
                         symbol=sym, metrics=metrics, regime=regime
                     ))
             except Exception:
+                backtest_failed += 1
                 continue
 
             if (i + 1) % 20 == 0:
                 print(f"  [{i+1}/{len(symbols)}] 已评估...")
+
+        if skipped_empty or skipped_short or backtest_failed:
+            print(f"[WARN] 跳过统计: 数据缺失 {skipped_empty}, "
+                  f"不足252天 {skipped_short}, 回测异常 {backtest_failed}")
 
         if not stock_results:
             print("[WARN] 无有效评估结果")

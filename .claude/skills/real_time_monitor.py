@@ -243,10 +243,14 @@ class RealTimeMonitor:
         monitor_stock = self.stocks[symbol]
         triggered_alerts = []
 
-        # 获取最新数据
+        # 获取最新数据 (FetchResult: 失败携带原因)
         try:
-            data = self.fetcher.get_quote_data(symbol, days=120)
-            if data is None or len(data) == 0:
+            result = self.fetcher.get_quote_result(symbol, days=120)
+            if not result.ok:
+                print(f"[WARN] {symbol} 监控数据获取失败: {result.error}")
+                return triggered_alerts
+            data = result.data
+            if len(data) == 0:
                 return triggered_alerts
 
             latest = data.iloc[-1]

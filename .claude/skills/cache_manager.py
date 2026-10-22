@@ -672,10 +672,13 @@ class CacheManager:
 
         for symbol in symbols:
             try:
-                data = fetcher.get_quote_data(symbol, days=days)
-                if data is not None and len(data) > 0:
-                    results[symbol] = self.cache_stock_data(symbol, data)
+                result = fetcher.get_quote_result(symbol, days=days)
+                if result.ok and len(result.data) > 0:
+                    # 传 days 维度 — 旧逻辑省略 days 会缓存到错误的key下
+                    results[symbol] = self.cache_stock_data(
+                        symbol, result.data, days=days)
                 else:
+                    print(f"[WARN] 预热 {symbol} 无数据: {result.error}")
                     results[symbol] = False
             except Exception as e:
                 print(f"[WARN] 预热 {symbol} 失败: {e}")

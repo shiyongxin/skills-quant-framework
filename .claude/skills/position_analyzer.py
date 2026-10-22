@@ -37,8 +37,14 @@ class PositionAnalyzer:
         Returns:
             DataFrame: 包含技术指标的股票数据
         """
-        data = self.fetcher.get_quote_data(symbol, days=days)
-        if data is None or len(data) < 60:
+        # 获取数据 (FetchResult: 失败携带原因, 不再静默None)
+        result = self.fetcher.get_quote_result(symbol, days=days)
+        if not result.ok:
+            print(f"[WARN] {symbol} 持仓分析取消: 数据获取失败 ({result.error})")
+            return None
+        data = result.data
+        if len(data) < 60:
+            print(f"[WARN] {symbol} 数据不足60根 ({len(data)}根), 无法分析")
             return None
 
         # 计算技术指标
