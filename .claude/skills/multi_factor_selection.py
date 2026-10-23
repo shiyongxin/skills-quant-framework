@@ -519,7 +519,11 @@ class FactorModels:
     def growth_factor(df) -> pd.DataFrame:
         """
         成长因子
-        营收增长率、利润增长率、ROE增长率等
+        营收增长率、利润增长率、净利率等成长性指标
+
+        审计 C-P1-14: ROE/毛利率原在 growth 与 quality 双计 (合计有效权重
+        18.3% 隐性重复) — 已移除, 盈利水平指标统一归 quality_factor。
+        Net_Margin 非重复计权, 保留 (盈利水平但仅本块使用)。
 
         Args:
             df: 财务指标数据
@@ -536,14 +540,6 @@ class FactorModels:
         # 利润增长率
         if '净利润同比增长' in df.columns:
             factors['Profit_Growth'] = df['净利润同比增长']
-
-        # ROE
-        if '净资产收益率' in df.columns:
-            factors['ROE'] = df['净资产收益率']
-
-        # 毛利率
-        if '销售毛利率' in df.columns:
-            factors['Gross_Margin'] = df['销售毛利率']
 
         # 净利率
         if '销售净利率' in df.columns:

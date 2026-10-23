@@ -104,8 +104,8 @@ print(f"最佳夏普比率: {result.score:.4f}")
 # 随机搜索
 result2 = optimizer.random_search(data, n_iter=50)
 
-# 贝叶斯优化
-result3 = optimizer.bayesian_optimize(
+# 边界随机采样（原 bayesian_optimize，审计 E-P1 更名——旧实现非贝叶斯）
+result3 = optimizer.random_sampling(
     data,
     param_bounds={
         'short_period': (5, 20),

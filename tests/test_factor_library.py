@@ -306,3 +306,53 @@ class TestJSONConfig:
 
     def test_load_config_missing_returns_none(self):
         assert fl.load_config('nonexistent_module') is None
+
+
+class TestGrowthQualityNoDoubleCount:
+    """C-P1-14: ROE/毛利率原在 growth 与 quality 双计 (合计有效权重 18.3%)"""
+
+    @staticmethod
+    def _financial(seed=7):
+        rng = np.random.default_rng(seed)
+        n = 10
+        codes = [f'{i:06d}' for i in range(1, n + 1)]
+        return pd.DataFrame({
+            '营业总收入同比增长': rng.uniform(-20, 60, n),
+            '净利润同比增长': rng.uniform(-30, 80, n),
+            '净资产收益率': rng.uniform(-5, 30, n),
+            '销售毛利率': rng.uniform(5, 70, n),
+            '销售净利率': rng.uniform(-5, 40, n),
+            '总资产净利率': rng.uniform(-3, 20, n),
+            '资产负债率': rng.uniform(10, 80, n),
+            '流动比率': rng.uniform(0.5, 5, n),
+            '速动比率': rng.uniform(0.3, 4, n),
+        }, index=codes)
+
+    def test_no_overlapping_factor_columns(self):
+        from multi_factor_selection import FactorModels
+        fin = self._financial()
+        g = FactorModels.growth_factor(fin)
+        q = FactorModels.quality_factor(fin)
+        overlap = (set(g.columns) - {'Growth_Score'}) & \
+                 (set(q.columns) - {'Quality_Score'})
+        assert not overlap, f"growth 与 quality 因子列重复: {overlap}"
+
+    def test_growth_excludes_quality_levels(self):
+        from multi_factor_selection import FactorModels
+        fin = self._financial()
+        g = FactorModels.growth_factor(fin)
+        # 盈利水平指标 (ROE/毛利率) 只归 quality, 不再进 growth
+        assert 'ROE' not in g.columns
+        assert 'Gross_Margin' not in g.columns
+        # 成长性指标保留
+        for col in ('Revenue_Growth', 'Profit_Growth', 'Net_Margin'):
+            assert col in g.columns, col
+
+    def test_growth_score_still_computes(self):
+        from multi_factor_selection import FactorModels
+        fin = self._financial()
+        g = FactorModels.growth_factor(fin)
+        assert g['Growth_Score'].notna().all()
+        # 标准化列均值再平均 → 分数值与子因子均值一致
+        sub = g[['Revenue_Growth', 'Profit_Growth', 'Net_Margin']]
+        assert np.allclose(g['Growth_Score'], sub.mean(axis=1))

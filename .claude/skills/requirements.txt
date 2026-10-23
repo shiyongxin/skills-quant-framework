@@ -1,0 +1,19 @@
+# .claude/skills 分析层依赖清单 (审计 B-P2)
+# Skills 数据/指标/信号/回测/优化层 — 从仓库根目录运行 (sys.path 依赖)
+# Web 层 (web_app.py 的 streamlit) 见仓库根 web_requirements.txt
+# 安装: pip install -r .claude/skills/requirements.txt
+
+# ---- 核心 (模块顶层 import, 缺失即 ImportError) ----
+pandas
+numpy
+scipy>=1.11.0    # multi_factor_selection:15-16 顶层 import (缺失连模块都导不入);
+                 # pattern_recognition/risk_management 函数内 import (find_peaks/gaussian_filter1d/stats.norm.ppf)
+akshare           # stock_data_fetcher/historical_data_manager/long_term_selector/
+                 # reversal_backtest/reversal_detector 顶层 import (行情获取)
+
+# ---- 运行时 (功能路径依赖, 缺失对应功能报错) ----
+pyarrow           # historical_data_manager.to_parquet(engine='pyarrow') parquet 读写
+
+# ---- 可选 (try 守卫, 缺失时功能降级不崩溃) ----
+matplotlib        # chart_visualizer 绘图 (ImportError 守卫, web_app 降级提示)
+scikit-learn      # ml_predictor 机器学习 (try 守卫)

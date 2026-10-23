@@ -3,7 +3,7 @@
 策略参数优化器
 Strategy Parameter Optimizer
 
-提供网格搜索、随机搜索、贝叶斯优化等参数优化功能
+提供网格搜索、随机搜索、边界随机采样等参数优化功能
 """
 
 import sys
@@ -43,8 +43,6 @@ class OptimizationConfig:
     strategy_name: str = "default"
     target_metric: str = "sharpe_ratio"  # 优化目标指标
     maximize: bool = True  # 是否最大化
-    cv: int = 3  # 交叉验证折数
-    n_jobs: int = 1  # 并行任务数
 
 
 # =============================================================================
@@ -441,12 +439,15 @@ class StrategyOptimizer:
             metrics=best_metrics
         )
 
-    def bayesian_optimize(self, data: pd.DataFrame,
-                         param_bounds: Dict,
-                         n_iter: int = 50,
-                         verbose: bool = True) -> OptimizationResult:
+    def random_sampling(self, data: pd.DataFrame,
+                        param_bounds: Dict,
+                        n_iter: int = 50,
+                        verbose: bool = True) -> OptimizationResult:
         """
-        贝叶斯优化（简化版）
+        边界内均匀随机采样优化（原名 bayesian_optimize）
+
+        审计 E-P1: 旧名 bayesian_optimize 宣称贝叶斯优化但实现是 random.uniform
+        均匀随机采样, 无代理模型/采集函数 — 已更名为 random_sampling 诚实化。
 
         Args:
             data: 股票数据
@@ -498,9 +499,9 @@ class StrategyOptimizer:
         bounds = [param_bounds[name] for name in param_bounds.keys()]
 
         if verbose:
-            print(f"贝叶斯优化开始，共 {n_iter} 次迭代")
+            print(f"随机采样开始，共 {n_iter} 次迭代")
 
-        # 简化版：使用随机搜索替代
+        # 边界内均匀随机采样
         for i in range(n_iter):
             # 在边界内随机采样
             x = [random.uniform(b[0], b[1]) for b in bounds]
@@ -521,6 +522,9 @@ class StrategyOptimizer:
             metrics=best_metrics
         )
 
+    # 历史别名 (审计 E-P1 更名前的旧 API 名) — 实现同 random_sampling
+    bayesian_optimize = random_sampling
+
     def optimize(self, data: pd.DataFrame,
                 method: str = "grid",
                 **kwargs) -> OptimizationResult:
@@ -529,7 +533,7 @@ class StrategyOptimizer:
 
         Args:
             data: 股票数据
-            method: 优化方法 (grid/random/bayesian)
+            method: 优化方法 (grid/random/random_sampling); "bayesian" 为历史名
             **kwargs: 其他参数
 
         Returns:
@@ -539,8 +543,9 @@ class StrategyOptimizer:
             return self.grid_search(data, **kwargs)
         elif method == "random":
             return self.random_search(data, **kwargs)
-        elif method == "bayesian":
-            return self.bayesian_optimize(data, **kwargs)
+        elif method in ("random_sampling", "bayesian"):
+            # "bayesian" 是 E-P1 更名前的历史分派名, 实现为随机采样
+            return self.random_sampling(data, **kwargs)
         else:
             raise ValueError(f"未知优化方法: {method}")
 

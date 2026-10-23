@@ -281,3 +281,72 @@ class TestCrossSectionFactors:
         top = SmartBetaStrategy().momentum_strategy(
             {'收盘': self._wide()}, period=120, top_n=2)
         assert top == ['AAA', 'BBB']
+
+
+class TestStrategyOptimizerHonesty:
+    """E-P1: 伪贝叶斯更名 random_sampling + OptimizationConfig 死字段删除"""
+
+    @staticmethod
+    def _data(seed=2, n=250):
+        rng = np.random.default_rng(seed)
+        c = 10 * np.cumprod(1 + rng.normal(0.0005, 0.015, n))
+        return pd.DataFrame({
+            '日期': pd.bdate_range('2023-01-02', periods=n),
+            '开盘': c, '最高': c * 1.02, '最低': c * 0.98, '收盘': c,
+            '成交量': rng.integers(1e6, 5e6, n).astype(float),
+            'MA5': pd.Series(c).rolling(5).mean(),
+            'MA20': pd.Series(c).rolling(20).mean(),
+        })
+
+    def test_random_sampling_runs_within_bounds(self):
+        from strategy_optimizer import StrategyOptimizer
+        opt = StrategyOptimizer()
+        bounds = {'short_period': (5, 20), 'long_period': (20, 60)}
+        res = opt.random_sampling(self._data(), bounds, n_iter=2,
+                                  verbose=False)
+        assert res.parameters is not None
+        for name, (lo, hi) in bounds.items():
+            v = res.parameters[name]
+            assert lo <= v <= hi, name
+            assert isinstance(v, int)  # int 边界 → 取整
+        assert np.isfinite(res.score)
+
+    def test_bayesian_alias_still_callable(self):
+        from strategy_optimizer import StrategyOptimizer
+        assert StrategyOptimizer.bayesian_optimize is \
+            StrategyOptimizer.random_sampling
+        opt = StrategyOptimizer()
+        res = opt.bayesian_optimize(self._data(),
+                                    {'short_period': (5, 20),
+                                     'long_period': (20, 60)},
+                                    n_iter=1, verbose=False)
+        assert res.parameters is not None
+
+    def test_optimize_dispatch_accepts_both_names(self):
+        from strategy_optimizer import StrategyOptimizer
+        opt = StrategyOptimizer()
+        kwargs = dict(param_bounds={'short_period': (5, 20),
+                                    'long_period': (20, 60)},
+                      n_iter=1, verbose=False)
+        r1 = opt.optimize(self._data(), method='random_sampling', **kwargs)
+        r2 = opt.optimize(self._data(), method='bayesian', **kwargs)
+        assert r1.parameters is not None and r2.parameters is not None
+
+    def test_optimization_config_has_no_dead_fields(self):
+        import dataclasses
+        from strategy_optimizer import OptimizationConfig
+        names = {f.name for f in dataclasses.fields(OptimizationConfig)}
+        assert 'cv' not in names
+        assert 'n_jobs' not in names
+        assert OptimizationConfig().target_metric == 'sharpe_ratio'
+
+    def test_module_no_unqualified_bayesian_claim(self):
+        # 源码中仅允许带更名/历史名说明的 "贝叶斯" 宣称
+        import inspect
+        import strategy_optimizer
+        src = inspect.getsource(strategy_optimizer)
+        assert '贝叶斯优化等参数优化功能' not in src
+        assert '贝叶斯优化（简化版）' not in src
+        assert '贝叶斯优化开始' not in src
+        # 诚实化后的 docstring 存在
+        assert '边界内均匀随机采样优化' in src
