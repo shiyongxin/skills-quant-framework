@@ -53,7 +53,14 @@
 财务数据含『公告日』列并显式传 `as_of`，经 `filter_point_in_time` 过滤——
 禁止用未来公告的财务数据选股。
 
-已知缺口（项 21，用户决定暂缓）：三套选股逻辑未统一，动量/价值口径并存。
+因子库统一（C-P1-11 已落地）：`factor_library.py` 是 L1 原始因子计算的
+单一真相源（动量/波动率/下行波动/最大回撤/量比 + `FACTOR_REGISTRY`
+方向元数据）。MFS 与 SS 的 raw 计算全部委托该库；**打分引擎保持分立**——
+MFS 用横截面 z-score（回答"比同池好多少"），SS 用 0-100 绝对分（回答
+"本身好不好"），二者刻度不同、`min_score` 语义不同，不合并（用户决策）。
+权重/阈值外置 JSON：`config/multi_factor.json`（factor_weights）与
+`config/stock_selector.json`（趋势阶梯/RSI 带/动量断点/量比/波动带），
+出厂值与内置默认逐位一致。`long_term_selector` 原样保留（用户决策）。
 
 ### L2 择时层（时序，日频）
 
