@@ -22,9 +22,11 @@ import numpy as np
 import akshare as ak
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
+
+import trade_constraints
 
 
 @dataclass
@@ -61,6 +63,10 @@ class StockAnalysis:
 
     # 买入建议
     recommendation: str  # STRONG_BUY/BUY/HOLD/AVOID
+
+    # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
+    executable: bool = True
+    blocked_reasons: List[str] = field(default_factory=list)
 
 
 class LongTermSelector:
@@ -279,6 +285,10 @@ class LongTermSelector:
             returns.get('return_3m', 0), returns.get('return_6m', 0)
         )
 
+        # 审计 C-P1-12: 前置可执行性检查 (中长期买入方向)
+        constraint = trade_constraints.check_last_bar(
+            df, code=code, side='buy')
+
         return StockAnalysis(
             code=code,
             name=name,
@@ -298,7 +308,9 @@ class LongTermSelector:
             short_trend=short_trend,
             mid_trend=mid_trend,
             long_trend=long_trend,
-            recommendation=recommendation
+            recommendation=recommendation,
+            executable=constraint.ok,
+            blocked_reasons=list(constraint.blocked_reasons),
         )
 
     def _calculate_total_score(self, returns: dict, ts_3m: float, ts_6m: float, ts_1y: float,
@@ -397,20 +409,28 @@ class LongTermSelector:
 
         results = []
         failed = 0
+        skipped = 0
 
         for i, (code, name) in enumerate(stock_pool.items(), 1):
             print(f'[{i}/{len(stock_pool)}] 分析 {name}({code})...', end=' ')
 
             analysis = self.analyze_stock(code, name)
-            if analysis:
-                results.append(analysis)
-                print(f'OK ({analysis.recommendation})')
-            else:
+            if analysis is None:
                 print('FAILED')
                 failed += 1
+            elif not analysis.executable:
+                # 审计 C-P1-12: 交易约束剔除不进推荐
+                reason = analysis.blocked_reasons[0] \
+                    if analysis.blocked_reasons else '不可执行'
+                print(f'SKIP ({reason})')
+                skipped += 1
+            else:
+                results.append(analysis)
+                print(f'OK ({analysis.recommendation})')
 
         print()
-        print(f'分析完成: 成功 {len(results)} 只, 失败 {failed} 只')
+        print(f'分析完成: 成功 {len(results)} 只, 失败 {failed} 只, '
+              f'约束剔除 {skipped} 只')
         print()
 
         # 按得分排序

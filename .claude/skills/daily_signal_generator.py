@@ -24,6 +24,7 @@ from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
 from core.indicators import rsi as _core_rsi, atr as _core_atr
+import trade_constraints
 
 
 # ==================== 数据结构 ====================
@@ -52,7 +53,10 @@ class StockSignal:
     # 风险指标
     atr_pct: float             # ATR占价格百分比
     distance_to_support: float # 距支撑位百分比
-    distance_to_resistance: float  # 距压力位百分比
+    distance_to_resistance: float # 距压力位百分比
+    # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
+    executable: bool = True
+    blocked_reasons: list = field(default_factory=list)
 
 
 @dataclass
@@ -470,6 +474,11 @@ class DailySignalGenerator:
 
         change_pct = (close / prev['收盘'] - 1) * 100 if prev['收盘'] > 0 else 0
 
+        # 审计 C-P1-12: 前置可执行性检查 (方向按信号取, HOLD 双向)
+        side = {'BUY': 'buy', 'SELL': 'sell'}.get(sig_result['signal'], 'both')
+        constraint = trade_constraints.check_last_bar(
+            data, code=symbol, side=side)
+
         return StockSignal(
             symbol=symbol,
             name=name,
@@ -491,6 +500,8 @@ class DailySignalGenerator:
             atr_pct=sig_result['indicators']['atr_pct'],
             distance_to_support=support_dist,
             distance_to_resistance=resist_dist,
+            executable=constraint.ok,
+            blocked_reasons=list(constraint.blocked_reasons),
         )
 
     def generate_daily_report(self, symbols: list = None,
@@ -543,6 +554,16 @@ class DailySignalGenerator:
         # 按信号强度排序
         signals.sort(key=lambda s: abs(s.signal_strength), reverse=True)
 
+        # 审计 C-P1-12: 不可执行信号不进推荐列表 (total_analyzed 仍记分析数)
+        analyzed_count = len(signals)
+        executable_signals = [
+            s for s in signals if getattr(s, 'executable', True)]
+        blocked_n = analyzed_count - len(executable_signals)
+        if blocked_n:
+            print(f"[INFO] 交易约束过滤 (C-P1-12): {blocked_n} 只因"
+                  f"停牌/涨跌停/流动性被剔除")
+        signals = executable_signals
+
         # 体制切换预警
         alert = self._check_regime_switch()
 
@@ -552,7 +573,7 @@ class DailySignalGenerator:
             regime_cn=regime_cn,
             system_used=self.get_system_name_for_regime(regime),
             system_description=self.systems.get(regime, {}).get('description', ''),
-            total_analyzed=len(signals),
+            total_analyzed=analyzed_count,
             signals=signals,
             regime_switch_alert=alert,
             timestamp=datetime.now().isoformat(),

@@ -9,6 +9,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+import trade_constraints
+
 
 class SignalGenerator:
     """信号生成器类"""
@@ -331,6 +333,9 @@ class SignalGenerator:
         df = self.generate_signals(data)
         latest = df.iloc[-1]
 
+        # 审计 C-P1-12: 前置可执行性检查 (本 API 无 symbol → 一字板记 skipped)
+        report = trade_constraints.check_last_bar(df, code=None, side='both')
+
         return {
             'date': latest.name if hasattr(latest.name, 'strftime') else latest['日期'],
             'price': latest['收盘'],
@@ -343,7 +348,10 @@ class SignalGenerator:
             'rsi': latest['signal_rsi'],
             'bb': latest['signal_bb'],
             'volume': latest['signal_volume'],
-            'breakout': latest['signal_breakout']
+            'breakout': latest['signal_breakout'],
+            'executable': report.ok,
+            'blocked_reasons': list(report.blocked_reasons),
+            'skipped_checks': list(report.skipped_checks),
         }
 
     def format_signal_report(self, signal_info):
@@ -419,6 +427,14 @@ class SignalGenerator:
             lines.append(f"  突破: 卖出 (跌破新低)")
         else:
             lines.append(f"  突破: 无明显突破")
+
+        # 审计 C-P1-12: 可执行性阻断提示 (仅在存在阻断时输出)
+        blocked = signal_info.get('blocked_reasons') or []
+        if blocked:
+            lines.append("")
+            lines.append("可执行性检查 (C-P1-12):")
+            for reason in blocked:
+                lines.append(f"  [阻断] {reason}")
 
         lines.append("")
         lines.append("=" * 60)

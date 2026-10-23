@@ -22,7 +22,7 @@ import numpy as np
 import akshare as ak
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -30,6 +30,7 @@ from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
     decide_action,
 )
+import trade_constraints
 
 
 @dataclass
@@ -56,6 +57,10 @@ class ReversalAlert:
 
     # 操作建议
     action: str
+
+    # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
+    executable: bool = True
+    blocked_reasons: List[str] = field(default_factory=list)
 
 
 class ReversalDetector:
@@ -280,6 +285,11 @@ class ReversalDetector:
         else:
             action = '继续观望'
 
+        # 审计 C-P1-12: 前置可执行性检查 (方向按预警类型)
+        side = {'BUY': 'buy', 'SELL': 'sell'}.get(alert_type, 'both')
+        constraint = trade_constraints.check_last_bar(
+            df, code=code, side=side)
+
         return ReversalAlert(
             code=code,
             name=name,
@@ -289,7 +299,9 @@ class ReversalDetector:
             confidence=total_score,
             timing=timing,
             risk_note=risk_note,
-            action=action
+            action=action,
+            executable=constraint.ok,
+            blocked_reasons=list(constraint.blocked_reasons),
         )
 
     def analyze_stocks(self, stock_pool: Dict[str, str]) -> List[ReversalAlert]:
@@ -308,9 +320,14 @@ class ReversalDetector:
             print(f'[{i}/{len(stock_pool)}] 分析 {name}({code})...', end=' ')
 
             alert = self.analyze_reversal(code, name)
-            if alert:
+            if alert and alert.executable:
                 results.append(alert)
                 print(f'{alert.alert_type} ({alert.confidence:.0f}分)')
+            elif alert:
+                # 审计 C-P1-12: 交易约束剔除不进预警列表
+                reason = alert.blocked_reasons[0] \
+                    if alert.blocked_reasons else '不可执行'
+                print(f'SKIP ({reason})')
             else:
                 print('FAILED')
 

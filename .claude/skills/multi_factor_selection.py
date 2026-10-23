@@ -18,6 +18,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import factor_library
+import trade_constraints
 
 
 def filter_point_in_time(financial_df: pd.DataFrame, as_of) -> pd.DataFrame:
@@ -858,6 +859,18 @@ class MultiFactorSelector:
         # 计算综合得分
         composite_score = self.get_composite_score(factors_df, returns)
         factors_df['Composite_Score'] = composite_score
+
+        # 审计 C-P1-12: 收盘面板前置过滤 (min_price + 最新交易日缺数据;
+        # 一字板需高低价、ADV 需成交额 — 仅收盘面板时不伪造检查)。
+        # 在排序/截断前过滤, 保证 top_n 由可执行标的填满。
+        if price_df is not None and len(factors_df) > 0:
+            panel = FactorModels._price_cross_section(price_df)
+            if panel is not None and len(panel) > 0:
+                keep, _ = trade_constraints.check_close_panel(panel)
+                drop = [c for c in factors_df.index
+                        if c in keep.index and not keep[c]]
+                if drop:
+                    factors_df = factors_df.drop(index=drop)
 
         # 排序
         factors_df = factors_df.sort_values('Composite_Score', ascending=False)

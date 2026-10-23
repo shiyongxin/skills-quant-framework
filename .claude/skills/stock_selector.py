@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer
 import factor_library
+import trade_constraints
 
 # 打分内置默认 (与 config/stock_selector.json 出厂值逐位一致; 配置文件缺失时的回退)
 DEFAULT_SCORE_CONFIG = {
@@ -72,6 +73,11 @@ class StockSelector:
                 if data is None or len(data) < 40:
                     continue
 
+                # 审计 C-P1-12: 前置过滤 — 一字涨停/停牌嫌疑/最低价不进推荐
+                if not trade_constraints.check_last_bar(
+                        data, code=symbol, side='buy').ok:
+                    continue
+
                 latest = data.iloc[-1]
                 score = self._calculate_stock_score(data, latest)
 
@@ -108,6 +114,11 @@ class StockSelector:
             try:
                 data = self.analyzer.get_stock_data(symbol, days=60)
                 if data is None or len(data) < 40:
+                    continue
+
+                # 审计 C-P1-12: 前置过滤 — 一字涨停/停牌嫌疑/最低价不进推荐
+                if not trade_constraints.check_last_bar(
+                        data, code=symbol, side='buy').ok:
                     continue
 
                 latest = data.iloc[-1]

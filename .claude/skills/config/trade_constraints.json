@@ -1,0 +1,7 @@
+{
+  "min_price": 1.0,
+  "min_adv_amount": 0.0,
+  "max_adv_participation": 0.1,
+  "min_market_cap": null,
+  "max_stale_days": null
+}

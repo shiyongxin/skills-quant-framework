@@ -11,10 +11,11 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import warnings
 
 from core.indicators import rsi as _core_rsi
+import trade_constraints
 
 try:
     from sklearn.model_selection import cross_val_score, GridSearchCV, TimeSeriesSplit
@@ -72,6 +73,9 @@ class PredictionResult:
     probability: float  # 预测概率
     confidence: float  # 置信度
     features: Dict[str, float]  # 特征值
+    # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
+    executable: bool = True
+    blocked_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -438,13 +442,20 @@ class MLPredictor:
         # 特征值
         feature_values = {col: latest[0][i] for i, col in enumerate(feature_cols)}
 
+        # 审计 C-P1-12: 预测照常输出, 附可执行性标注 (方向按预测;
+        # 数据无 symbol 列 → 一字板记 skipped)
+        side = {'up': 'buy', 'down': 'sell'}.get(prediction_str, 'both')
+        constraint = trade_constraints.check_last_bar(data, code=None, side=side)
+
         return PredictionResult(
             symbol=data.get('symbol', ['UNKNOWN'])[0] if 'symbol' in data.columns else 'UNKNOWN',
             date=data['日期'].iloc[-1] if '日期' in data.columns else datetime.now(),
             prediction=prediction_str,
             probability=probability,
             confidence=confidence,
-            features=feature_values
+            features=feature_values,
+            executable=constraint.ok,
+            blocked_reasons=list(constraint.blocked_reasons),
         )
 
     def predict_batch(self, data_dict: Dict[str, pd.DataFrame]) -> Dict[str, PredictionResult]:
