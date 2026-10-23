@@ -13,19 +13,44 @@ from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer
 import factor_library
 
+# 打分内置默认 (与 config/stock_selector.json 出厂值逐位一致; 配置文件缺失时的回退)
+DEFAULT_SCORE_CONFIG = {
+    'trend_points': [30, 25, 20, 10, 5],
+    'macd_both_positive_points': 20,
+    'macd_bullish_cross_points': 10,
+    'rsi_sweet_band': [40, 65],
+    'rsi_sweet_points': 15,
+    'rsi_oversold_deep_max': 30,
+    'rsi_oversold_deep_points': 10,
+    'rsi_oversold_max': 40,
+    'rsi_oversold_points': 8,
+    'momentum_20d_breakpoints_pct': [10, 5, 0],
+    'momentum_20d_points': [15, 12, 8],
+    'volume_surge_ratio': 1.2,
+    'volume_surge_points': 10,
+    'volume_above_avg_points': 5,
+    'volatility_annualized_band_pct': [15, 40],
+    'volatility_in_band_points': 10,
+    'volatility_low_points': 6,
+}
+
 
 class StockSelector:
     """选股类"""
 
-    def __init__(self, fetcher=None):
+    def __init__(self, fetcher=None, config: dict = None):
         """
         初始化
 
         Args:
             fetcher: StockDataFetcher实例
+            config: 打分配置 dict; None 时读 config/stock_selector.json (C-P1-11 Step2),
+                配置缺失回退内置默认 (与历史硬编码逐位一致)
         """
         self.fetcher = fetcher if fetcher else StockDataFetcher()
         self.analyzer = PositionAnalyzer(fetcher)
+        self.score_config = config if config is not None else (
+            factor_library.load_config('stock_selector') or DEFAULT_SCORE_CONFIG)
 
     def screen_stocks(self, stock_list, min_score=60, max_count=5):
         """
@@ -174,60 +199,65 @@ class StockSelector:
         return ranked[:count]
 
     def _calculate_stock_score(self, data, latest):
-        """计算股票综合评分"""
+        """计算股票综合评分 (数值读 self.score_config, 控制流留代码)"""
+        cfg = self.score_config
         score = 0
-        close = data['收盘']
         current_price = latest['收盘']
 
-        # 1. 趋势评分 (30分)
+        # 1. 趋势评分
+        tp = cfg['trend_points']
         if current_price > latest['MA5'] > latest['MA10'] > latest['MA20']:
-            score += 30
+            score += tp[0]
         elif current_price > latest['MA5'] > latest['MA20']:
-            score += 25
+            score += tp[1]
         elif current_price > latest['MA20']:
-            score += 20
+            score += tp[2]
         elif latest['MA5'] > latest['MA20']:
-            score += 10
+            score += tp[3]
         elif current_price > latest['MA60']:
-            score += 5
+            score += tp[4]
 
-        # 2. MACD评分 (20分)
+        # 2. MACD评分
         if latest['MACD'] > 0 and latest['MACD_Signal'] > 0:
-            score += 20
+            score += cfg['macd_both_positive_points']
         elif latest['MACD'] > latest['MACD_Signal']:
-            score += 10
+            score += cfg['macd_bullish_cross_points']
 
-        # 3. RSI评分 (15分)
+        # 3. RSI评分
         rsi = latest['RSI']
-        if 40 <= rsi <= 65:
-            score += 15
-        elif rsi < 30:
-            score += 10
-        elif rsi < 40:
-            score += 8
+        band_lo, band_hi = cfg['rsi_sweet_band']
+        if band_lo <= rsi <= band_hi:
+            score += cfg['rsi_sweet_points']
+        elif rsi < cfg['rsi_oversold_deep_max']:
+            score += cfg['rsi_oversold_deep_points']
+        elif rsi < cfg['rsi_oversold_max']:
+            score += cfg['rsi_oversold_points']
 
-        # 4. 近期表现 (15分)
+        # 4. 近期表现 (20日动量)
         change_20d = factor_library.momentum_pct(data['收盘'], 20)
-        if change_20d > 10:
-            score += 15
-        elif change_20d > 5:
-            score += 12
-        elif change_20d > 0:
-            score += 8
+        bp = cfg['momentum_20d_breakpoints_pct']
+        pts = cfg['momentum_20d_points']
+        if change_20d > bp[0]:
+            score += pts[0]
+        elif change_20d > bp[1]:
+            score += pts[1]
+        elif change_20d > bp[2]:
+            score += pts[2]
 
-        # 5. 成交量 (10分)
+        # 5. 成交量
         vol_ma5 = factor_library.volume_ma(data['成交量'], 5)
-        if latest['成交量'] > vol_ma5 * 1.2:
-            score += 10
+        if latest['成交量'] > vol_ma5 * cfg['volume_surge_ratio']:
+            score += cfg['volume_surge_points']
         elif latest['成交量'] > vol_ma5:
-            score += 5
+            score += cfg['volume_above_avg_points']
 
-        # 6. 波动率控制 (10分) - 不喜欢过高波动
+        # 6. 波动率控制 - 不喜欢过高波动
         volatility = factor_library.annualized_volatility_pct(data['收盘'])
-        if 15 <= volatility <= 40:
-            score += 10
-        elif volatility < 15:
-            score += 6
+        vol_lo, vol_hi = cfg['volatility_annualized_band_pct']
+        if vol_lo <= volatility <= vol_hi:
+            score += cfg['volatility_in_band_points']
+        elif volatility < vol_lo:
+            score += cfg['volatility_low_points']
 
         return min(score, 100)
 

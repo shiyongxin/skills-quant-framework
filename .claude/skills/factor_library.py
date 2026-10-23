@@ -27,12 +27,26 @@ Volatility/Downside_Vol 取负后"越高越好", 而 Max_Drawdown 以正值幅�
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import json
+import os
+
 import numpy as np
 import pandas as pd
 
 HIGHER_BETTER = 'higher_better'
 LOWER_BETTER = 'lower_better'
 BAND = 'band'
+
+_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config')
+
+
+def load_config(name: str) -> Optional[Dict]:
+    """加载 .claude/skills/config/{name}.json; 文件缺失返回 None (调用方回退内置默认)。"""
+    path = os.path.join(_CONFIG_DIR, f'{name}.json')
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
 
 
 @dataclass(frozen=True)

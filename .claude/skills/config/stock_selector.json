@@ -1,0 +1,20 @@
+{
+  "_comment": "stock_selector 绝对分打分配置 (C-P1-11 Step2). 出厂值与历史硬编码逐位一致; 控制流(if/elif 阶梯)留在代码, 只外置数值.",
+  "trend_points": [30, 25, 20, 10, 5],
+  "macd_both_positive_points": 20,
+  "macd_bullish_cross_points": 10,
+  "rsi_sweet_band": [40, 65],
+  "rsi_sweet_points": 15,
+  "rsi_oversold_deep_max": 30,
+  "rsi_oversold_deep_points": 10,
+  "rsi_oversold_max": 40,
+  "rsi_oversold_points": 8,
+  "momentum_20d_breakpoints_pct": [10, 5, 0],
+  "momentum_20d_points": [15, 12, 8],
+  "volume_surge_ratio": 1.2,
+  "volume_surge_points": 10,
+  "volume_above_avg_points": 5,
+  "volatility_annualized_band_pct": [15, 40],
+  "volatility_in_band_points": 10,
+  "volatility_low_points": 6
+}

@@ -212,7 +212,8 @@ class TestSSBehaviorEquivalence:
             score += 6
         return min(score, 100)
 
-    def _make_ss_data(self, n=100, seed=3):
+    @staticmethod
+    def _make_ss_data(n=100, seed=3):
         close = _make_close(n=n, seed=seed, sigma=0.015)
         rng = np.random.default_rng(seed)
         data = pd.DataFrame({
@@ -229,8 +230,9 @@ class TestSSBehaviorEquivalence:
         return data.dropna()
 
     def test_score_matches_legacy_across_seeds(self):
-        from stock_selector import StockSelector
+        from stock_selector import StockSelector, DEFAULT_SCORE_CONFIG
         ss = StockSelector.__new__(StockSelector)  # 跳过网络依赖的 __init__
+        ss.score_config = DEFAULT_SCORE_CONFIG
         for seed in range(8):
             data = self._make_ss_data(seed=seed)
             latest = data.iloc[-1]
@@ -238,8 +240,9 @@ class TestSSBehaviorEquivalence:
                 self._legacy_score(data, latest), f'seed={seed} 分数漂移'
 
     def test_score_boundary_cases(self):
-        from stock_selector import StockSelector
+        from stock_selector import StockSelector, DEFAULT_SCORE_CONFIG
         ss = StockSelector.__new__(StockSelector)
+        ss.score_config = DEFAULT_SCORE_CONFIG
         data = self._make_ss_data(seed=99)
         # 构造 RSI 边界: 40 / 65 / 29 / 39
         for rsi, expected_rsi_pts in [(40, 15), (65, 15), (29, 10), (39, 8), (66, 0)]:
@@ -247,3 +250,59 @@ class TestSSBehaviorEquivalence:
             latest = data.iloc[-1]
             legacy = self._legacy_score(data, latest)
             assert ss._calculate_stock_score(data, latest) == legacy
+
+
+class TestJSONConfig:
+    """Step2: JSON 配置外置 — 出厂值与内置默认逐位一致, 配置可覆盖"""
+
+    def test_stock_selector_config_matches_builtin(self):
+        from stock_selector import DEFAULT_SCORE_CONFIG
+        cfg = fl.load_config('stock_selector')
+        assert cfg is not None
+        for key, val in DEFAULT_SCORE_CONFIG.items():
+            assert cfg[key] == val, f'{key} 出厂值与内置默认漂移'
+
+    def test_multi_factor_config_matches_builtin(self):
+        cfg = fl.load_config('multi_factor')
+        assert cfg is not None
+        assert cfg['weighting_method'] == 'custom'
+        assert cfg['factor_weights'] == {
+            'value': 0.25, 'growth': 0.25, 'quality': 0.25,
+            'momentum': 0.15, 'volatility': 0.10}
+
+    def test_mfs_ctor_reads_config(self):
+        from multi_factor_selection import MultiFactorSelector
+        sel = MultiFactorSelector()
+        assert sel.weighting_method == 'custom'
+        assert sel.factor_weights['momentum'] == 0.15
+
+    def test_mfs_ctor_explicit_args_override_config(self):
+        from multi_factor_selection import MultiFactorSelector
+        sel = MultiFactorSelector(factor_weights={'value': 1.0},
+                                  weighting_method='equal')
+        assert sel.factor_weights == {'value': 1.0}
+        assert sel.weighting_method == 'equal'
+
+    def test_ss_custom_config_changes_score(self):
+        from stock_selector import StockSelector, DEFAULT_SCORE_CONFIG
+        data = TestSSBehaviorEquivalence._make_ss_data(seed=5)
+        latest = data.iloc[-1]
+
+        ss_default = StockSelector.__new__(StockSelector)
+        ss_default.score_config = DEFAULT_SCORE_CONFIG
+        base = ss_default._calculate_stock_score(data, latest)
+
+        # 把 RSI sweet points 从 15 提到 15+X, 分数应同步变化 (若当前落在 sweet 档)
+        boosted = dict(DEFAULT_SCORE_CONFIG)
+        boosted['rsi_sweet_points'] = 15 + 10
+        ss_boosted = StockSelector.__new__(StockSelector)
+        ss_boosted.score_config = boosted
+        new_score = ss_boosted._calculate_stock_score(data, latest)
+        rsi = latest['RSI']
+        if 40 <= rsi <= 65:
+            assert new_score == base + 10
+        else:
+            assert new_score == base
+
+    def test_load_config_missing_returns_none(self):
+        assert fl.load_config('nonexistent_module') is None

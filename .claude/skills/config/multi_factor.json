@@ -1,0 +1,11 @@
+{
+  "_comment": "multi_factor_selection 因子权重配置 (C-P1-11 Step2). 出厂值与 MultiFactorSelector ctor 默认逐位一致; ctor 传 factor_weights 参数时以参数为准.",
+  "weighting_method": "custom",
+  "factor_weights": {
+    "value": 0.25,
+    "growth": 0.25,
+    "quality": 0.25,
+    "momentum": 0.15,
+    "volatility": 0.10
+  }
+}

@@ -678,23 +678,30 @@ class MultiFactorSelector:
     """多因子选股器 - 增强版"""
 
     def __init__(self, factor_weights: Dict[str, float] = None,
-                 weighting_method: str = 'custom'):
+                 weighting_method: str = None):
         """
         初始化多因子选股器
 
         Args:
             factor_weights: 因子权重，如 {'value': 0.3, 'growth': 0.3, 'quality': 0.2, 'momentum': 0.2}
+                None 时读 config/multi_factor.json (C-P1-11 Step2); 配置缺失回退内置默认
             weighting_method: 加权方法 ('custom' 使用 factor_weights 配置[默认],
                 'equal' 等权, 'ic', 'ir', 'max_sharpe', 'risk_parity')
+                None 时读配置文件; 配置缺失回退 'custom'
         """
+        cfg = factor_library.load_config('multi_factor') or {}
+
         if factor_weights is None:
-            factor_weights = {
+            factor_weights = cfg.get('factor_weights') or {
                 'value': 0.25,
                 'growth': 0.25,
                 'quality': 0.25,
                 'momentum': 0.15,
                 'volatility': 0.10
             }
+
+        if weighting_method is None:
+            weighting_method = cfg.get('weighting_method') or 'custom'
 
         self.factor_weights = factor_weights
         self.weighting_method = weighting_method
