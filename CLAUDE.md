@@ -89,7 +89,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 **Orchestration / utilities**
 - `quant_workflow.py` — `QuantWorkflow` class wires all 7 stages end-to-end
 - `position_analyzer.py` — analyzes an existing portfolio CSV
-- `parameter_space.py` / `optimization_config.py` / `optimization_engine.py` — optuna-style search
+- `parameter_space.py` / `optimization_config.py` / `optimization_engine.py` — optuna-style search (engine 真读配置: `OptimizationEngine(config=)` / CLI `run --config x.json`, 优先级: 显式 CLI 参数 > config.* > 阶段分档默认; 子命令 > config.mode)
 
 ## 7-Stage Pipeline (in `quant_workflow.py`)
 

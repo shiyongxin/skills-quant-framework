@@ -26,7 +26,8 @@ from parameter_space import ParameterSpace
 from vectorized_backtest import (VectorizedBacktester, BacktestMetrics,
                                  metrics_from_trades)
 from historical_data_manager import HistoricalDataManager
-from optimization_config import FitnessConfig
+from optimization_config import (FitnessConfig, WalkForwardConfig,
+                                 OptimizationConfig)
 
 
 # ==================== 数据结构 ====================
@@ -83,7 +84,7 @@ class FitnessEvaluator:
 
     def __init__(self, backtester=None, target_return=None,
                  target_probability=None, max_drawdown_limit=None,
-                 fitness_config=None):
+                 fitness_config=None, walk_forward_config=None):
         """
         Parameters:
         -----------
@@ -96,9 +97,13 @@ class FitnessEvaluator:
         fitness_config : FitnessConfig or None
             适应度权重来源 (w_target_rate/w_return/w_sharpe/w_drawdown) —
             旧实现这4个权重硬编码于 _compute_fitness, 配置字段恒死参数
+        walk_forward_config : WalkForwardConfig or None
+            Walk-Forward 窗口 (train/test/step_days) — 旧实现硬编码于
+            evaluate() (审计 E-P1 接线: 配置成为真相源)
         """
         cfg = fitness_config or FitnessConfig()
         self.backtester = backtester or VectorizedBacktester()
+        self.walk_forward_config = walk_forward_config or WalkForwardConfig()
         self.target_return = cfg.target_return if target_return is None else target_return
         self.target_probability = cfg.target_probability if target_probability is None else target_probability
         self.max_drawdown_limit = cfg.max_drawdown_limit if max_drawdown_limit is None else max_drawdown_limit
@@ -146,9 +151,11 @@ class FitnessEvaluator:
                     )
                     all_metrics.extend(metrics_list)
                 else:
-                    # Walk-Forward回测
+                    # Walk-Forward回测 (窗口来自 walk_forward_config, 审计 E-P1 接线)
+                    wf = self.walk_forward_config
                     metrics_list = self.backtester.walk_forward(
-                        data, params, train_days=504, test_days=180, step_days=63
+                        data, params, train_days=wf.train_days,
+                        test_days=wf.test_days, step_days=wf.step_days
                     )
                     all_metrics.extend(metrics_list)
             except Exception:
@@ -555,7 +562,8 @@ class OptimizationEngine:
     阶段3: 混合策略优化 → 跨体制稳健参数
     """
 
-    def __init__(self, data_dir="./stock_data", n_workers=4, seed=None):
+    def __init__(self, data_dir="./stock_data", n_workers=4, seed=None,
+                 config=None):
         """
         Parameters:
         -----------
@@ -567,10 +575,19 @@ class OptimizationEngine:
             随机种子 (E-P0-3): 同 seed 同数据 → 结果逐位可复现。
             各阶段(global/regime/robust/iterative)由 seed+阶段名派生
             独立子流, 与调用顺序无关; None 时保持非确定性。
+        config : OptimizationConfig or None
+            显式优化配置 (审计 E-P1 影子配置接线)。提供时 config 作为
+            ga/fitness/walk_forward/iterative_rounds 的真相源; 优先级:
+            CLI 显式参数 (ga_params, 如 --pop/--gen) > config.* > 阶段分档
+            默认。None 时全部走引擎内省默认 — 既有调用行为逐位不变。
         """
         self.data_manager = HistoricalDataManager(data_dir)
         self.backtester = VectorizedBacktester()
-        self.evaluator = FitnessEvaluator(self.backtester)
+        self.config = config
+        self.evaluator = FitnessEvaluator(
+            self.backtester,
+            fitness_config=config.fitness if config else None,
+            walk_forward_config=config.walk_forward if config else None)
         self.n_workers = n_workers
         self.seed = seed
         self._ga_runs = []  # 各阶段GA运行元数据, save_results 落盘
@@ -578,6 +595,48 @@ class OptimizationEngine:
         self.results = {}       # {regime: OptimizationResult}
         self.stock_data = {}    # {symbol: DataFrame}
         self.regime_labels = {} # {symbol: pd.Series}
+
+    def _merge_ga_cfg(self, stage_cfg: dict, ga_params=None) -> dict:
+        """阶段 GA 默认 × config.ga × 显式参数 三级合并 (审计 E-P1 接线)。
+
+        优先级: ga_params (CLI --pop/--gen 显式) > config.ga (8 键单档基线,
+        与 GeneticAlgorithm 形参同名同默认) > stage_cfg (阶段分档默认)。
+        无 config 且无 ga_params 时原样返回阶段分档 — 零回归。
+        """
+        merged = dict(stage_cfg)
+        if self.config is not None:
+            ga = self.config.ga
+            merged.update({
+                'population_size': ga.population_size,
+                'max_generations': ga.max_generations,
+                'tournament_size': ga.tournament_size,
+                'crossover_rate': ga.crossover_rate,
+                'mutation_rate': ga.mutation_rate,
+                'elite_ratio': ga.elite_ratio,
+                'convergence_threshold': ga.convergence_threshold,
+                'convergence_tolerance': ga.convergence_tolerance,
+            })
+        if ga_params:
+            merged.update(ga_params)
+        return merged
+
+    def _iterative_round_configs(self) -> list:
+        """多轮迭代各轮 GA 配置。config.iterative_rounds 存在时为真相源
+        (dataclass→dict); 否则用引擎内省默认 (两者出厂值逐位相同)。"""
+        if self.config is not None and self.config.iterative_rounds:
+            return [{'population_size': r.population_size,
+                     'max_generations': r.max_generations,
+                     'convergence_threshold': r.convergence_threshold,
+                     'mutation_rate': r.mutation_rate}
+                    for r in self.config.iterative_rounds]
+        return [
+            {'population_size': 40, 'max_generations': 15,
+             'convergence_threshold': 5, 'mutation_rate': 0.25},
+            {'population_size': 60, 'max_generations': 25,
+             'convergence_threshold': 6, 'mutation_rate': 0.18},
+            {'population_size': 100, 'max_generations': 40,
+             'convergence_threshold': 8, 'mutation_rate': 0.12},
+        ]
 
     def load_data(self, symbols=None, min_history_days=5000,
                   regime_labels_file=None):
@@ -699,14 +758,12 @@ class OptimizationEngine:
         if self.seed is not None:
             print(f"  随机种子: {self.seed} (阶段: global)")
 
-        # GA配置
-        ga_cfg = {
+        # GA配置 (阶段分档 × config × CLI 显式, 三级合并)
+        ga_cfg = self._merge_ga_cfg({
             'population_size': 80,
             'max_generations': 40,
             'convergence_threshold': 8,
-        }
-        if ga_params:
-            ga_cfg.update(ga_params)
+        }, ga_params)
 
         # 评估函数 (计数, 落盘用)
         evals = {'n': 0}
@@ -802,13 +859,11 @@ class OptimizationEngine:
         if self.seed is not None:
             print(f"  随机种子: {self.seed} (阶段: regime)")
 
-        ga_cfg = {
+        ga_cfg = self._merge_ga_cfg({
             'population_size': 60,
             'max_generations': 30,
             'convergence_threshold': 6,
-        }
-        if ga_params:
-            ga_cfg.update(ga_params)
+        }, ga_params)
 
         results = {}
 
@@ -904,13 +959,11 @@ class OptimizationEngine:
         if self.seed is not None:
             print(f"  随机种子: {self.seed} (阶段: robust)")
 
-        ga_cfg = {
+        ga_cfg = self._merge_ga_cfg({
             'population_size': 80,
             'max_generations': 40,
             'convergence_threshold': 8,
-        }
-        if ga_params:
-            ga_cfg.update(ga_params)
+        }, ga_params)
 
         evals = {'n': 0}
 
@@ -1020,15 +1073,8 @@ class OptimizationEngine:
         if self.seed is not None:
             print(f"  随机种子: {self.seed} (阶段: iterative)")
 
-        # 各轮配置
-        round_configs = [
-            {'population_size': 40, 'max_generations': 15,
-             'convergence_threshold': 5, 'mutation_rate': 0.25},
-            {'population_size': 60, 'max_generations': 25,
-             'convergence_threshold': 6, 'mutation_rate': 0.18},
-            {'population_size': 100, 'max_generations': 40,
-             'convergence_threshold': 8, 'mutation_rate': 0.12},
-        ]
+        # 各轮配置 (config.iterative_rounds 为真相源; 出厂值=内省默认)
+        round_configs = self._iterative_round_configs()
 
         all_round_results = []
         seed_params = None
@@ -1217,6 +1263,9 @@ class OptimizationEngine:
         output = {
             'timestamp': datetime.now().isoformat(),
             'seed': self.seed,
+            'config': ({'name': self.config.name, 'mode': self.config.mode,
+                        'version': self.config.version}
+                       if self.config is not None else None),
             'n_stocks': len(self.stock_data),
             'data_start': str(data_start) if data_start is not None else None,
             'data_end': str(data_end) if data_end is not None else None,
@@ -1293,7 +1342,7 @@ class OptimizationEngine:
 
 # ==================== CLI ====================
 
-def main():
+def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(description='遗传算法优化引擎')
@@ -1302,38 +1351,48 @@ def main():
     # global: 全局优化
     p_global = subparsers.add_parser('global', help='全局优化')
     p_global.add_argument('--n-stocks', type=int, default=50, help='抽样股票数')
-    p_global.add_argument('--pop', type=int, default=80, help='种群大小')
-    p_global.add_argument('--gen', type=int, default=40, help='最大代数')
-    p_global.add_argument('--regime-labels', default='stock_data/regime_labels.csv',
-                         help='体制标签文件')
+    p_global.add_argument('--pop', type=int, default=None,
+                          help='种群大小 (默认: 阶段分档 80; --config 时 config.ga)')
+    p_global.add_argument('--gen', type=int, default=None,
+                          help='最大代数 (默认: 阶段分档 40; --config 时 config.ga)')
+    p_global.add_argument('--regime-labels', default=None,
+                         help='体制标签文件 (默认: stock_data/regime_labels.csv; '
+                              '--config 时 config.data.regime_labels_file)')
     p_global.add_argument('--save', default='stock_data/optimization_result.json',
                          help='保存路径')
 
     # regime: 按体制优化
     p_regime = subparsers.add_parser('regime', help='按体制分别优化')
     p_regime.add_argument('--n-stocks', type=int, default=50, help='抽样股票数')
-    p_regime.add_argument('--pop', type=int, default=60, help='种群大小')
-    p_regime.add_argument('--gen', type=int, default=30, help='最大代数')
-    p_regime.add_argument('--regime-labels', default='stock_data/regime_labels.csv',
-                         help='体制标签文件')
+    p_regime.add_argument('--pop', type=int, default=None,
+                          help='种群大小 (默认: 阶段分档 60; --config 时 config.ga)')
+    p_regime.add_argument('--gen', type=int, default=None,
+                          help='最大代数 (默认: 阶段分档 30; --config 时 config.ga)')
+    p_regime.add_argument('--regime-labels', default=None,
+                         help='体制标签文件 (默认: stock_data/regime_labels.csv; '
+                              '--config 时 config.data.regime_labels_file)')
     p_regime.add_argument('--save', default='stock_data/optimization_result.json',
                          help='保存路径')
 
     # robust: 稳健优化
     p_robust = subparsers.add_parser('robust', help='稳健策略优化')
     p_robust.add_argument('--n-stocks', type=int, default=50, help='抽样股票数')
-    p_robust.add_argument('--pop', type=int, default=80, help='种群大小')
-    p_robust.add_argument('--gen', type=int, default=40, help='最大代数')
-    p_robust.add_argument('--regime-labels', default='stock_data/regime_labels.csv',
-                         help='体制标签文件')
+    p_robust.add_argument('--pop', type=int, default=None,
+                          help='种群大小 (默认: 阶段分档 80; --config 时 config.ga)')
+    p_robust.add_argument('--gen', type=int, default=None,
+                          help='最大代数 (默认: 阶段分档 40; --config 时 config.ga)')
+    p_robust.add_argument('--regime-labels', default=None,
+                         help='体制标签文件 (默认: stock_data/regime_labels.csv; '
+                              '--config 时 config.data.regime_labels_file)')
     p_robust.add_argument('--save', default='stock_data/optimization_result.json',
                          help='保存路径')
 
     # full: 完整优化流程 (全局+体制+稳健+迭代)
     p_full = subparsers.add_parser('full', help='完整优化流程')
     p_full.add_argument('--n-stocks', type=int, default=50, help='抽样股票数')
-    p_full.add_argument('--regime-labels', default='stock_data/regime_labels.csv',
-                        help='体制标签文件')
+    p_full.add_argument('--regime-labels', default=None,
+                        help='体制标签文件 (默认: stock_data/regime_labels.csv; '
+                             '--config 时 config.data.regime_labels_file)')
     p_full.add_argument('--save', default='stock_data/optimization_result.json',
                         help='保存路径')
 
@@ -1344,30 +1403,76 @@ def main():
     p_iter.add_argument('--save', default='stock_data/optimization_result.json',
                         help='保存路径')
 
-    # E-P0-3: 所有子命令支持 --seed (默认42 → 命令行运行默认可复现)
-    for _p in (p_global, p_regime, p_robust, p_full, p_iter):
+    # run: 按配置文件运行 (config-first, 审计 E-P1 接线)
+    p_run = subparsers.add_parser(
+        'run', help='按 OptimizationConfig 的 mode/数据/GA/迭代轮次完整运行')
+    p_run.add_argument('--save', default='stock_data/optimization_result.json',
+                       help='保存路径')
+
+    # E-P0-3: 所有子命令支持 --seed (默认42 → 命令行运行默认可复现);
+    # E-P1: 所有子命令支持 --config (config 为 ga/fitness/walk_forward/
+    # iterative_rounds 真相源; 子命令 > config.mode, run 子命令除外)
+    for _p in (p_global, p_regime, p_robust, p_full, p_iter, p_run):
         _p.add_argument('--seed', type=int, default=42,
                         help='随机种子 (同种子同数据可复现)')
+        _p.add_argument('--config', default=None,
+                        help='OptimizationConfig JSON 路径 (python '
+                             'optimization_config.py create --preset ... 生成)')
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.command:
         parser.print_help()
         return
 
-    engine = OptimizationEngine(seed=args.seed)
+    cfg = OptimizationConfig.load(args.config) if args.config else None
+    engine = OptimizationEngine(seed=args.seed, config=cfg)
 
     if args.command in ('global', 'regime', 'robust', 'full', 'iterative'):
+        # 体制标签优先级: 显式 --regime-labels > config.data > 旧默认路径
         labels_file = getattr(args, 'regime_labels', None)
+        if labels_file is None:
+            labels_file = (cfg.data.regime_labels_file if cfg is not None
+                           else 'stock_data/regime_labels.csv')
         engine.load_data(regime_labels_file=labels_file)
 
     ga_params = {}
-    if hasattr(args, 'pop'):
+    if getattr(args, 'pop', None) is not None:
         ga_params['population_size'] = args.pop
-    if hasattr(args, 'gen'):
+    if getattr(args, 'gen', None) is not None:
         ga_params['max_generations'] = args.gen
 
-    if args.command == 'global':
+    if args.command == 'run':
+        if cfg is None:
+            print("[ERROR] run 子命令需要 --config <OptimizationConfig JSON>; "
+                  "可用 python optimization_config.py create --preset quick 生成")
+            return
+        mode = cfg.mode
+        n_stocks = cfg.data.stock_sample_size
+        engine.load_data(regime_labels_file=cfg.data.regime_labels_file)
+        print(f"[INFO] run: config={cfg.name} mode={mode} n_stocks={n_stocks}")
+        if mode == 'global':
+            engine.optimize_global(n_stocks=n_stocks)
+        elif mode == 'regime':
+            engine.optimize_by_regime(n_stocks=n_stocks)
+        elif mode == 'robust':
+            engine.optimize_robust(n_stocks=n_stocks)
+        elif mode == 'iterative':
+            engine.iterative_optimize(
+                n_stocks=n_stocks, n_rounds=len(cfg.iterative_rounds))
+        elif mode == 'full':
+            engine.optimize_global(n_stocks=n_stocks)
+            engine.optimize_by_regime(n_stocks=n_stocks)
+            engine.optimize_robust(n_stocks=n_stocks)
+            engine.iterative_optimize(
+                n_stocks=n_stocks, n_rounds=len(cfg.iterative_rounds))
+        else:
+            print(f"[ERROR] 未知 mode: {mode!r} "
+                  "(合法: global/regime/robust/iterative/full)")
+            return
+        engine.save_results(args.save)
+
+    elif args.command == 'global':
         engine.optimize_global(n_stocks=args.n_stocks, ga_params=ga_params)
         engine.save_results(args.save)
 
