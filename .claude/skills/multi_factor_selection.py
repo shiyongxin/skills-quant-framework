@@ -17,6 +17,8 @@ from scipy.optimize import minimize
 import warnings
 warnings.filterwarnings('ignore')
 
+import factor_library
+
 
 def filter_point_in_time(financial_df: pd.DataFrame, as_of) -> pd.DataFrame:
     """point-in-time 财务数据契约 (审计 C-P0-7 止血版)
@@ -607,28 +609,10 @@ class FactorModels:
         """
         将价格输入归一化为“股票×日期”横截面面板（index=股票码, columns=日期）。
 
-        支持两种形态:
-          - 宽面板: price_df['收盘'] 为 DataFrame（index=日期, columns=股票码）
-          - 堆叠行: price_df['收盘'] 为 MultiIndex Series（(股票,日期) 或 (日期,股票)，日期层级为 datetime）
-        单股时序、无法识别日期层级等输入无法构成横截面，返回 None。
+        委托 factor_library.to_close_panel (C-P1-11 因子库统一);
+        保留方法名兼容既有调用/测试。
         """
-        close = price_df['收盘']
-        if isinstance(close, pd.DataFrame):
-            # (index=日期, columns=股票码) → 转置为 (index=股票码, columns=日期)
-            return close.T
-
-        if isinstance(close, pd.Series) and isinstance(close.index, pd.MultiIndex):
-            date_level = None
-            for i in range(close.index.nlevels):
-                if pd.api.types.is_datetime64_any_dtype(close.index.levels[i].dtype):
-                    date_level = i
-                    break
-            if date_level is None:
-                return None
-            # 日期层级 unstack 到 columns，剩余层级（股票码）作 index
-            return close.unstack(level=date_level)
-
-        return None
+        return factor_library.to_close_panel(price_df)
 
     @staticmethod
     def momentum_factor(price_df, periods=[20, 60, 120]) -> pd.DataFrame:
@@ -643,21 +627,14 @@ class FactorModels:
         Returns:
             因子得分DataFrame（无法构成横截面时返回空表）
         """
-        factors = pd.DataFrame()
+        raw = factor_library.momentum_panel(
+            FactorModels._price_cross_section(price_df), periods)
 
-        panel = FactorModels._price_cross_section(price_df)
-        if panel is None or panel.shape[1] == 0:
-            return factors
+        if raw.shape[1] == 0:
+            return raw  # 数据不足，无法计算任何周期
 
-        for period in periods:
-            if panel.shape[1] > period:
-                # 沿日期轴取最近一根 bar 的 N 期收益率（每只股票一个值）
-                factors[f'Momentum_{period}'] = panel.pct_change(period, axis=1).iloc[:, -1]
-
-        if factors.shape[1] == 0:
-            return factors  # 数据不足，无法计算任何周期
-
-        # 标准化（横截面）
+        # 标准化（横截面）— z-score 是 MFS 引擎职责, 不入库
+        factors = raw.copy()
         for col in factors.columns:
             factors[col] = (factors[col] - factors[col].mean()) / factors[col].std()
 
@@ -678,25 +655,15 @@ class FactorModels:
         Returns:
             因子得分DataFrame (负值表示低波动更好；无法构成横截面时返回空表)
         """
-        factors = pd.DataFrame()
-
         panel = FactorModels._price_cross_section(price_df)
         if panel is None or panel.shape[1] < 2:
-            return factors
+            return pd.DataFrame()
 
-        returns = panel.pct_change(axis=1)  # (股票 × 日期)
-
-        # 历史波动率（pandas 3 rolling 无 axis 参数 → 转置后沿日期轴滚动）
-        factors['Volatility'] = -returns.T.rolling(period).std().iloc[-1]
-
-        # 下行波动（过去 period 日下行偏差：正收益记 0，仅对 min(r,0) 取标准差）
-        tail = returns.iloc[:, -period:]
-        factors['Downside_Vol'] = -tail.clip(upper=0).std(axis=1)
-
-        # 最大回撤 (倒数)：窗口内相对历史高点的最深回撤
-        cummax = panel.cummax(axis=1)
-        drawdown = (panel - cummax) / cummax
-        factors['Max_Drawdown'] = -drawdown.T.rolling(period).min().iloc[-1]
+        # 原始值来自因子库; 方向应用（取负 = 低波动得高分）留在引擎层
+        factors = pd.DataFrame()
+        factors['Volatility'] = -factor_library.realized_volatility_panel(panel, period)
+        factors['Downside_Vol'] = -factor_library.downside_volatility_panel(panel, period)
+        factors['Max_Drawdown'] = factor_library.max_drawdown_panel(panel, period)
 
         # 标准化（横截面）
         for col in factors.columns:

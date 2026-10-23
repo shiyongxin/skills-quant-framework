@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer
+import factor_library
 
 
 class StockSelector:
@@ -206,7 +207,7 @@ class StockSelector:
             score += 8
 
         # 4. 近期表现 (15分)
-        change_20d = (current_price / data['收盘'].iloc[-21] - 1) * 100
+        change_20d = factor_library.momentum_pct(data['收盘'], 20)
         if change_20d > 10:
             score += 15
         elif change_20d > 5:
@@ -215,15 +216,14 @@ class StockSelector:
             score += 8
 
         # 5. 成交量 (10分)
-        vol_ma5 = data['成交量'].tail(5).mean()
+        vol_ma5 = factor_library.volume_ma(data['成交量'], 5)
         if latest['成交量'] > vol_ma5 * 1.2:
             score += 10
         elif latest['成交量'] > vol_ma5:
             score += 5
 
         # 6. 波动率控制 (10分) - 不喜欢过高波动
-        returns = data['收盘'].pct_change().dropna()
-        volatility = returns.std() * np.sqrt(252) * 100
+        volatility = factor_library.annualized_volatility_pct(data['收盘'])
         if 15 <= volatility <= 40:
             score += 10
         elif volatility < 15:
