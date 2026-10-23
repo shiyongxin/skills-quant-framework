@@ -23,10 +23,10 @@ import zlib
 import hashlib
 
 from parameter_space import ParameterSpace
-from vectorized_backtest import VectorizedBacktester, BacktestMetrics
+from vectorized_backtest import (VectorizedBacktester, BacktestMetrics,
+                                 metrics_from_trades)
 from historical_data_manager import HistoricalDataManager
 from optimization_config import FitnessConfig
-from core import metrics as _core_metrics
 
 
 # ==================== 数据结构 ====================
@@ -250,69 +250,38 @@ class FitnessEvaluator:
         return []
 
     def _compute_metrics_from_trades(self, trades, data, params):
-        """从交易列表计算BacktestMetrics"""
-        import numpy as np
+        """从过滤后的交易列表计算 BacktestMetrics（审计 E-P1: 调用共享
+        metrics_from_trades 统一口径, 消除与 vectorized_backtest 的重复块）。
 
+        修正审计 #15/#20 三处口径错误:
+        - 年化分母: 取过滤后交易的暴露跨度 [首笔入场, 末笔出场], 不再用
+          整只股票全历史 (短体制路径年化严重失真);
+        - 最大回撤: 日频盯市净值 (与 B 引擎同构造), 不再用逐笔复利序列;
+        - 夏普: 日频盯市收益年化252, 不再用逐笔收益冒充日频。
+        """
         if not trades:
             return None
 
+        entry0 = min(int(t.entry_idx) for t in trades)
+        exit1 = max(int(t.exit_idx) for t in trades)
+        window = data.iloc[entry0:exit1 + 1]
+        if len(window) < 1:
+            return None
+
+        close = window['收盘'].to_numpy(dtype=np.float64)
+        open_arr = window['开盘'].to_numpy(dtype=np.float64)
         pnl_arr = np.array([t.pnl_pct for t in trades], dtype=np.float64)
         holding_arr = np.array([t.holding_days for t in trades], dtype=np.float64)
+        spans = [(int(t.entry_idx) - entry0, int(t.exit_idx) - entry0)
+                 for t in trades]
+
+        # 与 B 引擎 _simulate_trades 同口径的仓位系数
         position_size_pct = float(params.get('position_size_pct', 0.8))
+        max_position_pct = float(params.get('max_position_pct', 1.0))
+        position_size_pct = min(position_size_pct, max_position_pct)
 
-        # 胜率
-        wins = pnl_arr[pnl_arr > 0]
-        losses = pnl_arr[pnl_arr <= 0]
-        win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
-
-        # 盈亏比（core 求和式口径，统一 A/B/优化器）
-        profit_factor = _core_metrics.profit_factor(pnl_arr)
-
-        # 总收益(复利)
-        cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
-        total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
-
-        # 年化收益
-        total_days = data.iloc[-1]['收盘']  # placeholder
-        total_days = len(data)
-        years = total_days / 252
-        if years > 0 and cumulative[-1] > 0:
-            annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
-        else:
-            annualized_return = 0
-
-        # 最大回撤（core 统一口径: 正值）
-        equity = np.concatenate([[1.0], cumulative])
-        max_drawdown = _core_metrics.max_drawdown_pct(equity)
-
-        # 夏普（core口径: 逐笔收益按平均持有期年化, rf=3%, ddof=1）
-        mean_hold = float(np.mean(holding_arr)) if len(holding_arr) else 0.0
-        if len(pnl_arr) > 1 and mean_hold > 0:
-            sharpe = _core_metrics.sharpe_ratio(
-                pnl_arr / 100, periods_per_year=252.0 / mean_hold, rf=0.03)
-        else:
-            sharpe = 0.0
-
-        # 最大连续亏损
-        is_loss = pnl_arr <= 0
-        max_consec = 0
-        if np.any(is_loss):
-            loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
-            max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
-
-        from vectorized_backtest import BacktestMetrics
-        return BacktestMetrics(
-            total_return=float(total_return),
-            annualized_return=float(annualized_return),
-            max_drawdown=float(max_drawdown),
-            sharpe_ratio=float(sharpe),
-            win_rate=float(win_rate),
-            profit_factor=float(profit_factor),
-            num_trades=len(pnl_arr),
-            avg_holding_days=float(np.mean(holding_arr)),
-            avg_return_per_trade=float(np.mean(pnl_arr)),
-            max_consecutive_losses=max_consec
-        )
+        return metrics_from_trades(pnl_arr, holding_arr, spans,
+                                   close, open_arr, position_size_pct)
 
     def _compute_fitness(self, metrics_list: list) -> tuple:
         """

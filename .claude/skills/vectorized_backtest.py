@@ -48,6 +48,88 @@ class TradeDetail:
     exit_reason: str        # "stop_loss" / "take_profit" / "signal" / "end"
 
 
+def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
+                        position_size_pct) -> BacktestMetrics:
+    """从交易序列构建 BacktestMetrics（指标口径统一真相源, 审计 E-P1）。
+
+    - 盈亏比: core 求和式; 最大回撤: core 正值% (日频盯市净值, 非逐笔序列)
+    - 夏普: core 日频盯市收益, 年化252, rf=3%, ddof=1 (不再用逐笔收益冒充日频)
+    - 总收益: 逐笔复利(仓位系数); 年化分母 = 时间轴 bar 数 (调用方决定评估窗口:
+      B 引擎 = 回测窗全长; 优化器体制过滤路径 = 过滤后交易的暴露跨度)
+    - trade_spans: [(entry, exit)] 相对 close/open 时间轴的 bar 下标
+    - 日频盯市近似: 入场日 开盘→收盘(不含隔夜跳空), 出场日仅保留隔夜跳空;
+      仅用于 MDD/Sharpe, 不改 total_return
+    """
+    pnl_arr = np.asarray(pnl_arr, dtype=np.float64)
+    holding_arr = np.asarray(holding_arr, dtype=np.float64)
+    if pnl_arr.size == 0:
+        return BacktestMetrics()
+
+    n = len(close)
+
+    # 胜率
+    wins = pnl_arr[pnl_arr > 0]
+    losses = pnl_arr[pnl_arr <= 0]
+    win_rate = (len(wins) / len(pnl_arr)) * 100
+
+    # 盈亏比（core 求和式口径，统一 A/B/优化器）
+    profit_factor = _core_metrics.profit_factor(pnl_arr)
+
+    # 总收益(复利, 逐笔含费口径)
+    cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
+    total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
+
+    # 年化收益
+    years = n / 252
+    if years > 0 and cumulative[-1] > 0:
+        annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
+    else:
+        annualized_return = 0
+
+    # 日频盯市净值（审计项9: 消除逐笔复利曲线对回撤的低估）
+    # 在仓区间按 日收益×仓位 累乘; 入场日按 开盘→收盘(不含隔夜跳空),
+    # 出场日仅保留隔夜跳空(按开盘成交)。近似口径, 仅用于 MDD/Sharpe。
+    daily_ret = np.zeros(n)
+    daily_ret[1:] = close[1:] / close[:-1] - 1
+    for e, x in trade_spans:
+        if e < n and open_arr[e] > 0:
+            daily_ret[e] = close[e] / open_arr[e] - 1
+        if x < n:
+            daily_ret[x] = (open_arr[x] / close[x - 1] - 1) if x > 0 else 0.0
+    held = np.zeros(n, dtype=bool)
+    for e, x in trade_spans:
+        held[e:x + 1] = True
+    mtm = np.concatenate(
+        [[1.0], np.cumprod(1 + daily_ret * position_size_pct * held)])
+
+    max_drawdown = _core_metrics.max_drawdown_pct(mtm)
+
+    # 夏普(core口径: 日频盯市收益, 年化252, rf=3%, ddof=1)
+    sharpe = _core_metrics.sharpe_ratio(daily_ret * held,
+                                        periods_per_year=252, rf=0.03)
+
+    # 最大连续亏损
+    is_loss = pnl_arr <= 0
+    if np.any(is_loss):
+        loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
+        max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
+    else:
+        max_consec = 0
+
+    return BacktestMetrics(
+        total_return=float(total_return),
+        annualized_return=float(annualized_return),
+        max_drawdown=float(max_drawdown),
+        sharpe_ratio=float(sharpe),
+        win_rate=float(win_rate),
+        profit_factor=float(profit_factor),
+        num_trades=int(pnl_arr.size),
+        avg_holding_days=float(np.mean(holding_arr)) if holding_arr.size else 0.0,
+        avg_return_per_trade=float(np.mean(pnl_arr)),
+        max_consecutive_losses=max_consec
+    )
+
+
 class VectorizedBacktester:
     """
     向量化回测引擎
@@ -496,73 +578,11 @@ class VectorizedBacktester:
         if len(trades_pnl) == 0:
             return _empty()
 
-        # 转换为numpy数组进行向量化计算
+        # 指标统一口径 (审计 E-P1: 共享 metrics_from_trades, 消除复制块)
         pnl_arr = np.array(trades_pnl, dtype=np.float64)
         holding_arr = np.array(trades_holding, dtype=np.float64)
-
-        # 胜率
-        wins = pnl_arr[pnl_arr > 0]
-        losses = pnl_arr[pnl_arr <= 0]
-        win_rate = (len(wins) / len(pnl_arr)) * 100 if len(pnl_arr) > 0 else 0
-
-        # 盈亏比（core 求和式口径，统一 A/B/优化器）
-        profit_factor = _core_metrics.profit_factor(pnl_arr)
-
-        # 总收益(复利, 逐笔含费口径) - 向量化
-        cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
-        total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
-
-        # 年化收益
-        total_days = n
-        years = total_days / 252
-        if years > 0 and cumulative[-1] > 0:
-            annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
-        else:
-            annualized_return = 0
-
-        # 日频盯市净值（审计项9: 消除逐笔复利曲线对回撤的低估）
-        # 在仓区间按 日收益×仓位 累乘; 入场日按 开盘→收盘(不含隔夜跳空),
-        # 出场日仅保留隔夜跳空(按开盘成交)。近似口径, 仅用于 MDD/Sharpe。
-        daily_ret = np.zeros(n)
-        daily_ret[1:] = close[1:] / close[:-1] - 1
-        for e, x in trade_spans:
-            if e < n and open_arr[e] > 0:
-                daily_ret[e] = close[e] / open_arr[e] - 1
-            if x < n:
-                daily_ret[x] = (open_arr[x] / close[x - 1] - 1) if x > 0 else 0.0
-        held = np.zeros(n, dtype=bool)
-        for e, x in trade_spans:
-            held[e:x + 1] = True
-        mtm = np.concatenate(
-            [[1.0], np.cumprod(1 + daily_ret * position_size_pct * held)])
-
-        max_drawdown = _core_metrics.max_drawdown_pct(mtm)
-
-        # 夏普(core口径: 日频盯市收益, 年化252, rf=3%, ddof=1)
-        sharpe = _core_metrics.sharpe_ratio(daily_ret * held,
-                                            periods_per_year=252, rf=0.03)
-
-        # 最大连续亏损 - 向量化
-        is_loss = pnl_arr <= 0
-        if np.any(is_loss):
-            # 计算连续亏损
-            loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
-            max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
-        else:
-            max_consec = 0
-
-        metrics = BacktestMetrics(
-            total_return=float(total_return),
-            annualized_return=float(annualized_return),
-            max_drawdown=float(max_drawdown),
-            sharpe_ratio=float(sharpe),
-            win_rate=float(win_rate),
-            profit_factor=float(profit_factor),
-            num_trades=len(trades_pnl),
-            avg_holding_days=float(np.mean(holding_arr)),
-            avg_return_per_trade=float(np.mean(pnl_arr)),
-            max_consecutive_losses=max_consec
-        )
+        metrics = metrics_from_trades(pnl_arr, holding_arr, trade_spans,
+                                      close, open_arr, position_size_pct)
 
         if return_details:
             return metrics, trade_details

@@ -3,8 +3,12 @@
 回测诚实性测试（Stage 3）:
 - A (backtest_framework) / B (vectorized_backtest) / D (reversal_backtest)
 - E (historical_backtest_validator) 前瞻收益
+- 优化器体制过滤路径 (optimization_engine._compute_metrics_from_trades,
+  审计 E-P1 口径统一: 共享 metrics_from_trades)
 共性: t+1 开盘成交、真实费用、涨跌停拦截、无同根 bar 未来函数。
 """
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,8 +16,10 @@ import pytest
 from backtest_framework import BacktestEngine
 from execution_model import CostModel
 from historical_backtest_validator import HistoricalBacktestValidator
+from optimization_engine import FitnessEvaluator
 from reversal_backtest import ReversalBacktester
-from vectorized_backtest import VectorizedBacktester
+from vectorized_backtest import (VectorizedBacktester, BacktestMetrics,
+                                 TradeDetail, metrics_from_trades)
 
 
 def mk_data(n=60, base=10.0, seed=1):
@@ -410,3 +416,172 @@ class TestGoldenMetrics:
         assert res['trade_count'] == 9
         assert len(res['trades']) == 19
         assert res['profit_factor'] == pytest.approx(1.2589570136340924, rel=1e-6)
+
+
+class TestSharedMetricsFromTrades:
+    """E-P1: metrics_from_trades 共享函数与 B 引擎 _simulate_trades 指标块等价。"""
+
+    def test_matches_b_backtest_with_details(self):
+        data = TestGoldenMetrics._big()
+        bt = VectorizedBacktester()
+        metrics, details = bt.backtest_with_details(data, {})
+        assert details  # 黄金数据默认参数下必有交易 (num_trades==2)
+
+        m2 = metrics_from_trades(
+            np.array([d.pnl_pct for d in details]),
+            np.array([d.holding_days for d in details], dtype=float),
+            [(d.entry_idx, d.exit_idx) for d in details],
+            data['收盘'].to_numpy(dtype=float),
+            data['开盘'].to_numpy(dtype=float),
+            0.8)
+        assert m2.total_return == pytest.approx(metrics.total_return, rel=1e-12)
+        assert m2.annualized_return == pytest.approx(metrics.annualized_return, rel=1e-12)
+        assert m2.max_drawdown == pytest.approx(metrics.max_drawdown, rel=1e-12)
+        assert m2.sharpe_ratio == pytest.approx(metrics.sharpe_ratio, rel=1e-12)
+        assert m2.win_rate == pytest.approx(metrics.win_rate, rel=1e-12)
+        assert m2.profit_factor == pytest.approx(metrics.profit_factor, rel=1e-12)
+        assert m2.num_trades == metrics.num_trades
+        assert m2.avg_holding_days == pytest.approx(metrics.avg_holding_days, rel=1e-12)
+        assert m2.avg_return_per_trade == pytest.approx(metrics.avg_return_per_trade, rel=1e-12)
+        assert m2.max_consecutive_losses == metrics.max_consecutive_losses
+
+    def test_empty_trades_returns_empty_metrics(self):
+        m = metrics_from_trades([], [], [], np.array([10.0, 10.1]),
+                                np.array([10.0, 10.05]), 0.8)
+        assert m.num_trades == 0 and m.total_return == 0.0
+
+
+class TestTradeFilterMetricsConsistency:
+    """E-P1 #15/#20: 优化器体制过滤路径指标口径与 B 引擎统一。"""
+
+    @staticmethod
+    def _engine():
+        return FitnessEvaluator()
+
+    @staticmethod
+    def _data(n=400, seed=11):
+        rng = np.random.default_rng(seed)
+        close = 10 * np.cumprod(1 + rng.normal(0.0004, 0.01, n))
+        return pd.DataFrame({
+            '日期': pd.date_range('2022-01-03', periods=n, freq='B'),
+            '开盘': close * (1 + rng.normal(0, 0.002, n)),
+            '最高': close * 1.02, '最低': close * 0.98, '收盘': close,
+            '成交量': rng.integers(1e6, 5e6, n).astype(float),
+        })
+
+    @staticmethod
+    def _trade(entry, exit_, pnl, hold):
+        return SimpleNamespace(entry_idx=entry, exit_idx=exit_,
+                               pnl_pct=pnl, holding_days=hold)
+
+    def test_annualized_uses_exposure_span_not_full_history(self):
+        data = self._data()
+        trades = [self._trade(300, 330, 8.0, 30), self._trade(335, 360, 5.0, 25)]
+        m = self._engine()._compute_metrics_from_trades(trades, data, {})
+        assert m is not None and m.num_trades == 2
+
+        span_bars = 360 - 300 + 1  # 暴露跨度 61 bar
+        expected = ((1 + m.total_return / 100) ** (252 / span_bars) - 1) * 100
+        assert m.annualized_return == pytest.approx(expected, rel=1e-9)
+        # 旧口径 (len(data)=400 全历史分母) 与新口径差数个量级
+        wrong = ((1 + m.total_return / 100)
+                 ** (252 / (len(data) / 252)) - 1) * 100
+        assert abs(m.annualized_return - wrong) > 1.0
+
+    def test_sharpe_mdd_daily_mtm_not_trade_sequence(self):
+        data = self._data()
+        trades = [self._trade(300, 330, 8.0, 30), self._trade(335, 360, 5.0, 25)]
+        m = self._engine()._compute_metrics_from_trades(trades, data, {})
+
+        # 按 B 引擎同构造重算日频盯市
+        w = data.iloc[300:361]
+        close = w['收盘'].to_numpy(dtype=float)
+        open_arr = w['开盘'].to_numpy(dtype=float)
+        n = len(close)
+        spans = [(0, 30), (35, 60)]
+        daily_ret = np.zeros(n)
+        daily_ret[1:] = close[1:] / close[:-1] - 1
+        for e, x in spans:
+            daily_ret[e] = close[e] / open_arr[e] - 1
+            daily_ret[x] = open_arr[x] / close[x - 1] - 1
+        held = np.zeros(n, dtype=bool)
+        for e, x in spans:
+            held[e:x + 1] = True
+        mtm = np.concatenate([[1.0], np.cumprod(1 + daily_ret * 0.8 * held)])
+
+        from core import metrics as core_m
+        assert m.max_drawdown == pytest.approx(
+            core_m.max_drawdown_pct(mtm), rel=1e-9)
+        assert m.sharpe_ratio == pytest.approx(
+            core_m.sharpe_ratio(daily_ret * held, periods_per_year=252, rf=0.03),
+            rel=1e-9)
+        # 旧口径 (逐笔收益 + 252/mean_hold 年化) 不同 → 修复生效
+        old_sharpe = core_m.sharpe_ratio(np.array([0.08, 0.05]),
+                                         periods_per_year=252 / 27.5, rf=0.03)
+        assert abs(m.sharpe_ratio - old_sharpe) > 1e-3
+
+    def test_trade_level_stats_from_core_formulas(self):
+        trades = [self._trade(100, 110, 8.0, 10), self._trade(120, 130, -3.0, 10),
+                  self._trade(140, 150, -2.0, 10)]
+        m = self._engine()._compute_metrics_from_trades(trades, self._data(), {})
+        from core import metrics as core_m
+        assert m.profit_factor == pytest.approx(
+            core_m.profit_factor([8.0, -3.0, -2.0]), rel=1e-12)
+        assert m.win_rate == pytest.approx(100 / 3, rel=1e-12)
+        assert m.num_trades == 3
+        # 与 B 引擎同款 legacy 语义: 连亏段按 onset 间隔计 (2 连亏 → 1)
+        assert m.max_consecutive_losses == 1
+        assert m.avg_holding_days == pytest.approx(10.0)
+        assert np.isfinite(m.sharpe_ratio) and np.isfinite(m.max_drawdown)
+
+    def test_empty_trades_none_and_source_honesty(self):
+        assert self._engine()._compute_metrics_from_trades(
+            [], self._data(), {}) is None
+        import inspect
+        import optimization_engine
+        src = inspect.getsource(optimization_engine)
+        assert 'metrics_from_trades' in src          # 已接共享真相源
+        assert '252.0 / mean_hold' not in src        # 逐笔冒充日频夏普已删
+        assert "total_days = data.iloc[-1]['收盘']" not in src  # 死代码已删
+
+    def test_evaluate_trade_filter_path_runs(self):
+        engine = self._engine()
+        n = 300
+        data = self._data(n=n, seed=5)
+        labels = pd.Series(['SIDEWAYS'] * n, dtype=object)
+        for i in range(0, n, 3):          # CRASH 散点 100 天, max_consec=1
+            labels.iloc[i] = 'CRASH'
+        td = [TradeDetail(entry_idx=50, exit_idx=80, entry_price=10.0,
+                          exit_price=11.0, pnl_pct=10.0, holding_days=30,
+                          exit_reason='signal'),
+              TradeDetail(entry_idx=150, exit_idx=170, entry_price=10.0,
+                          exit_price=9.5, pnl_pct=-5.0, holding_days=20,
+                          exit_reason='stop_loss')]
+
+        class _Stub:
+            def backtest_with_details(self, d, p):
+                return BacktestMetrics(), td
+
+        engine.backtester = _Stub()
+        fit, det = engine.evaluate({}, {'000001': data},
+                                   {'000001': labels}, 'CRASH')
+        assert det.get('sample_count') == 1
+        assert np.isfinite(fit) and fit > 0
+
+    def test_evaluate_long_window_path_runs(self):
+        engine = self._engine()
+        data = self._data(n=300, seed=5)
+        labels = pd.Series(['BULL'] * 200 + ['SIDEWAYS'] * 100, dtype=object)
+
+        class _Stub:
+            def backtest(self, d, p):
+                assert len(d) < len(data)  # 确实按窗口切片后回测
+                return BacktestMetrics(total_return=20.0, num_trades=5,
+                                       sharpe_ratio=1.2, max_drawdown=8.0,
+                                       win_rate=60.0)
+
+        engine.backtester = _Stub()
+        fit, det = engine.evaluate({}, {'000001': data},
+                                   {'000001': labels}, 'BULL')
+        assert det.get('sample_count', 0) >= 1
+        assert np.isfinite(fit)
