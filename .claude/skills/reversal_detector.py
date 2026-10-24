@@ -31,6 +31,8 @@ from reversal_rules import (
     decide_action,
 )
 import trade_constraints
+from core.indicators import atr as _core_atr
+from core.indicator_engine import IndicatorEngine
 
 
 @dataclass
@@ -192,44 +194,39 @@ class ReversalDetector:
         close = df['收盘']
         high = df['最高']
         low = df['最低']
-        volume = df['成交量']
+        # 共享指标引擎 (审计 #10): 公式唯一来源 core.indicators
+        # 注: KDJ/MACD 旧实现用 ewm(adjust=True) (pandas 默认), 与全仓其余
+        # 10+ 站点的 adjust=False 递归口径分裂 —— 此处统一为 core 口径,
+        # reversal 两模块的 K/D/J/MACD 数值随之变化 (已在 AGENTS.md 留档)。
+        eng = IndicatorEngine(df)
 
         # 均线
-        df['MA5'] = close.rolling(5).mean()
-        df['MA10'] = close.rolling(10).mean()
-        df['MA20'] = close.rolling(20).mean()
-        df['MA60'] = close.rolling(60).mean()
+        df['MA5'] = eng.ma(5)
+        df['MA10'] = eng.ma(10)
+        df['MA20'] = eng.ma(20)
+        df['MA60'] = eng.ma(60)
 
         # RSI (多个周期, core 权威口径)
-        from core.indicators import rsi as _core_rsi, atr as _core_atr
         for period in [6, 14, 24]:
-            df[f'RSI{period}'] = _core_rsi(close, period)
+            df[f'RSI{period}'] = eng.rsi(period)
 
         # KDJ
-        low_n = low.rolling(9).min()
-        high_n = high.rolling(9).max()
-        rsv = (close - low_n) / (high_n - low_n) * 100
-        df['K'] = rsv.ewm(3).mean()
-        df['D'] = df['K'].ewm(3).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
+        k, d, j = eng.kdj()
+        df['K'], df['D'], df['J'] = k, d, j
 
         # MACD
-        ema12 = close.ewm(span=12).mean()
-        ema26 = close.ewm(span=26).mean()
-        df['MACD'] = ema12 - ema26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        dif, dea, hist = eng.macd()
+        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = dif, dea, hist
 
         # 布林带
-        df['BB_Middle'] = close.rolling(20).mean()
-        df['BB_Std'] = close.rolling(20).std()
-        df['BB_Upper'] = df['BB_Middle'] + 2 * df['BB_Std']
-        df['BB_Lower'] = df['BB_Middle'] - 2 * df['BB_Std']
+        upper, middle, lower, std = eng.bollinger(20, 2.0)
+        df['BB_Middle'], df['BB_Std'] = middle, std
+        df['BB_Upper'], df['BB_Lower'] = upper, lower
         df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Middle'] * 100
 
         # 成交量均线
-        df['Vol_MA5'] = volume.rolling(5).mean()
-        df['Vol_MA20'] = volume.rolling(20).mean()
+        df['Vol_MA5'] = eng.volume_ma(5)
+        df['Vol_MA20'] = eng.volume_ma(20)
 
         # 价格变化率
         df['ROC5'] = close.pct_change(5) * 100

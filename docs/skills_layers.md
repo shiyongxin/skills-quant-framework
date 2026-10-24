@@ -137,8 +137,27 @@ L1 入选但 L2 为 SELL → 空仓等待，而非换股。
 |---|---|---|
 | RSI | `core/indicators.rsi` | Cutler SMA 平滑；无亏损→100，无波动→50 |
 | ATR / True Range | `core/indicators.atr` / `true_range` | Wilder RMA, alpha=1/period |
+| MA / EMA | `core/indicators.sma` / `ema` | SMA=rolling mean；EMA=**递归** `ewm(span, adjust=False)` |
+| MACD | `core/indicators.macd` | DIF=EMA(f)-EMA(s)；DEA=EMA(sig)(DIF)；**HIST=DIF-DEA（不 ×2）** |
+| KDJ | `core/indicators.kdj` | RSV(n=9)→EMA(span=3)→K→D；J=3K-2D；α=0.5（教科书 α=1/3 未采纳） |
+| BOLL | `core/indicators.bollinger` | mid=SMA(period)；std=样本标准差(ddof=1)；±mult·std |
+| 量均线 / OBV / VWAP | `core/indicators.volume_ma` / `obv` / `vwap` | rolling mean；方向符号×量累加；累积 TP·V/累积V |
 | profit_factor / MDD / Sharpe | `core/metrics` | 求和式 PF；MDD 正值%；sharpe rf=0.03, ddof=1 |
 | 数据获取结果 | `core/fetch_result.FetchResult` | 失败必须 `ok=False`+`error`，禁止静默空 DF |
+
+**共享指标引擎**（审计 #10）：`core/indicator_engine.IndicatorEngine` 是业务模块
+调用指标的统一入口 —— 只负责"取哪段、叫什么列名"，公式一律在 `core/indicators.py`：
+
+```python
+eng = IndicatorEngine(df)                  # df 含 收盘/最高/最低/成交量
+df['MACD'], df['MACD_Signal'] = eng.macd() # 规范名 DIF/DEA/HIST 再 rename 回历史名
+```
+
+规范列名：`MA{p} / EMA{p} / DIF / DEA / HIST / RSI / K / D / J / BB_Upper /
+BB_Middle / BB_Lower / BB_Std / TR / ATR / Vol_MA{p} / VWAP / OBV`；
+`IndicatorEngine.to_legacy/to_canonical` 做列名双向映射。
+**门禁**：业务模块内不得再出现裸 `.ewm(...)`/`.rolling(...).mean()` 指标公式
+（`tests/test_indicator_engine.py` 源码级扫描）。
 
 ### DataFrame 列名契约（审计 B-C7，#11 已修）
 
@@ -174,7 +193,8 @@ CSV 路径死代码）、`database_manager.py`（无 psycopg2 驱动、0 生产�
 
 ## 变更守则
 
-1. 新增指标 → 进 `advanced_indicators`/`trend_indicators` 或 `core/`，不得在业务模块内联重写 RSI/ATR。
+1. 新增指标 → 进 `core/indicators.py`（纯函数真相源）+ `advanced_indicators`/`trend_indicators`（封装），
+   业务模块一律调 `core`，不得内联重写 RSI/ATR/MA/EMA/MACD/KDJ/BOLL。
 2. 新增选股逻辑 → 先读项 21 决策；不要复制第四套。
 3. 改列名 → 全仓库 grep 消费方（`chart_visualizer`/`web_app`/`multi_factor_selector`），
    保留旧名别名至少一个版本。

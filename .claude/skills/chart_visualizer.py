@@ -14,7 +14,9 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import warnings
 
-from core.indicators import rsi as _core_rsi
+from core.indicators import (rsi as _core_rsi, sma as _core_sma,
+                              macd as _core_macd,
+                              bollinger as _core_bollinger)
 
 # Matplotlib imports
 try:
@@ -130,7 +132,7 @@ class ChartVisualizer:
         # 绘制均线
         if ma_periods:
             for period in ma_periods:
-                ma = plot_data['收盘'].rolling(window=period).mean()
+                ma = _core_sma(plot_data['收盘'], period)
                 ax1.plot(plot_data['date_num'], ma, label=f'MA{period}',
                         linewidth=self.style.line_width, alpha=0.8)
 
@@ -186,13 +188,8 @@ class ChartVisualizer:
 
         # 准备数据
         if 'MACD' not in data.columns:
-            # 计算MACD
-            close = data['收盘']
-            ema12 = close.ewm(span=12, adjust=False).mean()
-            ema26 = close.ewm(span=26, adjust=False).mean()
-            macd = ema12 - ema26
-            macd_signal = macd.ewm(span=9, adjust=False).mean()
-            macd_hist = macd - macd_signal
+            # 计算MACD (core 单一真相源)
+            macd, macd_signal, macd_hist = _core_macd(data['收盘'])
         else:
             macd = data['MACD']
             macd_signal = data['MACD_Signal']
@@ -313,12 +310,9 @@ class ChartVisualizer:
 
         fig.patch.set_facecolor(self.style.bg_color)
 
-        # 计算布林带
+        # 计算布林带 (core 单一真相源)
         close = data['收盘']
-        middle = close.rolling(window=period).mean()
-        std_dev = close.rolling(window=period).std()
-        upper = middle + std * std_dev
-        lower = middle - std * std_dev
+        upper, middle, lower, _std_dev = _core_bollinger(close, period, std)
 
         x = range(len(close))
 
@@ -504,8 +498,8 @@ class ChartVisualizer:
                      color=color, alpha=0.8, edgecolor=color)
 
         # 绘制均线
-        ma5 = plot_data['收盘'].rolling(window=5).mean()
-        ma20 = plot_data['收盘'].rolling(window=20).mean()
+        ma5 = _core_sma(plot_data['收盘'], 5)
+        ma20 = _core_sma(plot_data['收盘'], 20)
         ax1.plot(plot_data['date_num'], ma5, label='MA5', linewidth=1, alpha=0.8)
         ax1.plot(plot_data['date_num'], ma20, label='MA20', linewidth=1, alpha=0.8)
 
@@ -598,9 +592,9 @@ class ChartVisualizer:
             ax_candle.bar(row['date_num'], height, bottom=bottom, width=0.6,
                           color=color, alpha=0.7)
 
-        ma5 = plot_data['收盘'].rolling(window=5).mean()
-        ma20 = plot_data['收盘'].rolling(window=20).mean()
-        ma60 = plot_data['收盘'].rolling(window=60).mean()
+        ma5 = _core_sma(plot_data['收盘'], 5)
+        ma20 = _core_sma(plot_data['收盘'], 20)
+        ma60 = _core_sma(plot_data['收盘'], 60)
         ax_candle.plot(plot_data['date_num'], ma5, label='MA5', linewidth=1)
         ax_candle.plot(plot_data['date_num'], ma20, label='MA20', linewidth=1)
         ax_candle.plot(plot_data['date_num'], ma60, label='MA60', linewidth=1)

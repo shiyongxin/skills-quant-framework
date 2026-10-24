@@ -17,7 +17,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok, limit_pct_for
-from core.indicators import rsi as _core_rsi
+from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
 
 
@@ -288,62 +288,50 @@ class VectorizedBacktester:
         """计算所有技术指标(向量化)"""
         df = data.copy()
         close = df['收盘'].astype(float)
-        high = df['最高'].astype(float)
-        low = df['最低'].astype(float)
-        volume = df['成交量'].astype(float)
+        # 共享指标引擎 (审计 #10): 公式唯一来源 core.indicators
+        eng = IndicatorEngine(df)
 
         # ---- 移动平均线 ----
         ma_fast_period = int(params.get('ma_fast', 5))
         ma_slow_period = int(params.get('ma_slow', 20))
         ma_mid_period = int(params.get('ma_mid', 10))
 
-        df['ma_fast'] = close.rolling(ma_fast_period).mean()
-        df['ma_slow'] = close.rolling(ma_slow_period).mean()
-        df['ma_mid'] = close.rolling(ma_mid_period).mean()
+        df['ma_fast'] = eng.ma(ma_fast_period)
+        df['ma_slow'] = eng.ma(ma_slow_period)
+        df['ma_mid'] = eng.ma(ma_mid_period)
 
         # ---- MACD ----
         macd_fast = int(params.get('macd_fast', 12))
         macd_slow = int(params.get('macd_slow', 26))
         macd_signal_period = int(params.get('macd_signal', 9))
 
-        ema_fast = close.ewm(span=macd_fast, adjust=False).mean()
-        ema_slow = close.ewm(span=macd_slow, adjust=False).mean()
-        df['macd'] = ema_fast - ema_slow
-        df['macd_signal'] = df['macd'].ewm(span=macd_signal_period, adjust=False).mean()
-        df['macd_hist'] = df['macd'] - df['macd_signal']
+        dif, dea, hist = eng.macd(macd_fast, macd_slow, macd_signal_period)
+        df['macd'], df['macd_signal'], df['macd_hist'] = dif, dea, hist
 
         # ---- RSI（core 权威口径）----
         rsi_period = int(params.get('rsi_period', 14))
-        df['rsi'] = _core_rsi(close, rsi_period)
+        df['rsi'] = eng.rsi(rsi_period)
 
         # ---- KDJ ----
         kdj_n = int(params.get('kdj_n', 9))
-        low_n = low.rolling(kdj_n).min()
-        high_n = high.rolling(kdj_n).max()
-        rsv = (close - low_n) / (high_n - low_n).replace(0, np.nan) * 100
-        df['k'] = rsv.ewm(span=3, adjust=False).mean()
-        df['d'] = df['k'].ewm(span=3, adjust=False).mean()
-        df['j'] = 3 * df['k'] - 2 * df['d']
+        k, d, j = eng.kdj(kdj_n)
+        df['k'], df['d'], df['j'] = k, d, j
 
         # ---- 布林带 ----
         bb_period = int(params.get('bb_period', 20))
         bb_std_mult = float(params.get('bb_std', 2.0))
-        df['bb_mid'] = close.rolling(bb_period).mean()
-        bb_std = close.rolling(bb_period).std()
-        df['bb_upper'] = df['bb_mid'] + bb_std_mult * bb_std
-        df['bb_lower'] = df['bb_mid'] - bb_std_mult * bb_std
+        upper, middle, lower, _std = eng.bollinger(bb_period, bb_std_mult)
+        df['bb_mid'] = middle
+        df['bb_upper'] = upper
+        df['bb_lower'] = lower
 
-        # ---- ATR ----
+        # ---- ATR (core Wilder 单一真相源; 旧: SMA14) ----
         atr_period = int(params.get('atr_period', 14))
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(atr_period).mean()
+        df['atr'] = eng.atr(atr_period)
 
         # ---- 成交量均线 ----
-        df['vol_ma5'] = volume.rolling(5).mean()
-        df['vol_ma20'] = volume.rolling(20).mean()
+        df['vol_ma5'] = eng.volume_ma(5)
+        df['vol_ma20'] = eng.volume_ma(20)
 
         # ---- 涨跌幅 ----
         df['ret_1d'] = close.pct_change() * 100

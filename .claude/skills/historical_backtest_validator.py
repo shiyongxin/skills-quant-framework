@@ -24,6 +24,8 @@ import argparse
 import json
 import numpy as np
 import pandas as pd
+
+from core.indicators import sma as _core_sma
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -207,8 +209,8 @@ class HistoricalBacktestValidator:
             return 'SIDEWAYS'
 
         close = index_data['收盘'].astype(float)
-        ma60 = close.rolling(60).mean().iloc[-1]
-        ma120 = close.rolling(120).mean().iloc[-1]
+        ma60 = _core_sma(close, 60).iloc[-1]
+        ma120 = _core_sma(close, 120).iloc[-1]
         ret_20d = (close.iloc[-1] / close.iloc[-20] - 1) * 100 if len(close) >= 20 else 0
         ret_month = (close.iloc[-1] / close.iloc[-21] - 1) * 100 if len(close) >= 21 else 0
 

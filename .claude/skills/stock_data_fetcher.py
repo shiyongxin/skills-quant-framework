@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 from core.fetch_result import FetchResult
-from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
+from core.indicator_engine import IndicatorEngine
 
 
 class StockDataFetcher:
@@ -460,50 +460,42 @@ class StockDataFetcher:
         if df.empty or '收盘' not in df.columns:
             return df
 
+        # 共享指标引擎 (审计 #10)
+        eng = IndicatorEngine(df)
         close = df['收盘']
-        high = df['最高']
-        low = df['最低']
 
         # 移动平均线
-        df['MA5'] = close.rolling(window=5).mean()
-        df['MA10'] = close.rolling(window=10).mean()
-        df['MA20'] = close.rolling(window=20).mean()
-        df['MA60'] = close.rolling(window=60).mean()
+        df['MA5'] = eng.ma(5)
+        df['MA10'] = eng.ma(10)
+        df['MA20'] = eng.ma(20)
+        df['MA60'] = eng.ma(60)
 
         # EMA
-        df['EMA20'] = close.ewm(span=20, adjust=False).mean()
-        df['EMA50'] = close.ewm(span=50, adjust=False).mean()
+        df['EMA20'] = eng.ema(20)
+        df['EMA50'] = eng.ema(50)
 
         # MACD
-        ema_fast = close.ewm(span=12, adjust=False).mean()
-        ema_slow = close.ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema_fast - ema_slow
-        df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        dif, dea, hist = eng.macd()
+        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = dif, dea, hist
 
         # RSI (core 单一真相源)
-        df['RSI'] = _core_rsi(close, 14)
+        df['RSI'] = eng.rsi(14)
 
         # KDJ
-        low_n = low.rolling(window=9).min()
-        high_n = high.rolling(window=9).max()
-        rsv = (close - low_n) / (high_n - low_n) * 100
-        df['K'] = rsv.ewm(span=3, adjust=False).mean()
-        df['D'] = df['K'].ewm(span=3, adjust=False).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
+        k, d, j = eng.kdj()
+        df['K'], df['D'], df['J'] = k, d, j
 
         # Bollinger Bands
-        df['BB_Middle'] = close.rolling(window=20).mean()
-        df['BB_Std'] = close.rolling(window=20).std()
-        df['BB_Upper'] = df['BB_Middle'] + 2 * df['BB_Std']
-        df['BB_Lower'] = df['BB_Middle'] - 2 * df['BB_Std']
+        upper, middle, lower, std = eng.bollinger(20, 2.0)
+        df['BB_Middle'], df['BB_Std'] = middle, std
+        df['BB_Upper'], df['BB_Lower'] = upper, lower
 
         # ATR (core Wilder 单一真相源, 旧: SMA14)
-        df['TR'] = _core_true_range(high, low, close)
-        df['ATR'] = _core_atr(high, low, close, 14)
+        df['TR'] = eng.true_range()
+        df['ATR'] = eng.atr(14)
 
         # 成交量移动平均
-        df['VOL_MA5'] = df['成交量'].rolling(window=5).mean()
+        df['VOL_MA5'] = eng.volume_ma(5)
 
         # 涨跌幅（如果还没有）
         if '涨跌幅' not in df.columns:

@@ -9,7 +9,10 @@ Advanced Technical Indicators Library
 import pandas as pd
 import numpy as np
 
-from core.indicators import atr as _core_atr, true_range as _core_true_range
+from core.indicators import (atr as _core_atr, true_range as _core_true_range,
+                              ema as _core_ema, kdj as _core_kdj,
+                              obv as _core_obv, vwap as _core_vwap,
+                              sma as _core_sma)
 
 
 class AdvancedIndicators:
@@ -61,15 +64,9 @@ class AdvancedIndicators:
         low = df['最低']
         close = df['收盘']
 
-        # 计算RSV
-        low_n = low.rolling(window=n).min()
-        high_n = high.rolling(window=n).max()
-        rsv = (close - low_n) / (high_n - low_n) * 100
-
-        # 计算K、D、J
-        df['K'] = rsv.ewm(span=m1, adjust=False).mean()
-        df['D'] = df['K'].ewm(span=m2, adjust=False).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
+        # 计算K、D、J (core 单一真相源)
+        k, d, j = _core_kdj(high, low, close, n, m1, m2)
+        df['K'], df['D'], df['J'] = k, d, j
 
         return df
 
@@ -96,7 +93,7 @@ class AdvancedIndicators:
         tp = (high + low + close) / 3
 
         # CCI = (TP - MA(TP)) / (0.015 * MD)
-        ma_tp = tp.rolling(window=period).mean()
+        ma_tp = _core_sma(tp, period)
         md = tp.rolling(window=period).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
 
         df['CCI'] = (tp - ma_tp) / (0.015 * md)
@@ -144,15 +141,11 @@ class AdvancedIndicators:
         """
         df = df.copy()
 
-        close = df['收盘'].to_numpy(dtype=float)
-        volume = df['成交量'].to_numpy(dtype=float)
+        close = df['收盘']
+        volume = df['成交量']
 
-        # 价格上涨时OBV增加，下跌时减少 (向量化: 方向符号×成交量累加)
-        # obv[0] = volume[0]; obv[i] = obv[i-1] + sign(Δclose_i)*volume_i
-        direction = np.sign(np.diff(close, prepend=close[0]))
-        delta = direction * volume
-        delta[0] = volume[0]
-        df['OBV'] = np.cumsum(delta)
+        # 价格上涨时OBV增加，下跌时减少 (core 单一真相源, 向量化)
+        df['OBV'] = _core_obv(close, volume)
 
         return df
 
@@ -202,7 +195,7 @@ class AdvancedIndicators:
         close = df['收盘']
 
         # DPO = Close - Period/2+1日前的移动平均
-        ma_offset = close.rolling(window=period // 2 + 1).mean().shift(period // 2 + 1)
+        ma_offset = _core_sma(close, period // 2 + 1).shift(period // 2 + 1)
         df['DPO'] = close - ma_offset
 
         return df
@@ -224,14 +217,14 @@ class AdvancedIndicators:
 
         close = df['收盘']
 
-        # 三重EMA
-        ema1 = close.ewm(span=period, adjust=False).mean()
-        ema2 = ema1.ewm(span=period, adjust=False).mean()
-        ema3 = ema2.ewm(span=period, adjust=False).mean()
+        # 三重EMA (core 单一真相源)
+        ema1 = _core_ema(close, period)
+        ema2 = _core_ema(ema1, period)
+        ema3 = _core_ema(ema2, period)
 
         # TRIX = EMA3的变化率
         df['TRIX'] = ema3.pct_change() * 100
-        df['TRIX_Signal'] = df['TRIX'].ewm(span=9, adjust=False).mean()
+        df['TRIX_Signal'] = _core_ema(df['TRIX'], 9)
 
         return df
 
@@ -257,9 +250,9 @@ class AdvancedIndicators:
         # 价格幅度
         range_ = high - low
 
-        # 双重EMA
-        ema1 = range_.ewm(span=ema_period, adjust=False).mean()
-        ema2 = ema1.ewm(span=ema_period, adjust=False).mean()
+        # 双重EMA (core 单一真相源)
+        ema1 = _core_ema(range_, ema_period)
+        ema2 = _core_ema(ema1, ema_period)
 
         # Mass Index = EMA1 / EMA2 的period日和
         df['Mass_Index'] = (ema1 / ema2).rolling(window=period).sum()
@@ -284,11 +277,8 @@ class AdvancedIndicators:
         close = df['收盘']
         volume = df['成交量']
 
-        # 典型价格
-        tp = (high + low + close) / 3
-
-        # VWAP = TP的成交量加权累积平均
-        df['VWAP'] = (tp * volume).cumsum() / volume.cumsum()
+        # VWAP = TP的成交量加权累积平均 (core 单一真相源)
+        df['VWAP'] = _core_vwap(high, low, close, volume)
 
         return df
 
@@ -312,9 +302,9 @@ class AdvancedIndicators:
         if 'ATR' not in df.columns:
             df = AdvancedIndicators.atr(df, period)
 
-        # EMA作为中轨
+        # EMA作为中轨 (core 单一真相源)
         close = df['收盘']
-        df['KC_Middle'] = close.ewm(span=period, adjust=False).mean()
+        df['KC_Middle'] = _core_ema(close, period)
 
         # ATR倍数作为上下轨
         df['KC_Upper'] = df['KC_Middle'] + multiplier * df['ATR']

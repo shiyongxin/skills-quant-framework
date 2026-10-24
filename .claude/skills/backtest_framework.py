@@ -20,7 +20,9 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Callable, Optional, Tuple, Union
 
 from core import metrics as _core_metrics
-from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
+from core.indicators import (rsi as _core_rsi, atr as _core_atr,
+                              true_range as _core_true_range, sma as _core_sma,
+                              macd as _core_macd, bollinger as _core_bollinger)
 from dataclasses import dataclass
 from enum import Enum
 import warnings
@@ -552,8 +554,8 @@ class StrategyFactory:
 
             # 计算均线
             data = data.copy()
-            data['MA_fast'] = data['收盘'].rolling(window=fast).mean()
-            data['MA_slow'] = data['收盘'].rolling(window=slow).mean()
+            data['MA_fast'] = _core_sma(data['收盘'], fast)
+            data['MA_slow'] = _core_sma(data['收盘'], slow)
 
             latest = data.iloc[-1]
             prev = data.iloc[-2]
@@ -584,12 +586,9 @@ class StrategyFactory:
             if len(data) < slow + signal:
                 return 0
 
-            # 计算MACD
+            # 计算MACD (core 单一真相源)
             close = data['收盘']
-            ema_fast = close.ewm(span=fast, adjust=False).mean()
-            ema_slow = close.ewm(span=slow, adjust=False).mean()
-            macd = ema_fast - ema_slow
-            macd_signal = macd.ewm(span=signal, adjust=False).mean()
+            macd, macd_signal, _hist = _core_macd(close, fast, slow, signal)
 
             latest_macd = macd.iloc[-1]
             prev_macd = macd.iloc[-2]
@@ -653,12 +652,9 @@ class StrategyFactory:
             if len(data) < period:
                 return 0
 
-            # 计算布林带
+            # 计算布林带 (core 单一真相源)
             close = data['收盘']
-            middle = close.rolling(window=period).mean()
-            std_dev = close.rolling(window=period).std()
-            upper = middle + std * std_dev
-            lower = middle - std * std_dev
+            upper, middle, lower, _std_dev = _core_bollinger(close, period, std)
 
             latest_close = close.iloc[-1]
             latest_upper = upper.iloc[-1]

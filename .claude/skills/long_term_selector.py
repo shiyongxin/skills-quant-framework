@@ -27,6 +27,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import trade_constraints
+from core.indicators import sma as _core_sma
 
 
 @dataclass
@@ -308,8 +309,8 @@ class LongTermSelector:
             return 'SIDE'
 
         recent = df.tail(period)
-        ma_short = recent['收盘'].rolling(window=period//5).mean().iloc[-1]
-        ma_long = recent['收盘'].rolling(window=period//2).mean().iloc[-1]
+        ma_short = _core_sma(recent['收盘'], period // 5).iloc[-1]
+        ma_long = _core_sma(recent['收盘'], period // 2).iloc[-1]
 
         # 计算趋势强度
         if ma_short > ma_long * 1.05:
@@ -350,10 +351,10 @@ class LongTermSelector:
         long_trend = self.determine_trend(df, 240)
 
         # 计算均线
-        ma20 = df['收盘'].rolling(20).mean().iloc[-1]
-        ma60 = df['收盘'].rolling(60).mean().iloc[-1]
-        ma120 = df['收盘'].rolling(120).mean().iloc[-1]
-        ma250 = df['收盘'].rolling(250).mean().iloc[-1]
+        ma20 = _core_sma(df['收盘'], 20).iloc[-1]
+        ma60 = _core_sma(df['收盘'], 60).iloc[-1]
+        ma120 = _core_sma(df['收盘'], 120).iloc[-1]
+        ma250 = _core_sma(df['收盘'], 250).iloc[-1]
 
         # 综合评分计算
         total_score = self._calculate_total_score(

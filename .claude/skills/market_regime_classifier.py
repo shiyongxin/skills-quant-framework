@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 import json
 
+from core.indicators import sma as _core_sma
+
 
 class Regime(Enum):
     """市场体制枚举"""
@@ -179,9 +181,9 @@ class MarketRegimeClassifier:
         close = df['收盘']
 
         # 计算辅助指标
-        ma20 = close.rolling(20).mean()
-        ma60 = close.rolling(60).mean()
-        ma120 = close.rolling(120).mean()
+        ma20 = _core_sma(close, 20)
+        ma60 = _core_sma(close, 60)
+        ma120 = _core_sma(close, 120)
 
         # 20日涨跌幅
         ret_20d = close.pct_change(20) * 100

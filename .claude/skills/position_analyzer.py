@@ -11,7 +11,7 @@ from datetime import datetime
 
 from stock_data_fetcher import StockDataFetcher
 from risk_management import RiskMetrics
-from core.indicators import rsi as _core_rsi, atr as _core_atr, true_range as _core_true_range
+from core.indicator_engine import IndicatorEngine
 
 
 class PositionAnalyzer:
@@ -47,46 +47,37 @@ class PositionAnalyzer:
             print(f"[WARN] {symbol} 数据不足60根 ({len(data)}根), 无法分析")
             return None
 
-        # 计算技术指标
+        # 计算技术指标（共享引擎, 审计 #10）
+        eng = IndicatorEngine(data)
         close = data['收盘']
-        high = data['最高']
-        low = data['最低']
-        volume = data['成交量']
 
         # MA
         for p in [5, 10, 20, 60]:
-            data[f'MA{p}'] = close.rolling(window=p).mean()
+            data[f'MA{p}'] = eng.ma(p)
 
         # EMA
-        data['EMA20'] = close.ewm(span=20, adjust=False).mean()
-        data['EMA50'] = close.ewm(span=50, adjust=False).mean()
+        data['EMA20'] = eng.ema(20)
+        data['EMA50'] = eng.ema(50)
 
         # MACD
-        ema_fast = close.ewm(span=12, adjust=False).mean()
-        ema_slow = close.ewm(span=26, adjust=False).mean()
-        data['MACD'] = ema_fast - ema_slow
-        data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-        data['MACD_Hist'] = data['MACD'] - data['MACD_Signal']
+        dif, dea, hist = eng.macd()
+        data['MACD'], data['MACD_Signal'], data['MACD_Hist'] = dif, dea, hist
 
         # RSI（core 权威口径）
-        data['RSI'] = _core_rsi(close, 14)
+        data['RSI'] = eng.rsi(14)
 
         # KDJ
-        low_n = low.rolling(window=9).min()
-        high_n = high.rolling(window=9).max()
-        rsv = (close - low_n) / (high_n - low_n) * 100
-        data['K'] = rsv.ewm(span=3, adjust=False).mean()
-        data['D'] = data['K'].ewm(span=3, adjust=False).mean()
+        k, d, _j = eng.kdj()
+        data['K'], data['D'] = k, d
 
         # Bollinger Bands
-        data['BB_Middle'] = close.rolling(window=20).mean()
-        data['BB_Std'] = close.rolling(window=20).std()
-        data['BB_Upper'] = data['BB_Middle'] + 2 * data['BB_Std']
-        data['BB_Lower'] = data['BB_Middle'] - 2 * data['BB_Std']
+        upper, middle, lower, std = eng.bollinger(20, 2.0)
+        data['BB_Middle'], data['BB_Std'] = middle, std
+        data['BB_Upper'], data['BB_Lower'] = upper, lower
 
         # ATR (core Wilder 单一真相源, 旧: SMA14)
-        data['TR'] = _core_true_range(high, low, close)
-        data['ATR'] = _core_atr(high, low, close, 14)
+        data['TR'] = eng.true_range()
+        data['ATR'] = eng.atr(14)
 
         # 涨跌幅
         data['涨跌幅'] = close.pct_change() * 100

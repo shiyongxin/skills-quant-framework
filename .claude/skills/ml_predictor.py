@@ -14,7 +14,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 import warnings
 
-from core.indicators import rsi as _core_rsi
+from core.indicators import sma as _core_sma
+from core.indicator_engine import IndicatorEngine
 import trade_constraints
 
 try:
@@ -207,27 +208,30 @@ class FeatureEngineer:
         features['momentum_10'] = features['收盘'] / features['收盘'].shift(10) - 1
         features['momentum_20'] = features['收盘'] / features['收盘'].shift(20) - 1
 
+        # 共享指标引擎 (审计 #10): 公式唯一来源 core.indicators
+        eng = IndicatorEngine(features)
+
         # RSI特征 (core 单一真相源)
-        features['rsi'] = _core_rsi(features['收盘'], 14)
+        features['rsi'] = eng.rsi(14)
 
         # MACD特征
-        ema12 = features['收盘'].ewm(span=12, adjust=False).mean()
-        ema26 = features['收盘'].ewm(span=26, adjust=False).mean()
-        features['macd'] = ema12 - ema26
-        features['macd_signal'] = features['macd'].ewm(span=9, adjust=False).mean()
-        features['macd_hist'] = features['macd'] - features['macd_signal']
+        dif, dea, hist = eng.macd()
+        features['macd'] = dif
+        features['macd_signal'] = dea
+        features['macd_hist'] = hist
 
         # 布林带特征
-        features['bb_middle'] = features['收盘'].rolling(window=20).mean()
-        features['bb_std'] = features['收盘'].rolling(window=20).std()
-        features['bb_upper'] = features['bb_middle'] + 2 * features['bb_std']
-        features['bb_lower'] = features['bb_middle'] - 2 * features['bb_std']
+        upper, middle, lower, std = eng.bollinger(20, 2.0)
+        features['bb_middle'] = middle
+        features['bb_std'] = std
+        features['bb_upper'] = upper
+        features['bb_lower'] = lower
         features['bb_position'] = (features['收盘'] - features['bb_lower']) / (features['bb_upper'] - features['bb_lower'])
 
         # 成交量特征
         features['volume_change'] = features['成交量'].pct_change()
-        features['volume_ma5'] = features['成交量'].rolling(5).mean()
-        features['volume_ma20'] = features['成交量'].rolling(20).mean()
+        features['volume_ma5'] = eng.volume_ma(5)
+        features['volume_ma20'] = eng.volume_ma(20)
         features['volume_ratio'] = features['成交量'] / features['volume_ma20']
 
         # 高低位置
@@ -235,8 +239,8 @@ class FeatureEngineer:
         features['close_position'] = (features['收盘'] - features['最低']) / (features['最高'] - features['最低'])
 
         # 趋势特征
-        features['ma5_above_ma20'] = (features['收盘'].rolling(5).mean() > features['收盘'].rolling(20).mean()).astype(int)
-        features['ma_trend_up'] = (features['收盘'].rolling(5).mean() > features['收盘'].rolling(5).mean().shift(1)).astype(int)
+        features['ma5_above_ma20'] = (_core_sma(features['收盘'], 5) > _core_sma(features['收盘'], 20)).astype(int)
+        features['ma_trend_up'] = (_core_sma(features['收盘'], 5) > _core_sma(features['收盘'], 5).shift(1)).astype(int)
 
         return features
 

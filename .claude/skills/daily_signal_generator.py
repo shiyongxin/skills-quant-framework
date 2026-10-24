@@ -14,7 +14,6 @@ signal_generator 完全一致 (单一真相源)。
     python daily_signal_generator.py --symbols 000001 600519 --output report.txt
 """
 
-import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +26,8 @@ import sys
 from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
-from core.indicators import rsi as _core_rsi, atr as _core_atr
+from core.indicators import sma as _core_sma
+from core.indicator_engine import IndicatorEngine
 from signal_generator import SignalGenerator, SIGNAL_LABELS, describe_signals
 import trade_constraints
 
@@ -164,58 +164,50 @@ def compute_indicators(data: pd.DataFrame, params: dict) -> pd.DataFrame:
     pd.DataFrame : 添加了技术指标的DataFrame
     """
     df = data.copy()
-    close = df['收盘'].astype(float)
-    high = df['最高'].astype(float)
-    low = df['最低'].astype(float)
-    volume = df['成交量'].astype(float)
+    # 共享指标引擎 (审计 #10): 公式唯一来源 core.indicators
+    eng = IndicatorEngine(df)
 
     # 移动平均线
     ma_fast = int(params.get('ma_fast', 5))
     ma_slow = int(params.get('ma_slow', 20))
     ma_mid = int(params.get('ma_mid', 10))
 
-    df['MA_Fast'] = close.rolling(ma_fast).mean()
-    df['MA_Mid'] = close.rolling(ma_mid).mean()
-    df['MA_Slow'] = close.rolling(ma_slow).mean()
+    df['MA_Fast'] = eng.ma(ma_fast)
+    df['MA_Mid'] = eng.ma(ma_mid)
+    df['MA_Slow'] = eng.ma(ma_slow)
 
     # MACD
     macd_fast = int(params.get('macd_fast', 12))
     macd_slow = int(params.get('macd_slow', 26))
     macd_signal_p = int(params.get('macd_signal', 9))
 
-    ema_fast = close.ewm(span=macd_fast, adjust=False).mean()
-    ema_slow = close.ewm(span=macd_slow, adjust=False).mean()
-    df['MACD'] = ema_fast - ema_slow
-    df['MACD_Signal'] = df['MACD'].ewm(span=macd_signal_p, adjust=False).mean()
-    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+    dif, dea, hist = eng.macd(macd_fast, macd_slow, macd_signal_p)
+    df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = dif, dea, hist
 
     # RSI（core 权威口径，消灭 replace(NaN) 分歧）
     rsi_period = int(params.get('rsi_period', 14))
-    df['RSI'] = _core_rsi(close, rsi_period)
+    df['RSI'] = eng.rsi(rsi_period)
 
     # KDJ
     kdj_n = int(params.get('kdj_n', 9))
-    low_n = low.rolling(kdj_n).min()
-    high_n = high.rolling(kdj_n).max()
-    rsv = (close - low_n) / (high_n - low_n).replace(0, np.nan) * 100
-    df['K'] = rsv.ewm(span=3, adjust=False).mean()
-    df['D'] = df['K'].ewm(span=3, adjust=False).mean()
+    k, d, _j = eng.kdj(kdj_n)
+    df['K'], df['D'] = k, d
 
     # 布林带
     bb_period = int(params.get('bb_period', 20))
     bb_std_mult = float(params.get('bb_std', 2.0))
-    df['BB_Mid'] = close.rolling(bb_period).mean()
-    bb_std = close.rolling(bb_period).std()
-    df['BB_Upper'] = df['BB_Mid'] + bb_std_mult * bb_std
-    df['BB_Lower'] = df['BB_Mid'] - bb_std_mult * bb_std
+    upper, middle, lower, _std = eng.bollinger(bb_period, bb_std_mult)
+    df['BB_Mid'] = middle
+    df['BB_Upper'] = upper
+    df['BB_Lower'] = lower
 
     # ATR (core Wilder 单一真相源, 旧: SMA)
     atr_period = int(params.get('atr_period', 14))
-    df['ATR'] = _core_atr(high, low, close, atr_period)
+    df['ATR'] = eng.atr(atr_period)
 
     # 成交量均线
-    df['Vol_MA5'] = volume.rolling(5).mean()
-    df['Vol_MA20'] = volume.rolling(20).mean()
+    df['Vol_MA5'] = eng.volume_ma(5)
+    df['Vol_MA20'] = eng.volume_ma(20)
 
     return df
 
@@ -408,8 +400,8 @@ class DailySignalGenerator:
             return 'SIDEWAYS'
 
         close = index_data['收盘'].astype(float)
-        ma60 = close.rolling(60).mean()
-        ma120 = close.rolling(120).mean()
+        ma60 = _core_sma(close, 60)
+        ma120 = _core_sma(close, 120)
         ret_20d = close.pct_change(20) * 100
         ret_5d = close.pct_change(5) * 100
         ret_month = close.pct_change(20) * 100

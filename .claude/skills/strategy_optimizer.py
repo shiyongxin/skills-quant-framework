@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from itertools import product
 import random
 
-from core.indicators import rsi as _core_rsi
+from core.indicators import rsi as _core_rsi, sma as _core_sma, macd as _core_macd
 
 try:
     from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod, StopLossMethod
@@ -98,8 +98,8 @@ class MAStrategy(StrategyTemplate):
         data = data.copy()
 
         # 计算均线
-        data[f'MA{short_period}'] = data['收盘'].rolling(short_period).mean()
-        data[f'MA{long_period}'] = data['收盘'].rolling(long_period).mean()
+        data[f'MA{short_period}'] = _core_sma(data['收盘'], short_period)
+        data[f'MA{long_period}'] = _core_sma(data['收盘'], long_period)
 
         # 生成信号
         data['signal_buy'] = (
@@ -135,11 +135,10 @@ class MACDStrategy(StrategyTemplate):
 
         data = data.copy()
 
-        # 计算MACD
-        ema_fast = data['收盘'].ewm(span=fast, adjust=False).mean()
-        ema_slow = data['收盘'].ewm(span=slow, adjust=False).mean()
-        data['MACD'] = ema_fast - ema_slow
-        data['MACD_Signal'] = data['MACD'].ewm(span=signal_period, adjust=False).mean()
+        # 计算MACD (core 单一真相源)
+        dif, dea, _hist = _core_macd(data['收盘'], fast, slow, signal_period)
+        data['MACD'] = dif
+        data['MACD_Signal'] = dea
 
         # 生成信号
         data['signal_buy'] = (

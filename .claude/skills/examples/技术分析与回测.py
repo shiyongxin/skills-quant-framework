@@ -42,7 +42,7 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
 
 def calculate_rsi(df, period=14):
     """
-    计算RSI相对强弱指标
+    计算RSI相对强弱指标（core 单一真相源, 审计 #10）
 
     Args:
         df: 包含收盘价的数据
@@ -51,14 +51,9 @@ def calculate_rsi(df, period=14):
     Returns:
         添加RSI的DataFrame
     """
-    close = df['收盘']
-    delta = close.diff()
+    from core.indicators import rsi as _core_rsi
 
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
+    df['RSI'] = _core_rsi(df['收盘'], period)
 
     return df
 

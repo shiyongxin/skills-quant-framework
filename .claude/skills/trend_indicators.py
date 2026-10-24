@@ -9,6 +9,8 @@ Trend Indicators Library
 import pandas as pd
 import numpy as np
 
+from core.indicators import ema as _core_ema, vwap as _core_vwap
+
 
 class TrendIndicators:
     """趋势指标集合"""
@@ -28,7 +30,7 @@ class TrendIndicators:
             添加EMA列的DataFrame
         """
         df = df.copy()
-        df[f'EMA_{period}'] = df[column].ewm(span=period, adjust=False).mean()
+        df[f'EMA_{period}'] = _core_ema(df[column], period)
         return df
 
     @staticmethod
@@ -46,8 +48,8 @@ class TrendIndicators:
             添加DEMA列的DataFrame
         """
         df = df.copy()
-        ema1 = df[column].ewm(span=period, adjust=False).mean()
-        ema2 = ema1.ewm(span=period, adjust=False).mean()
+        ema1 = _core_ema(df[column], period)
+        ema2 = _core_ema(ema1, period)
         df[f'DEMA_{period}'] = 2 * ema1 - ema2
         return df
 
@@ -66,9 +68,9 @@ class TrendIndicators:
             添加TEMA列的DataFrame
         """
         df = df.copy()
-        ema1 = df[column].ewm(span=period, adjust=False).mean()
-        ema2 = ema1.ewm(span=period, adjust=False).mean()
-        ema3 = ema2.ewm(span=period, adjust=False).mean()
+        ema1 = _core_ema(df[column], period)
+        ema2 = _core_ema(ema1, period)
+        ema3 = _core_ema(ema2, period)
         df[f'TEMA_{period}'] = 3 * ema1 - 3 * ema2 + ema3
         return df
 
@@ -150,11 +152,8 @@ class TrendIndicators:
         close = df['收盘']
         volume = df['成交量']
 
-        # 典型价格
-        tp = (high + low + close) / 3
-
-        # VWAP = 累积(TP * Volume) / 累积Volume
-        df['VWAP'] = (tp * volume).cumsum() / volume.cumsum()
+        # VWAP = 累积(TP * Volume) / 累积Volume (core 单一真相源)
+        df['VWAP'] = _core_vwap(high, low, close, volume)
 
         return df
 

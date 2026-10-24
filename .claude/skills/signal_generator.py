@@ -13,6 +13,7 @@ import numpy as np
 from datetime import datetime
 
 import trade_constraints
+from core.indicators import sma as _core_sma, volume_ma as _core_volume_ma
 
 
 # ==================== 分项信号标签 (报告层与日报共用) ====================
@@ -218,7 +219,7 @@ class SignalGenerator:
             '收盘': df['收盘'],
             'ma_fast': df[real('MA5')],
             'ma_mid': (df[mid_col] if mid_col in df.columns
-                       else df['收盘'].rolling(10).mean()),
+                       else _core_sma(df['收盘'], 10)),
             'ma_slow': df[real('MA20')],
             'macd': df[real('MACD')],
             'macd_signal': df[real('MACD_Signal')],
@@ -371,7 +372,7 @@ class SignalGenerator:
             return pd.Series(0.0, index=df.index)
 
         volume = df['成交量']
-        volume_ma5 = volume.rolling(5).mean()
+        volume_ma5 = _core_volume_ma(volume, 5)
 
         signal = pd.Series(0.0, index=df.index)
 

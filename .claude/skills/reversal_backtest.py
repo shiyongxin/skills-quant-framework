@@ -19,7 +19,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
-from core.indicators import rsi as _core_rsi, atr as _core_atr
+from core.indicators import atr as _core_atr
+from core.indicator_engine import IndicatorEngine
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
     decide_action,
@@ -110,41 +111,36 @@ class ReversalBacktester:
         close = df['收盘']
         high = df['最高']
         low = df['最低']
+        # 共享指标引擎 (审计 #10): 与 ReversalDetector 同一真相源
+        # (旧实现 ewm(adjust=True) 与全仓 adjust=False 分裂, 已统一)
+        eng = IndicatorEngine(df)
 
         # RSI (core 单一真相源)
         for period in [6, 14, 24]:
-            df[f'RSI{period}'] = _core_rsi(close, period)
+            df[f'RSI{period}'] = eng.rsi(period)
 
         # KDJ
-        low_n = low.rolling(9).min()
-        high_n = high.rolling(9).max()
-        rsv = (close - low_n) / (high_n - low_n) * 100
-        df['K'] = rsv.ewm(3).mean()
-        df['D'] = df['K'].ewm(3).mean()
-        df['J'] = 3 * df['K'] - 2 * df['D']
+        k, d, j = eng.kdj()
+        df['K'], df['D'], df['J'] = k, d, j
 
         # MACD
-        ema12 = close.ewm(span=12).mean()
-        ema26 = close.ewm(span=26).mean()
-        df['MACD'] = ema12 - ema26
-        df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
-        df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+        dif, dea, hist = eng.macd()
+        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = dif, dea, hist
 
         # 布林带
-        df['BB_Middle'] = close.rolling(20).mean()
-        df['BB_Std'] = close.rolling(20).std()
-        df['BB_Upper'] = df['BB_Middle'] + 2 * df['BB_Std']
-        df['BB_Lower'] = df['BB_Middle'] - 2 * df['BB_Std']
+        upper, middle, lower, std = eng.bollinger(20, 2.0)
+        df['BB_Middle'], df['BB_Std'] = middle, std
+        df['BB_Upper'], df['BB_Lower'] = upper, lower
 
         # 均线
-        df['MA5'] = close.rolling(5).mean()
-        df['MA10'] = close.rolling(10).mean()
-        df['MA20'] = close.rolling(20).mean()
-        df['MA60'] = close.rolling(60).mean()
+        df['MA5'] = eng.ma(5)
+        df['MA10'] = eng.ma(10)
+        df['MA20'] = eng.ma(20)
+        df['MA60'] = eng.ma(60)
 
         # 成交量
-        df['Vol_MA5'] = df['成交量'].rolling(5).mean()
-        df['Vol_MA20'] = df['成交量'].rolling(20).mean()
+        df['Vol_MA5'] = eng.volume_ma(5)
+        df['Vol_MA20'] = eng.volume_ma(20)
 
         # 价格变化率
         df['ROC5'] = close.pct_change(5) * 100

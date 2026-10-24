@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 import factor_library
+from core.indicators import sma as _core_sma
 from execution_model import (
     limit_pct_for,
     is_limit_up_price,
@@ -230,7 +231,7 @@ def check_last_bar(df: pd.DataFrame,
                 report.skipped_checks.append(
                     'adv_participation: 缺成交额列, 未检查')
         else:
-            adv20 = df['成交额'].rolling(20, min_periods=20).mean().iloc[-1]
+            adv20 = _core_sma(df['成交额'], 20).iloc[-1]
             if pd.isna(adv20):
                 if cfg.min_adv_amount > 0:
                     report.skipped_checks.append(

@@ -36,6 +36,7 @@ try:
     from realtime_quote import RealTimeQuoteAPI
     # 统一信号契约 (审计 C #9): web 层消费 Signal, 不再各页面自拼信号字典
     from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL, Signal)
+    from core.indicators import sma as _core_sma
     MODULES_AVAILABLE = True
 except ImportError:
     MODULES_AVAILABLE = False
@@ -694,8 +695,8 @@ def render_backtest():
 
                 # 生成信号
                 if strategy == "MA交叉":
-                    data[f'MA{ma_short}'] = data['收盘'].rolling(ma_short).mean()
-                    data[f'MA{ma_long}'] = data['收盘'].rolling(ma_long).mean()
+                    data[f'MA{ma_short}'] = _core_sma(data['收盘'], ma_short)
+                    data[f'MA{ma_long}'] = _core_sma(data['收盘'], ma_long)
                     data['signal_buy'] = (
                         (data[f'MA{ma_short}'] > data[f'MA{ma_long}']) &
                         (data[f'MA{ma_short}'].shift(1) <= data[f'MA{ma_long}'].shift(1))
