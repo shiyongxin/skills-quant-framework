@@ -261,13 +261,18 @@ class TestSaveResultsConfigFingerprint:
         engine.results = {}
         engine._ga_runs = []
         engine.seed = 42
+        engine._use_weighted_scoring = True
         engine.config = OptimizationConfig(name='fp-run', mode='robust')
         fp = tmp_path / 'res.json'
         engine.save_results(str(fp))
         data = json.loads(fp.read_text(encoding='utf-8'))
         assert data['config'] == {'name': 'fp-run', 'mode': 'robust',
                                   'version': '1.0'}
-        # 无 config → None (既有清单字段不变)
+        assert data['use_weighted_scoring'] is True
+        # 无 config → None (既有清单字段不变); 模式键独立于 config 落盘
         engine.config = None
+        engine._use_weighted_scoring = False
         engine.save_results(str(fp))
-        assert json.loads(fp.read_text(encoding='utf-8'))['config'] is None
+        reloaded = json.loads(fp.read_text(encoding='utf-8'))
+        assert reloaded['config'] is None
+        assert reloaded['use_weighted_scoring'] is False

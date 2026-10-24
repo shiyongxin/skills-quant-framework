@@ -13,21 +13,32 @@ import trade_constraints
 
 
 class SignalGenerator:
-    """信号生成器类"""
+    """信号生成器类 (双模式: 投票制默认 / 4 因子加权评分 — E-P1 #19 闭环)"""
 
-    def __init__(self, buy_threshold=2.0, sell_threshold=2.0):
+    def __init__(self, buy_threshold=2.0, sell_threshold=2.0,
+                 use_weighted_scoring=False, scoring_params=None):
         """
         初始化
 
         Parameters:
         -----------
         buy_threshold : float
-            买入信号阈值，信号得分>=此值触发买入 (默认2.0)
+            买入信号阈值，信号得分>=此值触发买入 (默认2.0, 投票制)
         sell_threshold : float
-            卖出信号阈值，信号得分>=此值触发卖出 (默认2.0)
+            卖出信号阈值，信号得分>=此值触发卖出 (默认2.0, 投票制)
+        use_weighted_scoring : bool
+            True 时综合信号改用 4 因子 0-100 加权评分
+            (score_buy/sell_threshold 触发, 参数来自 scoring_params);
+            分项信号列照常产出, 仅作报告明细 (默认 False = 生产投票制零变化)
+        scoring_params : dict or None
+            评分/阈值参数 (w_trend/w_momentum/w_risk/w_performance/
+            score_buy_threshold/score_sell_threshold), 与优化器 best_params
+            JSON 下发的 params 同一契约; None → 出厂默认
         """
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        self.use_weighted_scoring = use_weighted_scoring
+        self.scoring_params = dict(scoring_params or {})
 
     def generate_signals(self, data):
         """
@@ -41,7 +52,7 @@ class SignalGenerator:
         """
         df = data.copy()
 
-        # 生成各类信号
+        # 生成各类信号 (投票制分项明细, 两种模式下均产出供报告展示)
         df['signal_ma_cross'] = self._ma_cross_signal(df)
         df['signal_macd'] = self._macd_signal(df)
         df['signal_kdj'] = self._kdj_signal(df)
@@ -50,12 +61,60 @@ class SignalGenerator:
         df['signal_volume'] = self._volume_signal(df)
         df['signal_breakout'] = self._breakout_signal(df)
 
-        # 综合信号
-        df['signal_buy'] = self._combine_buy_signals(df)
-        df['signal_sell'] = self._combine_sell_signals(df)
-        df['signal_strength'] = self._calculate_signal_strength(df)
+        # 综合信号 (双模式)
+        if self.use_weighted_scoring:
+            buy_score, sell_score = self._weighted_scores(df)
+            sb = float(self.scoring_params.get('score_buy_threshold', 60.0))
+            ss = float(self.scoring_params.get('score_sell_threshold', 35.0))
+            buy_sig = (buy_score >= sb).astype(int)
+            sell_sig = (sell_score >= ss).astype(int)
+            # 与 vectorized_backtest 评分模式同一 warmup 口径
+            warmup = min(60, max(10, len(df) // 3))
+            buy_sig.iloc[:warmup] = 0
+            sell_sig.iloc[:warmup] = 0
+            df['signal_buy'] = buy_sig
+            df['signal_sell'] = sell_sig
+            # 强度改用评分差/10, 保持报告层 -10..10 尺度
+            df['signal_strength'] = ((buy_score - sell_score) / 10).clip(-10, 10)
+        else:
+            df['signal_buy'] = self._combine_buy_signals(df)
+            df['signal_sell'] = self._combine_sell_signals(df)
+            df['signal_strength'] = self._calculate_signal_strength(df)
 
         return df
+
+    def _weighted_scores(self, df):
+        """列名适配后调用 vectorized_backtest.weighted_factor_scores。
+
+        signal_generator 列名 (MA5/MA10/MACD/RSI/K/BB_*) → 评分函数列名
+        (ma_fast/ma_mid/macd/rsi/k/bb_*); MA10 缺失时就地补算 rolling(10)。
+        缺关键指标列直接抛错 (分数会静默变 50 档垃圾值, 不软降级)。
+        """
+        from vectorized_backtest import weighted_factor_scores
+
+        required = ['收盘', 'MA5', 'MA20', 'MACD', 'MACD_Signal',
+                    'RSI', 'K', 'D', 'BB_Upper', 'BB_Lower']
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"加权评分缺少指标列 {missing} — 先经 "
+                "stock_data_fetcher.calculate_technical_indicators 计算")
+
+        m = pd.DataFrame({
+            '收盘': df['收盘'],
+            'ma_fast': df['MA5'],
+            'ma_mid': (df['MA10'] if 'MA10' in df.columns
+                       else df['收盘'].rolling(10).mean()),
+            'ma_slow': df['MA20'],
+            'macd': df['MACD'],
+            'macd_signal': df['MACD_Signal'],
+            'rsi': df['RSI'],
+            'k': df['K'],
+            'd': df['D'],
+            'bb_upper': df['BB_Upper'],
+            'bb_lower': df['BB_Lower'],
+        }, index=df.index)
+        return weighted_factor_scores(m, self.scoring_params)
 
     def _ma_cross_signal(self, df):
         """均线交叉信号"""
@@ -443,16 +502,27 @@ class SignalGenerator:
 
 
 # 便捷函数
-def generate_signals(data):
-    """生成交易信号"""
-    generator = SignalGenerator()
-    return generator.generate_signals(data)
+def _generator_from_params(params):
+    """便捷函数参数契约 (E-P1 #19 下发): None → 出厂投票制;
+    dict → optimized_params.load_optimized_params 下发字典直通
+    (阈值/模式/评分参数同源)。"""
+    if not params:
+        return SignalGenerator()
+    return SignalGenerator(
+        buy_threshold=float(params.get('buy_threshold', 2.0)),
+        sell_threshold=float(params.get('sell_threshold', 2.0)),
+        use_weighted_scoring=bool(params.get('use_weighted_scoring', False)),
+        scoring_params=params)
 
 
-def get_latest_signal(data):
-    """获取最新信号"""
-    generator = SignalGenerator()
-    return generator.get_latest_signal(data)
+def generate_signals(data, params=None):
+    """生成交易信号 (params: 优化器下发参数字典, 可选)"""
+    return _generator_from_params(params).generate_signals(data)
+
+
+def get_latest_signal(data, params=None):
+    """获取最新信号 (params 同上)"""
+    return _generator_from_params(params).get_latest_signal(data)
 
 
 def format_signal_report(signal_info):

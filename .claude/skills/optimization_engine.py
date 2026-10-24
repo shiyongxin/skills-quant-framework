@@ -1283,6 +1283,9 @@ class OptimizationEngine:
             'config': ({'name': self.config.name, 'mode': self.config.mode,
                         'version': self.config.version}
                        if self.config is not None else None),
+            # 审计 E-P1 #19 闭环: 记录本次优化的信号引擎模式,
+            # optimized_params.load_optimized_params 据此下发
+            'use_weighted_scoring': self._use_weighted_scoring,
             'n_stocks': len(self.stock_data),
             'data_start': str(data_start) if data_start is not None else None,
             'data_end': str(data_end) if data_end is not None else None,
