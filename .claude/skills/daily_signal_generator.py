@@ -62,6 +62,72 @@ class StockSignal:
     # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
     executable: bool = True
     blocked_reasons: list = field(default_factory=list)
+    skipped_checks: list = field(default_factory=list)
+
+    def to_signal(self, signal_date=None, execute_at=None,
+                  target_weight=None):
+        """→ 统一契约 Signal (审计 C #9 / 项 21 #9a).
+
+        Args:
+            signal_date: 信号日期; None = 由调用方给 (日报用报告日期)
+            execute_at: 可执行时点; None = 由执行层 (t+1 开盘) 决定
+            target_weight: 目标仓位比例; None = 由下游风控决定
+
+        Returns:
+            core.signal.Signal
+        """
+        return to_signal(self, signal_date=signal_date,
+                         execute_at=execute_at, target_weight=target_weight)
+
+
+def to_signal(stock_signal, signal_date=None, execute_at=None,
+              target_weight=None):
+    """StockSignal (或同形对象) → 统一契约 Signal (审计 C #9).
+
+    鸭子类型读取 (缺字段用默认值), 因此测试桩/历史结构也能安全转换。
+    """
+    from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                             SCALE_VOTE_NORM, Signal, normalize_date)
+
+    raw_action = getattr(stock_signal, 'signal', 'HOLD')
+    action = (ACTION_BUY if raw_action == 'BUY'
+              else ACTION_SELL if raw_action == 'SELL' else ACTION_HOLD)
+
+    def _f(name, default=0.0):
+        value = getattr(stock_signal, name, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    return Signal(
+        symbol=getattr(stock_signal, 'symbol', ''),
+        signal_date=normalize_date(signal_date),
+        action=action,
+        strength=_f('signal_strength'),
+        scale=SCALE_VOTE_NORM,
+        reasons=list(getattr(stock_signal, 'reasons', []) or []),
+        target_weight=target_weight,
+        execute_at=execute_at,
+        executable=bool(getattr(stock_signal, 'executable', True)),
+        blocked_reasons=list(getattr(stock_signal, 'blocked_reasons', []) or []),
+        skipped_checks=list(getattr(stock_signal, 'skipped_checks', []) or []),
+        source='daily_signal_generator',
+        extra={
+            'name': getattr(stock_signal, 'name', ''),
+            'price': _f('price'),
+            'change_pct': _f('change_pct'),
+            'regime': getattr(stock_signal, 'regime', ''),
+            'system_name': getattr(stock_signal, 'system_name', ''),
+            'buy_score': _f('buy_score'),
+            'sell_score': _f('sell_score'),
+            'rsi': _f('rsi'),
+            'kdj_k': _f('kdj_k'),
+            'bb_position': _f('bb_position'),
+            'volume_ratio': _f('volume_ratio'),
+            'atr_pct': _f('atr_pct'),
+        },
+    )
 
 
 @dataclass
@@ -76,6 +142,8 @@ class DailyReport:
     signals: list              # list[StockSignal]
     regime_switch_alert: str   # 体制切换预警
     timestamp: str
+    # 统一契约信号 (审计 C #9): 与 signals 同源, 供下游/落盘直接消费
+    contract_signals: list = field(default_factory=list)
 
 
 # ==================== 指标计算 ====================
@@ -439,6 +507,8 @@ class DailySignalGenerator:
         side = {'BUY': 'buy', 'SELL': 'sell'}.get(sig_result['signal'], 'both')
         constraint = trade_constraints.check_last_bar(
             data, code=symbol, side=side)
+        # 审计 C #9 收口: 约束字段统一装配 (不再各模块手拼)
+        cfields = constraint.as_signal_fields()
 
         return StockSignal(
             symbol=symbol,
@@ -461,8 +531,9 @@ class DailySignalGenerator:
             atr_pct=sig_result['indicators']['atr_pct'],
             distance_to_support=support_dist,
             distance_to_resistance=resist_dist,
-            executable=constraint.ok,
-            blocked_reasons=list(constraint.blocked_reasons),
+            executable=cfields['executable'],
+            blocked_reasons=cfields['blocked_reasons'],
+            skipped_checks=cfields['skipped_checks'],
         )
 
     def generate_daily_report(self, symbols: list = None,
@@ -528,8 +599,9 @@ class DailySignalGenerator:
         # 体制切换预警
         alert = self._check_regime_switch()
 
+        report_date = datetime.now().strftime('%Y-%m-%d')
         report = DailyReport(
-            date=datetime.now().strftime('%Y-%m-%d'),
+            date=report_date,
             current_regime=regime,
             regime_cn=regime_cn,
             system_used=self.get_system_name_for_regime(regime),
@@ -538,6 +610,9 @@ class DailySignalGenerator:
             signals=signals,
             regime_switch_alert=alert,
             timestamp=datetime.now().isoformat(),
+            # 统一契约信号 (审计 C #9): 与 signals 同源派生, 供下游/落盘消费
+            contract_signals=[to_signal(s, signal_date=report_date)
+                              for s in signals],
         )
 
         return report

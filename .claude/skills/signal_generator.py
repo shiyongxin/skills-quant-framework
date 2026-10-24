@@ -497,6 +497,56 @@ class SignalGenerator:
             'skipped_checks': list(report.skipped_checks),
         }
 
+    def to_signal(self, data, symbol=None, target_weight=None,
+                  execute_at=None, signal_date=None):
+        """产出统一契约 Signal (审计 C #9 / 项 21 #9a).
+
+        取最新一根 bar 的信号; 可执行性检查复用 `get_latest_signal` 已算好的
+        约束结果 (不重复调用 trade_constraints)。
+
+        Args:
+            data: 含技术指标的 DataFrame
+            symbol: 标的代码 (缺省留空)
+            target_weight: 目标仓位比例; None = 由下游风控决定
+            execute_at: 可执行时点; None = 由执行层 (t+1 开盘) 决定
+            signal_date: 信号日期; None = 取最新 bar 的日期
+
+        Returns:
+            core.signal.Signal
+        """
+        from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                                 SCALE_VOTE, SCALE_WEIGHTED, Signal,
+                                 normalize_date)
+
+        info = self.get_latest_signal(data)
+        action = (ACTION_BUY if info['buy_signal']
+                  else ACTION_SELL if info['sell_signal'] else ACTION_HOLD)
+        side = ('buy' if action == ACTION_BUY
+                else 'sell' if action == ACTION_SELL else 'all')
+        reasons = (describe_signals(info['signals'], side=side)
+                   if action != ACTION_HOLD else [])
+
+        return Signal(
+            symbol=symbol or '',
+            signal_date=normalize_date(
+                signal_date if signal_date is not None else info['date']),
+            action=action,
+            strength=float(info['strength']),
+            scale=SCALE_WEIGHTED if self.use_weighted_scoring else SCALE_VOTE,
+            reasons=reasons,
+            target_weight=target_weight,
+            execute_at=execute_at,
+            executable=bool(info['executable']),
+            blocked_reasons=list(info['blocked_reasons']),
+            skipped_checks=list(info['skipped_checks']),
+            source='signal_generator',
+            extra={
+                'price': float(info['price']),
+                'buy_score': float(info['buy_score']),
+                'sell_score': float(info['sell_score']),
+            },
+        )
+
     def format_signal_report(self, signal_info):
         """格式化信号报告"""
         lines = []
@@ -580,6 +630,22 @@ def generate_signals(data, params=None):
 def get_latest_signal(data, params=None):
     """获取最新信号 (params 同上)"""
     return generator_from_params(params).get_latest_signal(data)
+
+
+def get_signal(data, params=None, symbol=None, **kwargs):
+    """产出统一契约 Signal (审计 C #9 便捷入口).
+
+    Args:
+        data: 含技术指标的 DataFrame
+        params: 优化器下发参数字典 (同 generate_signals)
+        symbol: 标的代码
+        **kwargs: 透传 to_signal (target_weight/execute_at/signal_date)
+
+    Returns:
+        core.signal.Signal
+    """
+    return generator_from_params(params).to_signal(data, symbol=symbol,
+                                                    **kwargs)
 
 
 def format_signal_report(signal_info):

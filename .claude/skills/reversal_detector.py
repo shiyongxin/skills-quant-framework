@@ -289,6 +289,8 @@ class ReversalDetector:
         side = {'BUY': 'buy', 'SELL': 'sell'}.get(alert_type, 'both')
         constraint = trade_constraints.check_last_bar(
             df, code=code, side=side)
+        # 审计 C #9 收口: 约束字段统一装配 (不再各模块手拼)
+        cfields = constraint.as_signal_fields()
 
         return ReversalAlert(
             code=code,
@@ -300,8 +302,8 @@ class ReversalDetector:
             timing=timing,
             risk_note=risk_note,
             action=action,
-            executable=constraint.ok,
-            blocked_reasons=list(constraint.blocked_reasons),
+            executable=cfields['executable'],
+            blocked_reasons=cfields['blocked_reasons'],
         )
 
     def analyze_stocks(self, stock_pool: Dict[str, str]) -> List[ReversalAlert]:

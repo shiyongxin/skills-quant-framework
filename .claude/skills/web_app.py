@@ -34,6 +34,8 @@ try:
     from portfolio_manager import PortfolioManager
     from real_time_monitor import RealTimeMonitor
     from realtime_quote import RealTimeQuoteAPI
+    # 统一信号契约 (审计 C #9): web 层消费 Signal, 不再各页面自拼信号字典
+    from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL, Signal)
     MODULES_AVAILABLE = True
 except ImportError:
     MODULES_AVAILABLE = False
@@ -296,8 +298,8 @@ def render_dashboard():
     #  ¥1,000,000/+23.5%/信号5/收益+15.3% 凭空捏造;
     #  现全部来自 watchlist 真实信号 + 组合管理器真实持仓)
     signals = get_all_signals(st.session_state.watchlist)
-    buy_count = sum(1 for s in signals if s.get('buy_signal', False))
-    sell_count = sum(1 for s in signals if s.get('sell_signal', False))
+    buy_count = sum(1 for s in signals if s.action == ACTION_BUY)
+    sell_count = sum(1 for s in signals if s.action == ACTION_SELL)
 
     manager = st.session_state.manager
     total_value = sum(p.total_value for p in manager.portfolios.values())
@@ -350,14 +352,12 @@ def render_dashboard():
                 latest = data.iloc[-1]
                 change_pct = latest.get('涨跌幅', 0)
 
-                # 获取信号
+                # 获取信号 (统一契约)
                 signal = get_stock_signal(symbol)
-                signal_text = "买入" if signal.get('buy_signal', False) else (
-                    "卖出" if signal.get('sell_signal', False) else "中性"
-                )
-                signal_class = "signal-buy" if signal.get('buy_signal') else (
-                    "signal-sell" if signal.get('sell_signal') else ""
-                )
+                signal_text = ("买入" if signal.action == ACTION_BUY else
+                               "卖出" if signal.action == ACTION_SELL else "中性")
+                signal_class = ("signal-buy" if signal.action == ACTION_BUY else
+                                "signal-sell" if signal.action == ACTION_SELL else "")
 
                 watchlist_data.append({
                     '代码': symbol,
@@ -396,20 +396,20 @@ def render_dashboard():
     st.subheader("🎯 最新交易信号")
 
     if signals:
-        buy_signals = [s for s in signals if s.get('buy_signal', False)]
-        sell_signals = [s for s in signals if s.get('sell_signal', False)]
+        buy_signals = [s for s in signals if s.action == ACTION_BUY]
+        sell_signals = [s for s in signals if s.action == ACTION_SELL]
 
         col1, col2 = st.columns(2)
 
         with col1:
             st.write("**买入信号**")
             for signal in buy_signals[:5]:
-                st.success(f"{signal['symbol']}: 强度 {signal['strength']:+.1f}")
+                st.success(f"{signal.symbol}: 强度 {signal.strength:+.1f}")
 
         with col2:
             st.write("**卖出信号**")
             for signal in sell_signals[:5]:
-                st.error(f"{signal['symbol']}: 强度 {signal['strength']:+.1f}")
+                st.error(f"{signal.symbol}: 强度 {signal.strength:+.1f}")
 
 
 # =============================================================================
@@ -528,25 +528,25 @@ def render_analysis():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if signal.get('buy_signal', False):
+        if signal.action == ACTION_BUY:
             st.success("**买入信号** ✅")
-        elif signal.get('sell_signal', False):
+        elif signal.action == ACTION_SELL:
             st.error("**卖出信号** ✅")
         else:
             st.info("**观望** ⚪")
 
     with col2:
-        st.metric("信号强度", f"{signal['strength']:+.1f}")
+        st.metric("信号强度", f"{signal.strength:+.1f}")
 
     with col3:
         st.write("**建议**")
-        if signal['strength'] > 5:
+        if signal.strength > 5:
             st.write("🟢 积极买入")
-        elif signal['strength'] > 2:
+        elif signal.strength > 2:
             st.write("🟡 考虑买入")
-        elif signal['strength'] > -2:
+        elif signal.strength > -2:
             st.write("⚪ 观望")
-        elif signal['strength'] > -5:
+        elif signal.strength > -5:
             st.write("🟡 考虑卖出")
         else:
             st.write("🔴 积极卖出")
@@ -1100,35 +1100,32 @@ def get_stock_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:
     return None
 
 
-def get_stock_signal(symbol: str) -> Dict:
-    """获取股票信号"""
+def get_stock_signal(symbol: str) -> Signal:
+    """获取股票信号 (统一契约 Signal, 审计 C #9).
+
+    数据不可用时返回 HOLD 的空契约 (executable=True, 无阻断原因)。
+    """
     try:
         data = get_stock_data(symbol, days=120)
         if data is not None and len(data) > 0:
             data = st.session_state.fetcher.calculate_technical_indicators(data)
-            signal = st.session_state.generator.get_latest_signal(data)
-            return signal
-    except Exception as e:
+            return st.session_state.generator.to_signal(data, symbol=symbol)
+    except Exception:
         pass
 
-    return {
-        'buy_signal': False,
-        'sell_signal': False,
-        'strength': 0
-    }
+    return Signal(symbol=symbol, signal_date='', action=ACTION_HOLD,
+                  strength=0.0, source='web_app')
 
 
-def get_all_signals(symbols: List[str]) -> List[Dict]:
-    """获取所有股票的信号"""
+def get_all_signals(symbols: List[str]) -> List[Signal]:
+    """获取所有股票的信号 (统一契约 Signal 列表)"""
     signals = []
 
     for symbol in symbols:
-        signal = get_stock_signal(symbol)
-        signal['symbol'] = symbol
-        signals.append(signal)
+        signals.append(get_stock_signal(symbol))
 
     # 按强度排序
-    signals.sort(key=lambda x: abs(x.get('strength', 0)), reverse=True)
+    signals.sort(key=lambda x: abs(x.strength), reverse=True)
 
     return signals
 

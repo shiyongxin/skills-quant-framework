@@ -97,6 +97,31 @@ L1 入选但 L2 为 SELL → 空仓等待，而非换股。
 
 ## 指标层契约
 
+### 统一信号输出契约（审计 C #9，项 21 #9a）
+
+`core/signal.py` 的 `Signal` dataclass 是所有信号/选股模块的**出口形状**：
+
+```
+{symbol, signal_date, action∈{BUY,HOLD,SELL}, strength, scale,
+ reasons[], confidence, target_weight, execute_at,
+ executable, blocked_reasons[], skipped_checks[], source, extra{}}
+```
+
+- **刻度显式声明**：`scale` ∈ `vote`（S1 分项求和 [-10,10]）/ `vote_norm`（S2 归一化 [-1,1]）/
+  `weighted`（0-100 加权）/ `prob` / `score` / `zscore`；契约校验刻度量纲，
+  **不做静默归一化** —— 跨模块比较前必须自己选刻度。
+- **互斥**：`action` 单值；`action_from_flags` 对"买卖同时为真"直接抛错。
+- **交易约束唯一挂载点**：`apply_constraints(signal, report)` +
+  `trade_constraints.ConstraintReport.as_signal_fields()`（各模块不再手拼
+  `executable`/`blocked_reasons`/`skipped_checks`）。
+- `execute_at` 默认 `None` = 由执行层（`execution_model`，t+1 开盘）决定；
+  仓库暂无交易日历，不推算"下一交易日"以免造假。
+- 已接入：`signal_generator.to_signal()` / `get_signal()`、
+  `daily_signal_generator.to_signal()` + `DailyReport.contract_signals`、
+  `web_app` 全部信号展示。L1 三件套（MFS/SS/LTS）与 `reversal_detector`/
+  `ml_predictor` 的契约适配属 #9b（选股结果语义是"排名"而非"逐 bar 信号"，
+  需先定 `Signal` vs `Selection`）。
+
 ### 单一真相源（不得另写本地实现）
 
 | 指标 | 权威位置 | 口径 |

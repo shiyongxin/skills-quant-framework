@@ -171,8 +171,11 @@ class TestReproducibility:
         gen._check_regime_switch = lambda: ''
 
         def fake_stock(sym, regime, params):
+            # 契约要求 scale=vote_norm 时 strength ∈ [-1,1] (审计 C #9),
+            # 且用稳定 hash 避免跨进程顺序漂移
+            score = (sum(ord(c) for c in sym) % 100) / 100.0
             return SimpleNamespace(symbol=sym, name=sym, signal='BUY',
-                                   signal_strength=float(hash(sym) % 7),
+                                   signal_strength=score,
                                    buy_score=1.0, sell_score=0.0, price=10.0,
                                    change_pct=0.0, reasons=[], rsi=50.0,
                                    kdj_k=50.0, bb_position=0.5,

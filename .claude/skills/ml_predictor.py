@@ -446,6 +446,8 @@ class MLPredictor:
         # 数据无 symbol 列 → 一字板记 skipped)
         side = {'up': 'buy', 'down': 'sell'}.get(prediction_str, 'both')
         constraint = trade_constraints.check_last_bar(data, code=None, side=side)
+        # 审计 C #9 收口: 约束字段统一装配 (不再各模块手拼)
+        cfields = constraint.as_signal_fields()
 
         return PredictionResult(
             symbol=data.get('symbol', ['UNKNOWN'])[0] if 'symbol' in data.columns else 'UNKNOWN',
@@ -454,8 +456,8 @@ class MLPredictor:
             probability=probability,
             confidence=confidence,
             features=feature_values,
-            executable=constraint.ok,
-            blocked_reasons=list(constraint.blocked_reasons),
+            executable=cfields['executable'],
+            blocked_reasons=cfields['blocked_reasons'],
         )
 
     def predict_batch(self, data_dict: Dict[str, pd.DataFrame]) -> Dict[str, PredictionResult]:

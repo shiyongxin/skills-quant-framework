@@ -288,6 +288,8 @@ class LongTermSelector:
         # 审计 C-P1-12: 前置可执行性检查 (中长期买入方向)
         constraint = trade_constraints.check_last_bar(
             df, code=code, side='buy')
+        # 审计 C #9 收口: 约束字段统一装配 (不再各模块手拼)
+        cfields = constraint.as_signal_fields()
 
         return StockAnalysis(
             code=code,
@@ -309,8 +311,8 @@ class LongTermSelector:
             mid_trend=mid_trend,
             long_trend=long_trend,
             recommendation=recommendation,
-            executable=constraint.ok,
-            blocked_reasons=list(constraint.blocked_reasons),
+            executable=cfields['executable'],
+            blocked_reasons=cfields['blocked_reasons'],
         )
 
     def _calculate_total_score(self, returns: dict, ts_3m: float, ts_6m: float, ts_1y: float,

@@ -75,6 +75,18 @@ class ConstraintReport:
         self.ok = False
         self.blocked_reasons.append(reason)
 
+    def as_signal_fields(self) -> Dict[str, Any]:
+        """→ 契约字段 (审计 C #9 收口: 各模块不再各自拼装可执行性字段).
+
+        统一产出 executable / blocked_reasons / skipped_checks 三字段,
+        与 core.signal.Signal 的字段同名同义。
+        """
+        return {
+            'executable': bool(self.ok),
+            'blocked_reasons': list(self.blocked_reasons),
+            'skipped_checks': list(self.skipped_checks),
+        }
+
 
 _CONFIG_CACHE: Optional[ConstraintConfig] = None
 
