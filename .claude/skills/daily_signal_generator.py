@@ -5,6 +5,10 @@
 实时判断大盘态势 → 选择对应的指标体系 → 用该体系的参数计算指标 →
 生成买卖信号 → 评分排名 → 输出推荐。
 
+内层信号打分已并入 signal_generator (项 21 合并): 本模块只保留
+"体制检测 + 参数体系 + 批量日报 + manifest" 外壳, 打分口径与
+signal_generator 完全一致 (单一真相源)。
+
 用法:
     python daily_signal_generator.py --universe 50 --top 10
     python daily_signal_generator.py --symbols 000001 600519 --output report.txt
@@ -24,6 +28,7 @@ from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
 from core.indicators import rsi as _core_rsi, atr as _core_atr
+from signal_generator import SignalGenerator, SIGNAL_LABELS, describe_signals
 import trade_constraints
 
 
@@ -38,11 +43,11 @@ class StockSignal:
     change_pct: float          # 日涨跌幅
     regime: str                # 当前大盘体制
     system_name: str           # 使用的指标体系
-    buy_score: float           # 买入得分 (0-10)
-    sell_score: float          # 卖出得分 (0-10)
+    buy_score: float           # 买入得分 (S1 分值: 投票制累加或 0-100 加权评分)
+    sell_score: float          # 卖出得分 (S1 分值, 同上)
     signal: str                # "BUY" / "HOLD" / "SELL"
     signal_strength: float     # 信号强度 (-1 ~ 1)
-    reasons: list              # 信号原因
+    reasons: list              # 信号原因 (S1 标签表)
     # 技术指标
     ma_trend: str              # "UP" / "DOWN" / "FLAT"
     macd_hist: float
@@ -149,126 +154,72 @@ def compute_indicators(data: pd.DataFrame, params: dict) -> pd.DataFrame:
 
 def generate_signal(data: pd.DataFrame, params: dict) -> dict:
     """
-    对单只股票生成买卖信号
+    对单只股票生成买卖信号 (内层打分 = signal_generator, 单一真相源)
+
+    指标仍按 params 计算 (周期可配: ma_fast/ma_slow/kdj_n/bb_period/...),
+    但打分口径完全走 signal_generator:
+      - 布林统一为 S1 的"突破跟随" (原 S2 的"触下轨即买"均值回归口径已废)
+      - RSI 统一为 S1 的"进入区间"事件语义 (原 S2 为"处于区间"状态语义)
+      - 新增 S1 的突破分项 (20 日新高/新低) 与量价配合档
 
     Returns:
     --------
     dict : {buy_score, sell_score, signal, strength, reasons, indicators}
+        buy_score/sell_score = S1 的分值 (投票制累加或 0-100 加权评分)
+        strength = (buy_score - sell_score) / (buy_score + sell_score) ∈ [-1, 1]
     """
     if len(data) < 60:
         return None
 
     df = compute_indicators(data, params)
     latest = df.iloc[-1]
-    prev = df.iloc[-2] if len(df) > 1 else latest
 
-    buy_threshold = float(params.get('buy_threshold', 2.0))
-    sell_threshold = float(params.get('sell_threshold', 2.0))
-    rsi_oversold = float(params.get('rsi_oversold', 30))
-    rsi_overbought = float(params.get('rsi_overbought', 70))
+    generator = SignalGenerator(
+        buy_threshold=float(params.get('buy_threshold', 2.0)),
+        sell_threshold=float(params.get('sell_threshold', 2.0)),
+        use_weighted_scoring=bool(params.get('use_weighted_scoring', False)),
+        scoring_params=params,
+        rsi_oversold=float(params.get('rsi_oversold', 30.0)),
+        rsi_overbought=float(params.get('rsi_overbought', 70.0)),
+        # S1 契约列名 → 本模块 params 驱动的均线列 (周期不写死在列名里)
+        column_map={'MA5': 'MA_Fast', 'MA10': 'MA_Mid', 'MA20': 'MA_Slow'},
+    )
+    sig_df = generator.generate_signals(df)
+    last = sig_df.iloc[-1]
 
-    buy_score = 0.0
-    sell_score = 0.0
-    buy_reasons = []
-    sell_reasons = []
+    buy_score = float(last['signal_buy_score'])
+    sell_score = float(last['signal_sell_score'])
+    buy_signal = int(last['signal_buy'])
+    sell_signal = int(last['signal_sell'])
 
-    close = latest['收盘']
-    ma_fast = latest['MA_Fast']
-    ma_slow = latest['MA_Slow']
-    macd = latest['MACD']
-    macd_sig = latest['MACD_Signal']
-    macd_hist = latest['MACD_Hist']
-    rsi = latest['RSI']
-    k = latest['K']
-    d = latest['D']
-    bb_upper = latest['BB_Upper']
-    bb_lower = latest['BB_Lower']
-    bb_mid = latest['BB_Mid']
-    vol = latest['成交量']
-    vol_ma5 = latest['Vol_MA5']
-
-    # 1. MA金叉/死叉
-    if ma_fast > ma_slow and prev['MA_Fast'] <= prev['MA_Slow']:
-        buy_score += 1.0
-        buy_reasons.append("MA金叉")
-    elif ma_fast < ma_slow and prev['MA_Fast'] >= prev['MA_Slow']:
-        sell_score += 1.0
-        sell_reasons.append("MA死叉")
-
-    # 价格站上/跌破MA慢线
-    if close > ma_slow:
-        buy_score += 0.3
-    else:
-        sell_score += 0.3
-
-    # 2. MACD金叉/死叉
-    if macd > macd_sig and prev['MACD'] <= prev['MACD_Signal']:
-        buy_score += 1.0
-        buy_reasons.append("MACD金叉")
-    elif macd < macd_sig and prev['MACD'] >= prev['MACD_Signal']:
-        sell_score += 1.0
-        sell_reasons.append("MACD死叉")
-
-    # MACD柱由负转正
-    if macd_hist > 0 and prev['MACD_Hist'] <= 0:
-        buy_score += 0.5
-        buy_reasons.append("MACD柱转正")
-
-    # 3. RSI
-    if rsi < rsi_oversold:
-        buy_score += 0.5
-        buy_reasons.append(f"RSI超卖({rsi:.0f})")
-    elif rsi > rsi_overbought:
-        sell_score += 0.5
-        sell_reasons.append(f"RSI超买({rsi:.0f})")
-
-    # 4. KDJ金叉/死叉
-    if k > d and prev['K'] <= prev['D']:
-        buy_score += 0.8
-        buy_reasons.append("KDJ金叉")
-    elif k < d and prev['K'] >= prev['D']:
-        sell_score += 0.8
-        sell_reasons.append("KDJ死叉")
-
-    # KDJ超买超卖
-    if k < 20:
-        buy_score += 0.3
-        buy_reasons.append("KDJ超卖")
-    elif k > 80:
-        sell_score += 0.3
-        sell_reasons.append("KDJ超买")
-
-    # 5. 布林带
-    if close <= bb_lower * 1.02:
-        buy_score += 0.5
-        buy_reasons.append("触及布林下轨")
-    elif close >= bb_upper * 0.98:
-        sell_score += 0.5
-        sell_reasons.append("触及布林上轨")
-
-    # 6. 放量/缩量
-    if not np.isnan(vol_ma5) and vol_ma5 > 0:
-        vol_ratio = vol / vol_ma5
-        if vol_ratio > 1.5:
-            buy_score += 0.3
-            buy_reasons.append(f"放量(量比{vol_ratio:.1f})")
-        elif vol_ratio < 0.5:
-            sell_score += 0.2
-
-    # 综合判断
-    signal = "HOLD"
-    if buy_score >= buy_threshold and buy_score > sell_score:
+    # 综合判断 (S1 已做买卖互斥仲裁, 此处只映射三态)
+    if buy_signal:
         signal = "BUY"
-    elif sell_score >= sell_threshold and sell_score > buy_score:
+    elif sell_signal:
         signal = "SELL"
+    else:
+        signal = "HOLD"
 
     strength = (buy_score - sell_score) / max(buy_score + sell_score, 1)
 
+    # 信号原因 (按档位值翻译, 与 S1 报告层同一标签表)
+    values = {col: last[col] for col in SIGNAL_LABELS if col in sig_df.columns}
+    if signal == "BUY":
+        reasons = describe_signals(values, side='buy')
+    elif signal == "SELL":
+        reasons = describe_signals(values, side='sell')
+    else:
+        reasons = []
+
     # 布林带位置
+    bb_upper = latest['BB_Upper']
+    bb_lower = latest['BB_Lower']
     bb_range = bb_upper - bb_lower
-    bb_pos = (close - bb_lower) / bb_range if bb_range > 0 else 0.5
+    bb_pos = (latest['收盘'] - bb_lower) / bb_range if bb_range > 0 else 0.5
 
     # MA趋势
+    ma_fast = latest['MA_Fast']
+    ma_slow = latest['MA_Slow']
     if ma_fast > ma_slow:
         ma_trend = "UP"
     elif ma_fast < ma_slow:
@@ -276,19 +227,22 @@ def generate_signal(data: pd.DataFrame, params: dict) -> dict:
     else:
         ma_trend = "FLAT"
 
+    vol_ma5 = latest['Vol_MA5']
+    close = latest['收盘']
+
     return {
         'buy_score': buy_score,
         'sell_score': sell_score,
         'signal': signal,
         'strength': strength,
-        'reasons': buy_reasons if signal == "BUY" else sell_reasons if signal == "SELL" else [],
+        'reasons': reasons,
         'indicators': {
             'ma_trend': ma_trend,
-            'macd_hist': macd_hist,
-            'rsi': rsi,
-            'kdj_k': k,
+            'macd_hist': latest['MACD_Hist'],
+            'rsi': latest['RSI'],
+            'kdj_k': latest['K'],
             'bb_position': bb_pos,
-            'volume_ratio': vol / vol_ma5 if vol_ma5 > 0 else 1.0,
+            'volume_ratio': latest['成交量'] / vol_ma5 if vol_ma5 > 0 else 1.0,
             'atr_pct': latest['ATR'] / close * 100 if close > 0 else 0,
         }
     }
@@ -334,7 +288,14 @@ class DailySignalGenerator:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # 评分模式 (E-P1 #19): manifest 顶层 use_weighted_scoring 决定日报
+        # 用加权评分还是投票制; 缺键 → False (旧优化文件保持投票制口径)
+        use_weighted = bool(data.get('use_weighted_scoring', False))
+
         for sys_data in data.get('systems', []):
+            params = sys_data.get('params') or {}
+            params.setdefault('use_weighted_scoring', use_weighted)
+            sys_data['params'] = params
             regimes = sys_data.get('applicable_regimes', [])
             for regime in regimes:
                 if regime not in self.systems:

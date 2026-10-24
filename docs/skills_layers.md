@@ -69,17 +69,22 @@ MFS 用横截面 z-score（回答"比同池好多少"），SS 用 0-100 绝对�
 
 | 模块 | 信号 | 说明 |
 |---|---|---|
-| `daily_signal_generator` | `BUY`/`HOLD`/`SELL` + strength(-1~1) | 多指标打分（MACD/均线/量能等） |
+| `daily_signal_generator` | `BUY`/`HOLD`/`SELL` + strength(-1~1) | **外壳**：体制检测 + 参数体系 + 批量日报 + manifest；内层打分已并入 `signal_generator`（项 21 合并，单一真相源） |
 | `reversal_detector` + `reversal_rules` | `BUY`/`SELL`/`WATCH` alert | 反转规则单一真相源（C-P1-13），实盘/回测共用同一 `reversal_rules.py` |
 | `market_regime_classifier` | regime 标签 | 驱动 `daily_signal_generator.get_params_for_regime` 调参数，本身不产买卖信号 |
 
-组合规则：同一股票同时出现 L2 的 BUY 与 SELL 时属**层内冲突**，按
-strength 绝对值择一（`daily_signal_generator.generate_signal` 输出互斥单信号，
-不会同时 BUY+SELL）；L1 入选但 L2 为 SELL → 空仓等待，而非换股。
+组合规则：同一股票同时出现 L2 的 BUY 与 SELL 时属**层内冲突**。合并后
+`daily_signal_generator.generate_signal` 与 `signal_generator` 都只输出互斥单信号
+（S1 已做买卖互斥仲裁：两侧分值都过阈值时只保留分值高的一侧），不会出现 BUY+SELL；
+L1 入选但 L2 为 SELL → 空仓等待，而非换股。
 
 ### 信号/分析层（日频，单股）
 
-- `signal_generator.SignalGenerator`：日频技术信号，输出含 tier 分层（强势/普通/观察）。
+- `signal_generator.SignalGenerator`：**全项目唯一的信号打分真相源**（项 21 合并：
+  `daily_signal_generator` 内层已并入此处）。输出 7 个 tier 分项列 +
+  `signal_buy`/`signal_sell`（**互斥**：两侧分值都过阈值时只保留分值高的一侧）
+  + `signal_buy_score`/`signal_sell_score` + `signal_strength`；报告措辞按档位值
+  翻译（`SIGNAL_LABELS` 表，`daily_signal_generator` 的 reasons 同源）。
 - `technical_analyzer.TechnicalAnalyzer.analyze(symbol, days)`：单股综合技术分析
   （趋势/支撑压力/形态/评分），输出 dict 报告，供 UI 与人工决策，不直接下单。
 

@@ -2,6 +2,9 @@
 """
 信号生成器模块
 根据技术指标生成买卖信号
+
+单一真相源 (项 21 合并): 本模块是全项目唯一的信号打分实现;
+daily_signal_generator (S2) 的内层已并入此处, S2 只保留体制检测/批量日报外壳。
 """
 import sys
 sys.path.append('.')
@@ -12,11 +15,92 @@ from datetime import datetime
 import trade_constraints
 
 
+# ==================== 分项信号标签 (报告层与日报共用) ====================
+
+# 分项信号列 → 值 → 中文标签 (值决定档位语义, 报告措辞不得按符号硬编码)
+SIGNAL_LABELS = {
+    'signal_ma_cross': {
+        1.0: 'MA金叉', 0.5: '均线多头排列',
+        -0.5: '均线空头排列', -1.0: 'MA死叉',
+    },
+    'signal_macd': {
+        1.0: 'MACD金叉', 0.3: 'MACD零轴上方',
+        -0.3: 'MACD零轴下方', -1.0: 'MACD死叉',
+    },
+    'signal_kdj': {
+        1.0: 'KDJ金叉', 0.5: 'KDJ超卖',
+        -0.5: 'KDJ超买', -1.0: 'KDJ死叉',
+    },
+    'signal_rsi': {
+        1.0: 'RSI进入超卖区', 0.2: 'RSI强势区',
+        -0.2: 'RSI弱势区', -1.0: 'RSI进入超买区',
+    },
+    'signal_bb': {
+        1.0: '从布林下轨回归', 0.5: '突破布林上轨',
+        -0.5: '触及布林下轨', -1.0: '从布林上轨回落',
+    },
+    'signal_volume': {
+        0.5: '量增价涨', 0.3: '放量',
+        -0.2: '缩量', -0.5: '量增价跌',
+    },
+    'signal_breakout': {
+        1.0: '突破20日新高', -1.0: '跌破20日低点',
+    },
+}
+
+# 报告层展示名 (列名 → 中文)
+SIGNAL_DISPLAY_NAMES = {
+    'signal_ma_cross': '均线',
+    'signal_macd': 'MACD',
+    'signal_kdj': 'KDJ',
+    'signal_rsi': 'RSI',
+    'signal_bb': '布林带',
+    'signal_volume': '成交量',
+    'signal_breakout': '突破',
+}
+
+
+def describe_signals(values, side='all'):
+    """把分项信号值翻译成中文标签 (值 → 档位语义).
+
+    Args:
+        values: {列名: 值} 或 pd.Series
+        side: 'buy' 只取正值 / 'sell' 只取负值 / 'all' 全取
+
+    Returns:
+        list[str]: 标签列表 (按 SIGNAL_LABELS 声明顺序)
+    """
+    if isinstance(values, pd.Series):
+        values = values.to_dict()
+    out = []
+    for col, labels in SIGNAL_LABELS.items():
+        if col not in values:
+            continue
+        val = values[col]
+        if val is None:
+            continue
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            continue
+        if np.isnan(val) or val == 0:
+            continue
+        if side == 'buy' and val < 0:
+            continue
+        if side == 'sell' and val > 0:
+            continue
+        label = labels.get(round(val, 2))
+        if label:
+            out.append(label)
+    return out
+
+
 class SignalGenerator:
     """信号生成器类 (双模式: 投票制默认 / 4 因子加权评分 — E-P1 #19 闭环)"""
 
     def __init__(self, buy_threshold=2.0, sell_threshold=2.0,
-                 use_weighted_scoring=False, scoring_params=None):
+                 use_weighted_scoring=False, scoring_params=None,
+                 rsi_oversold=30.0, rsi_overbought=70.0, column_map=None):
         """
         初始化
 
@@ -34,11 +118,27 @@ class SignalGenerator:
             评分/阈值参数 (w_trend/w_momentum/w_risk/w_performance/
             score_buy_threshold/score_sell_threshold), 与优化器 best_params
             JSON 下发的 params 同一契约; None → 出厂默认
+        rsi_oversold / rsi_overbought : float
+            RSI 超卖/超买阈值 (默认 30/70); 供参数化周期体系 (S2 日报) 复用
+        column_map : dict or None
+            指标列名映射 {本模块契约列名: 实际列名}; None → 恒等。
+            例: {'MA5': 'MA_Fast', 'MA20': 'MA_Slow'} 用于对接
+            params 驱动周期 (S2) 的列名, 避免"列名写死周期"的假口径
         """
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
         self.use_weighted_scoring = use_weighted_scoring
         self.scoring_params = dict(scoring_params or {})
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+        self.column_map = dict(column_map or {})
+
+    def _col(self, df, name):
+        """按 column_map 取指标列; 列不存在返回 None (调用方按缺列降级)"""
+        real = self.column_map.get(name, name)
+        if real in df.columns:
+            return df[real]
+        return None
 
     def generate_signals(self, data):
         """
@@ -64,10 +164,13 @@ class SignalGenerator:
         # 综合信号 (双模式)
         if self.use_weighted_scoring:
             buy_score, sell_score = self._weighted_scores(df)
+            df['signal_buy_score'] = buy_score
+            df['signal_sell_score'] = sell_score
             sb = float(self.scoring_params.get('score_buy_threshold', 60.0))
             ss = float(self.scoring_params.get('score_sell_threshold', 35.0))
-            buy_sig = (buy_score >= sb).astype(int)
-            sell_sig = (sell_score >= ss).astype(int)
+            # 买卖互斥 (审计项21 合并): 同一根 bar 不得同时给出买/卖信号
+            buy_sig = ((buy_score >= sb) & (buy_score > sell_score)).astype(int)
+            sell_sig = ((sell_score >= ss) & (sell_score > buy_score)).astype(int)
             # 与 vectorized_backtest 评分模式同一 warmup 口径
             warmup = min(60, max(10, len(df) // 3))
             buy_sig.iloc[:warmup] = 0
@@ -77,8 +180,14 @@ class SignalGenerator:
             # 强度改用评分差/10, 保持报告层 -10..10 尺度
             df['signal_strength'] = ((buy_score - sell_score) / 10).clip(-10, 10)
         else:
-            df['signal_buy'] = self._combine_buy_signals(df)
-            df['signal_sell'] = self._combine_sell_signals(df)
+            buy_score, sell_score = self._score_signals(df)
+            df['signal_buy_score'] = buy_score
+            df['signal_sell_score'] = sell_score
+            # 买卖互斥: 分值高者才成立 (旧实现两侧各自独立判阈值, 可同时为 1)
+            df['signal_buy'] = ((buy_score >= self.buy_threshold) &
+                                (buy_score > sell_score)).astype(int)
+            df['signal_sell'] = ((sell_score >= self.sell_threshold) &
+                                 (sell_score > buy_score)).astype(int)
             df['signal_strength'] = self._calculate_signal_strength(df)
 
         return df
@@ -92,37 +201,42 @@ class SignalGenerator:
         """
         from vectorized_backtest import weighted_factor_scores
 
+        def real(name):
+            return self.column_map.get(name, name)
+
         required = ['收盘', 'MA5', 'MA20', 'MACD', 'MACD_Signal',
                     'RSI', 'K', 'D', 'BB_Upper', 'BB_Lower']
-        missing = [c for c in required if c not in df.columns]
+        missing = [c for c in required
+                   if c != '收盘' and real(c) not in df.columns]
         if missing:
             raise ValueError(
                 f"加权评分缺少指标列 {missing} — 先经 "
                 "stock_data_fetcher.calculate_technical_indicators 计算")
 
+        mid_col = real('MA10')
         m = pd.DataFrame({
             '收盘': df['收盘'],
-            'ma_fast': df['MA5'],
-            'ma_mid': (df['MA10'] if 'MA10' in df.columns
+            'ma_fast': df[real('MA5')],
+            'ma_mid': (df[mid_col] if mid_col in df.columns
                        else df['收盘'].rolling(10).mean()),
-            'ma_slow': df['MA20'],
-            'macd': df['MACD'],
-            'macd_signal': df['MACD_Signal'],
-            'rsi': df['RSI'],
-            'k': df['K'],
-            'd': df['D'],
-            'bb_upper': df['BB_Upper'],
-            'bb_lower': df['BB_Lower'],
+            'ma_slow': df[real('MA20')],
+            'macd': df[real('MACD')],
+            'macd_signal': df[real('MACD_Signal')],
+            'rsi': df[real('RSI')],
+            'k': df[real('K')],
+            'd': df[real('D')],
+            'bb_upper': df[real('BB_Upper')],
+            'bb_lower': df[real('BB_Lower')],
         }, index=df.index)
         return weighted_factor_scores(m, self.scoring_params)
 
     def _ma_cross_signal(self, df):
         """均线交叉信号"""
-        if 'MA5' not in df or 'MA20' not in df:
+        ma5 = self._col(df, 'MA5')
+        ma20 = self._col(df, 'MA20')
+        if ma5 is None or ma20 is None:
             return pd.Series(0.0, index=df.index)
 
-        ma5 = df['MA5']
-        ma20 = df['MA20']
         close = df['收盘']
 
         # 金叉：MA5上穿MA20
@@ -146,11 +260,10 @@ class SignalGenerator:
 
     def _macd_signal(self, df):
         """MACD信号"""
-        if 'MACD' not in df or 'MACD_Signal' not in df:
+        macd = self._col(df, 'MACD')
+        signal_line = self._col(df, 'MACD_Signal')
+        if macd is None or signal_line is None:
             return pd.Series(0.0, index=df.index)
-
-        macd = df['MACD']
-        signal_line = df['MACD_Signal']
 
         # 金叉
         golden_cross = (macd > signal_line) & (macd.shift(1) <= signal_line.shift(1))
@@ -173,11 +286,10 @@ class SignalGenerator:
 
     def _kdj_signal(self, df):
         """KDJ信号"""
-        if 'K' not in df or 'D' not in df:
+        k = self._col(df, 'K')
+        d = self._col(df, 'D')
+        if k is None or d is None:
             return pd.Series(0.0, index=df.index)
-
-        k = df['K']
-        d = df['D']
 
         # 金叉
         golden_cross = (k > d) & (k.shift(1) <= d.shift(1))
@@ -199,20 +311,21 @@ class SignalGenerator:
         return signal
 
     def _rsi_signal(self, df):
-        """RSI信号"""
-        if 'RSI' not in df:
+        """RSI信号 (超卖/超买阈值可配, 默认 30/70)"""
+        rsi = self._col(df, 'RSI')
+        if rsi is None:
             return pd.Series(0.0, index=df.index)
-
-        rsi = df['RSI']
 
         signal = pd.Series(0.0, index=df.index)
 
-        # 超卖区买入信号
-        oversold = (rsi < 30) & (rsi.shift(1) >= 30)
+        # 超卖区买入信号 (进入超卖区当根给满分)
+        oversold = ((rsi < self.rsi_oversold) &
+                    (rsi.shift(1) >= self.rsi_oversold))
         signal[oversold] = 1
 
         # 超买区卖出信号
-        overbought = (rsi > 70) & (rsi.shift(1) <= 70)
+        overbought = ((rsi > self.rsi_overbought) &
+                      (rsi.shift(1) <= self.rsi_overbought))
         signal[overbought] = -1
 
         # 强势区（仅填未定档位）
@@ -225,14 +338,13 @@ class SignalGenerator:
         return signal
 
     def _bollinger_signal(self, df):
-        """布林带信号"""
-        required_cols = ['BB_Upper', 'BB_Lower', '收盘']
-        if not all(col in df for col in required_cols):
+        """布林带信号 (突破跟随口径: 突破上轨买 / 触下轨卖 / 回归中轨 ±1)"""
+        upper = self._col(df, 'BB_Upper')
+        lower = self._col(df, 'BB_Lower')
+        if upper is None or lower is None:
             return pd.Series(0.0, index=df.index)
 
         close = df['收盘']
-        upper = df['BB_Upper']
-        lower = df['BB_Lower']
 
         signal = pd.Series(0.0, index=df.index)
 
@@ -260,7 +372,6 @@ class SignalGenerator:
 
         volume = df['成交量']
         volume_ma5 = volume.rolling(5).mean()
-        volume_ma20 = volume.rolling(20).mean()
 
         signal = pd.Series(0.0, index=df.index)
 
@@ -310,68 +421,37 @@ class SignalGenerator:
 
         return signal
 
+    def _score_signals(self, df):
+        """买卖分值 (分项正值和 / 负值和绝对值和) — 唯一计算点.
+
+        Returns:
+            (buy_score, sell_score): 两条 float Series
+        """
+        buy_score = pd.Series(0.0, index=df.index)
+        sell_score = pd.Series(0.0, index=df.index)
+        for sig in SIGNAL_LABELS:
+            if sig in df.columns:
+                col = df[sig]
+                buy_score = buy_score + col.clip(lower=0)
+                sell_score = sell_score + (-col.clip(upper=0))
+        return buy_score, sell_score
+
     def _combine_buy_signals(self, df):
-        """综合买入信号"""
-        signals = [
-            'signal_ma_cross',
-            'signal_macd',
-            'signal_kdj',
-            'signal_rsi',
-            'signal_bb',
-            'signal_volume',
-            'signal_breakout'
-        ]
-
-        # 只统计正信号
-        buy_score = 0
-        for sig in signals:
-            if sig in df:
-                buy_score += df[sig].apply(lambda x: max(0, x))
-
-        # 买入阈值
-        buy_signal = (buy_score >= self.buy_threshold).astype(int)
-
-        return buy_signal
+        """综合买入信号 (仅阈值判定, 不含互斥仲裁; 仲裁在 generate_signals)"""
+        buy_score, _ = self._score_signals(df)
+        return (buy_score >= self.buy_threshold).astype(int)
 
     def _combine_sell_signals(self, df):
-        """综合卖出信号"""
-        signals = [
-            'signal_ma_cross',
-            'signal_macd',
-            'signal_kdj',
-            'signal_rsi',
-            'signal_bb',
-            'signal_volume',
-            'signal_breakout'
-        ]
-
-        # 只统计负信号
-        sell_score = 0
-        for sig in signals:
-            if sig in df:
-                sell_score += df[sig].apply(lambda x: max(0, -x))
-
-        # 卖出阈值
-        sell_signal = (sell_score >= self.sell_threshold).astype(int)
-
-        return sell_signal
+        """综合卖出信号 (仅阈值判定, 不含互斥仲裁; 仲裁在 generate_signals)"""
+        _, sell_score = self._score_signals(df)
+        return (sell_score >= self.sell_threshold).astype(int)
 
     def _calculate_signal_strength(self, df):
-        """计算信号强度"""
-        signals = [
-            'signal_ma_cross',
-            'signal_macd',
-            'signal_kdj',
-            'signal_rsi',
-            'signal_bb',
-            'signal_volume',
-            'signal_breakout'
-        ]
-
+        """计算信号强度 (分项有符号求和, clip 到 -10..10)"""
         strength = pd.Series(0.0, index=df.index)
 
-        for sig in signals:
-            if sig in df:
+        for sig in SIGNAL_LABELS:
+            if sig in df.columns:
                 strength += df[sig]
 
         # 归一化到-10到10
@@ -401,6 +481,8 @@ class SignalGenerator:
             'buy_signal': bool(latest['signal_buy']),
             'sell_signal': bool(latest['signal_sell']),
             'strength': latest['signal_strength'],
+            'buy_score': float(latest['signal_buy_score']),
+            'sell_score': float(latest['signal_sell_score']),
             'ma_cross': latest['signal_ma_cross'],
             'macd': latest['signal_macd'],
             'kdj': latest['signal_kdj'],
@@ -408,6 +490,8 @@ class SignalGenerator:
             'bb': latest['signal_bb'],
             'volume': latest['signal_volume'],
             'breakout': latest['signal_breakout'],
+            # 契约列名 → 值 (报告层标签翻译用, 项21 合并新增)
+            'signals': {col: float(latest[col]) for col in SIGNAL_LABELS},
             'executable': report.ok,
             'blocked_reasons': list(report.blocked_reasons),
             'skipped_checks': list(report.skipped_checks),
@@ -433,59 +517,27 @@ class SignalGenerator:
 
         lines.append("分项信号:")
 
-        # 均线信号
-        ma = signal_info['ma_cross']
-        if ma > 0:
-            lines.append(f"  均线: 买入 (金叉)")
-        elif ma < 0:
-            lines.append(f"  均线: 卖出 (死叉)")
-        else:
-            lines.append(f"  均线: 中性")
+        # 分项信号 (措辞按档位值翻译, 不再按符号硬编码 — 旧版把
+        # "突破上轨(买)" 标成 "触及下轨(买)"、"触下轨(卖)" 标成 "突破上轨(卖)")
+        values = signal_info.get('signals') or {}
+        legacy = {
+            'signal_ma_cross': signal_info.get('ma_cross', 0.0),
+            'signal_macd': signal_info.get('macd', 0.0),
+            'signal_kdj': signal_info.get('kdj', 0.0),
+            'signal_rsi': signal_info.get('rsi', 0.0),
+            'signal_bb': signal_info.get('bb', 0.0),
+            'signal_volume': signal_info.get('volume', 0.0),
+            'signal_breakout': signal_info.get('breakout', 0.0),
+        }
+        for col, display in SIGNAL_DISPLAY_NAMES.items():
+            val = values.get(col, legacy.get(col, 0.0))
+            labels = describe_signals({col: val}, side='all')
+            if labels:
+                direction = '买入' if float(val) > 0 else '卖出'
+                lines.append(f"  {display}: {direction} ({labels[0]})")
+            else:
+                lines.append(f"  {display}: 中性")
 
-        # MACD信号
-        macd = signal_info['macd']
-        if macd > 0:
-            lines.append(f"  MACD: 买入 (金叉)")
-        elif macd < 0:
-            lines.append(f"  MACD: 卖出 (死叉)")
-        else:
-            lines.append(f"  MACD: 中性")
-
-        # KDJ信号
-        kdj = signal_info['kdj']
-        if kdj > 0:
-            lines.append(f"  KDJ: 买入 (金叉)")
-        elif kdj < 0:
-            lines.append(f"  KDJ: 卖出 (死叉)")
-        else:
-            lines.append(f"  KDJ: 中性")
-
-        # RSI信号
-        rsi = signal_info['rsi']
-        if rsi > 0:
-            lines.append(f"  RSI: 买入 (超卖)")
-        elif rsi < 0:
-            lines.append(f"  RSI: 卖出 (超买)")
-        else:
-            lines.append(f"  RSI: 中性")
-
-        # 布林带信号
-        bb = signal_info['bb']
-        if bb > 0:
-            lines.append(f"  布林带: 买入 (触及下轨)")
-        elif bb < 0:
-            lines.append(f"  布林带: 卖出 (突破上轨)")
-        else:
-            lines.append(f"  布林带: 中性")
-
-        # 突破信号
-        bo = signal_info['breakout']
-        if bo > 0:
-            lines.append(f"  突破: 买入 (突破新高)")
-        elif bo < 0:
-            lines.append(f"  突破: 卖出 (跌破新低)")
-        else:
-            lines.append(f"  突破: 无明显突破")
 
         # 审计 C-P1-12: 可执行性阻断提示 (仅在存在阻断时输出)
         blocked = signal_info.get('blocked_reasons') or []
@@ -513,7 +565,11 @@ def generator_from_params(params):
         buy_threshold=float(params.get('buy_threshold', 2.0)),
         sell_threshold=float(params.get('sell_threshold', 2.0)),
         use_weighted_scoring=bool(params.get('use_weighted_scoring', False)),
-        scoring_params=params)
+        scoring_params=params,
+        # 优化器参数空间含 RSI 阈值维 (parameter_space RSI_OVERSOLD/OVERBOUGHT),
+        # 下发时必须真的生效 (缺键 → 出厂 30/70)
+        rsi_oversold=float(params.get('rsi_oversold', 30.0)),
+        rsi_overbought=float(params.get('rsi_overbought', 70.0)))
 
 
 def generate_signals(data, params=None):

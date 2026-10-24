@@ -83,7 +83,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 **Output / display**
 - `chart_visualizer.py` — 8 chart types (candlestick, multi-chart layout)
 - `web_app.py` — Streamlit 5-page UI (dashboard, analysis, backtest, portfolio, monitor)
-- `daily_signal_generator.py` — batch signal generation
+- `daily_signal_generator.py` — regime-adaptive batch daily report (scoring delegated to `signal_generator`, single source of truth)
 - `real_time_monitor.py` — 8 alert types, custom callbacks
 
 **Orchestration / utilities**
@@ -96,7 +96,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 1. **Data acquisition** — `stock_data_fetcher.StockDataFetcher.get_quote_data(code, days)` returns OHLCV DataFrame; CSVs cached at `stock_data/quotes/{code}.csv`
 2. **Indicators** — `technical_analyzer.TechnicalAnalyzer.add_all_indicators(df)` produces 30+ columns
 3. **Patterns** — `pattern_recognition.CandlestickPatterns` + `PricePatterns` annotate the DataFrame
-4. **Scoring** — `signal_generator.SignalGenerator.generate_signals(df)` → 7 binary signals + composite score
+4. **Scoring** — `signal_generator.SignalGenerator.generate_signals(df)` → 7 tiered signal columns + `signal_buy/sell` (mutually exclusive) + `signal_buy_score/sell_score` + strength
 5. **Risk** — `risk_management.RiskMetrics.compute_all(df)` → VaR, Sharpe, max drawdown
 6. **Backtest** — `backtest_framework.BacktestEngine.run(df, strategy_fn)` where `strategy_fn(df) -> {-1, 0, 1}`
 7. **Sizing** — `risk_management.PositionSizing.kelly(...)` / `fixed_ratio(...)` / `atr_based(...)`
