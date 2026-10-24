@@ -1302,6 +1302,100 @@ def optimize_portfolio_min_variance(returns_df):
     return optimizer.min_variance_optimization(cov_matrix)
 
 
+def to_selections(result_df: pd.DataFrame, as_of=None,
+                  selected: bool = True) -> list:
+    """select_stocks 结果 → 统一契约 Selection 列表 (审计 C #9b).
+
+    Args:
+        result_df: `select_stocks` 返回的因子+综合分 DataFrame
+            (index=股票代码, 含 Composite_Score 列)
+        as_of: 选股基准日 (与 select_stocks 的 as_of 同值 — MFS 有真实
+            point-in-time 公告日过滤语义, 契约里如实记录)
+        selected: 是否标记入选 (select_stocks 已按 top_n/min_score 截断,
+            默认全部 True; 调用方拿全量因子表再标注时传 False)
+
+    Returns:
+        list[core.signal.Selection], 按传入顺序排名 (1-based);
+        Composite_Score 为 NaN 的行跳过 (无有效分数不入契约)。
+    """
+    from core.signal import SCALE_ZSCORE, Selection, normalize_date
+
+    out = []
+    if result_df is None or len(result_df) == 0:
+        return out
+    rank = 0
+    for code, row in result_df.iterrows():
+        if 'Composite_Score' not in result_df.columns:
+            break
+        score = row['Composite_Score']
+        if pd.isna(score):
+            continue
+        rank += 1
+        factor_snapshot = {
+            str(c): float(row[c])
+            for c in result_df.columns
+            if c != 'Composite_Score' and pd.notna(row[c])
+        }
+        out.append(Selection(
+            symbol=str(code),
+            as_of=normalize_date(as_of),
+            score=float(score),
+            scale=SCALE_ZSCORE,
+            rank=rank,
+            selected=selected,
+            source='multi_factor_selection',
+            extra=factor_snapshot,
+        ))
+    return out
+
+
+def to_selections(result_df: pd.DataFrame, as_of=None,
+                  selected: bool = True) -> list:
+    """select_stocks 结果 → 统一契约 Selection 列表 (审计 C #9b).
+
+    Args:
+        result_df: `select_stocks` 返回的因子+综合分 DataFrame
+            (index=股票代码, 含 Composite_Score 列, 已按分降序)
+        as_of: 选股基准日 (与 select_stocks 的 as_of 同值 — MFS 有真实
+            point-in-time 公告日过滤语义, 契约里如实记录)
+        selected: 是否标记入选 (select_stocks 已按 top_n/min_score 截断,
+            默认全部 True; 调用方拿全量因子表再自行标注时传 False)
+
+    Returns:
+        list[core.signal.Selection], 按传入顺序排名 (1-based);
+        Composite_Score 为 NaN 的行跳过 (无有效分数不入契约)。
+    """
+    from core.signal import SCALE_ZSCORE, Selection, normalize_date
+
+    out = []
+    if result_df is None or len(result_df) == 0:
+        return out
+    if 'Composite_Score' not in result_df.columns:
+        return out
+    rank = 0
+    for code, row in result_df.iterrows():
+        score = row['Composite_Score']
+        if pd.isna(score):
+            continue
+        rank += 1
+        factor_snapshot = {
+            str(c): float(row[c])
+            for c in result_df.columns
+            if c != 'Composite_Score' and pd.notna(row[c])
+        }
+        out.append(Selection(
+            symbol=str(code),
+            as_of=normalize_date(as_of),
+            score=float(score),
+            scale=SCALE_ZSCORE,
+            rank=rank,
+            selected=selected,
+            source='multi_factor_selection',
+            extra=factor_snapshot,
+        ))
+    return out
+
+
 if __name__ == "__main__":
     print("Multi-Factor Stock Selection System - Enhanced Version v2.0")
     print("\nFactor Models:")

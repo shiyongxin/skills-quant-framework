@@ -354,6 +354,68 @@ def rank_by_performance(stock_list, period=20):
 
 
 # 测试
+def to_selections(results: list, as_of=None) -> list:
+    """screen_stocks 结果 → 统一契约 Selection 列表 (审计 C #9b).
+
+    Args:
+        results: `screen_stocks` 返回的 list[dict]
+            ({symbol, score, price, change_1d, change_5d}, 已按分排序)
+        as_of: 选股基准日; None = 实盘实时筛选, 契约记 ''
+            (SS 用当日实时数据, 无 point-in-time 语义 — 如实留空)
+
+    Returns:
+        list[core.signal.Selection]; screen_stocks 已在入口丢弃
+        交易约束阻断标的 (C-P1-12), 故入选项 executable=True。
+    """
+    from core.signal import SCALE_SCORE, Selection, normalize_date
+
+    out = []
+    for rank, r in enumerate(results or [], start=1):
+        out.append(Selection(
+            symbol=str(r.get('symbol', '')),
+            as_of=normalize_date(as_of),
+            score=float(r.get('score', 0.0)),
+            scale=SCALE_SCORE,
+            rank=rank,
+            selected=True,
+            source='stock_selector',
+            extra={k: r[k] for k in ('price', 'change_1d', 'change_5d')
+                   if k in r},
+        ))
+    return out
+
+
+def to_selections(results: list, as_of=None) -> list:
+    """screen_stocks 结果 → 统一契约 Selection 列表 (审计 C #9b).
+
+    Args:
+        results: `screen_stocks` 返回的 list[dict]
+            ({symbol, score, price, change_1d, change_5d}, 已按分降序)
+        as_of: 选股基准日; None = '' — SS 用实盘实时数据, 无 point-in-time
+            语义 (审计 L10 待修), 契约如实留空不伪造基准日
+
+    Returns:
+        list[core.signal.Selection]; screen_stocks 已在入口丢弃交易约束
+        阻断标的 (C-P1-12), 故入选项 executable=True。
+    """
+    from core.signal import SCALE_SCORE, Selection, normalize_date
+
+    out = []
+    for rank, r in enumerate(results or [], start=1):
+        out.append(Selection(
+            symbol=str(r.get('symbol', '')),
+            as_of=normalize_date(as_of),
+            score=float(r.get('score', 0.0)),
+            scale=SCALE_SCORE,
+            rank=rank,
+            selected=True,
+            source='stock_selector',
+            extra={k: r[k] for k in ('price', 'change_1d', 'change_5d')
+                   if k in r},
+        ))
+    return out
+
+
 if __name__ == "__main__":
     print("股票筛选模块测试")
     print("=" * 60)
@@ -370,3 +432,4 @@ if __name__ == "__main__":
     print(f"\n筛选结果 (评分>=50):")
     for stock in selected:
         print(f"  {stock['symbol']} 评分:{stock['score']} 现价:{stock['price']:.2f}")
+

@@ -67,6 +67,88 @@ class StockAnalysis:
     # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
     executable: bool = True
     blocked_reasons: List[str] = field(default_factory=list)
+    skipped_checks: List[str] = field(default_factory=list)
+
+    def to_selection(self, as_of=None, rank=None):
+        """→ 统一契约 Selection (审计 C #9b).
+
+        Args:
+            as_of: 选股基准日; None = '' — LTS 为实盘实时筛选, 无 point-in-time
+                语义 (审计 L10 待修), 契约如实留空不伪造基准日
+            rank: 池内排名 (1-based); None = 未排名
+
+        Returns:
+            core.signal.Selection (score=total_score 0-100, scale='score',
+            grade=recommendation 档位, selected=档位是否看多)
+        """
+        from core.signal import SCALE_SCORE, Selection, normalize_date
+
+        return Selection(
+            symbol=self.code,
+            as_of=normalize_date(as_of),
+            score=float(self.total_score),
+            scale=SCALE_SCORE,
+            rank=rank,
+            selected=self.recommendation in ('STRONG_BUY', 'BUY'),
+            grade=self.recommendation,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='long_term_selector',
+            extra={
+                'name': self.name,
+                'price': float(self.current_price),
+                'return_3m': float(self.return_3m),
+                'return_6m': float(self.return_6m),
+                'return_1y': float(self.return_1y),
+                'trend_score_3m': float(self.trend_score_3m),
+                'trend_score_6m': float(self.trend_score_6m),
+                'trend_score_1y': float(self.trend_score_1y),
+                'short_trend': self.short_trend,
+                'mid_trend': self.mid_trend,
+                'long_trend': self.long_trend,
+            },
+        )
+
+    def to_selection(self, as_of=None, rank=None):
+        """→ 统一契约 Selection (审计 C #9b).
+
+        Args:
+            as_of: 选股基准日; None = '' (LTS 实盘实时筛选, 无 point-in-time
+                语义 — 审计 L10 待修, 契约里如实留空不造假)
+            rank: 池内排名 (1-based); None = 未排名
+
+        Returns:
+            core.signal.Selection
+        """
+        from core.signal import SCALE_SCORE, Selection, normalize_date
+
+        return Selection(
+            symbol=self.code,
+            as_of=normalize_date(as_of),
+            score=float(self.total_score),
+            scale=SCALE_SCORE,
+            rank=rank,
+            selected=self.recommendation in ('STRONG_BUY', 'BUY'),
+            grade=self.recommendation,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='long_term_selector',
+            extra={
+                'name': self.name,
+                'price': float(self.current_price),
+                'return_3m': float(self.return_3m),
+                'return_6m': float(self.return_6m),
+                'return_1y': float(self.return_1y),
+                'trend_score_3m': float(self.trend_score_3m),
+                'trend_score_6m': float(self.trend_score_6m),
+                'trend_score_1y': float(self.trend_score_1y),
+                'short_trend': self.short_trend,
+                'mid_trend': self.mid_trend,
+                'long_trend': self.long_trend,
+            },
+        )
 
 
 class LongTermSelector:
@@ -313,6 +395,7 @@ class LongTermSelector:
             recommendation=recommendation,
             executable=cfields['executable'],
             blocked_reasons=cfields['blocked_reasons'],
+            skipped_checks=cfields['skipped_checks'],
         )
 
     def _calculate_total_score(self, returns: dict, ts_3m: float, ts_6m: float, ts_1y: float,

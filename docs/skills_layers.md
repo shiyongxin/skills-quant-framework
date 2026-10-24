@@ -118,9 +118,18 @@ L1 入选但 L2 为 SELL → 空仓等待，而非换股。
   仓库暂无交易日历，不推算"下一交易日"以免造假。
 - 已接入：`signal_generator.to_signal()` / `get_signal()`、
   `daily_signal_generator.to_signal()` + `DailyReport.contract_signals`、
-  `web_app` 全部信号展示。L1 三件套（MFS/SS/LTS）与 `reversal_detector`/
-  `ml_predictor` 的契约适配属 #9b（选股结果语义是"排名"而非"逐 bar 信号"，
-  需先定 `Signal` vs `Selection`）。
+  `web_app` 全部信号展示。
+- **选股结果契约 `Selection`**（#9b，与 `Signal` 分立）：`Selection` 回答"池内哪些标的
+  排名如何/是否入选"，`Signal` 回答"何时买卖/能否执行"；两者都带交易约束字段，
+  因此"选出来的票能不能买"是同一套语义。字段：
+  `{symbol, as_of, score, scale, rank, selected, grade, reasons, executable,
+  blocked_reasons, skipped_checks, source, extra}` + `is_selected`。
+  - MFS `to_selections(df, as_of)`（z-score 刻度，**有真实 point-in-time 公告日语义**）
+  - SS `to_selections(results, as_of)`（0-100 分，实盘实时筛选 → `as_of` 如实留空）
+  - LTS `StockAnalysis.to_selection()`（total_score + `recommendation` 档位；
+    实盘实时筛选 → `as_of` 如实留空，审计 L10 待修）
+  - `reversal_detector.ReversalAlert.to_signal()`（WATCH→HOLD）
+  - `ml_predictor.PredictionResult.to_signal()`（up/down/hold→BUY/SELL/HOLD）
 
 ### 单一真相源（不得另写本地实现）
 

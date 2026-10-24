@@ -61,6 +61,91 @@ class ReversalAlert:
     # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
     executable: bool = True
     blocked_reasons: List[str] = field(default_factory=list)
+    skipped_checks: List[str] = field(default_factory=list)
+
+    def to_signal(self, signal_date=None, execute_at=None):
+        """→ 统一契约 Signal (审计 C #9b).
+
+        映射: alert_type BUY→BUY / SELL→SELL / WATCH→HOLD (观察不动作);
+        strength = confidence (0-100, 无符号 scale='score' — 方向由 action
+        表达, 分值是"对该方向的把握")。
+
+        Args:
+            signal_date: 信号日期; None = '' (调用方有基准日时传入)
+            execute_at: 可执行时点; None = 交由执行层 (t+1 开盘) 决定
+
+        Returns:
+            core.signal.Signal
+        """
+        from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                                 SCALE_SCORE, Signal, normalize_date)
+
+        action = (ACTION_BUY if self.alert_type == 'BUY'
+                  else ACTION_SELL if self.alert_type == 'SELL'
+                  else ACTION_HOLD)
+        return Signal(
+            symbol=self.code,
+            signal_date=normalize_date(signal_date),
+            action=action,
+            strength=float(self.confidence),
+            scale=SCALE_SCORE,
+            reasons=list(self.signals or []),
+            execute_at=execute_at,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='reversal_detector',
+            extra={
+                'name': self.name,
+                'price': float(self.price),
+                'timing': self.timing,
+                'risk_note': self.risk_note,
+                'action': self.action,
+                'alert_type': self.alert_type,
+            },
+        )
+
+    def to_signal(self, signal_date=None, execute_at=None):
+        """→ 统一契约 Signal (审计 C #9b).
+
+        映射: alert_type BUY→BUY / SELL→SELL / WATCH→HOLD (观察不动作);
+        strength = confidence (0-100, 无符号 scale='score' — 方向由 action
+        表达, 分值是"对该方向的把握")。
+
+        Args:
+            signal_date: 信号日期; None = '' (调用方有基准日时传入)
+            execute_at: 可执行时点; None = 由执行层 (t+1 开盘) 决定
+
+        Returns:
+            core.signal.Signal
+        """
+        from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                                 SCALE_SCORE, Signal, normalize_date)
+
+        action = (ACTION_BUY if self.alert_type == 'BUY'
+                  else ACTION_SELL if self.alert_type == 'SELL'
+                  else ACTION_HOLD)
+        return Signal(
+            symbol=self.code,
+            signal_date=normalize_date(signal_date),
+            action=action,
+            strength=float(self.confidence),
+            scale=SCALE_SCORE,
+            reasons=list(self.signals or []),
+            execute_at=execute_at,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='reversal_detector',
+            extra={
+                'name': self.name,
+                'price': float(self.price),
+                'timing': self.timing,
+                'risk_note': self.risk_note,
+                'action': self.action,
+                'alert_type': self.alert_type,
+            },
+        )
 
 
 class ReversalDetector:
@@ -304,6 +389,7 @@ class ReversalDetector:
             action=action,
             executable=cfields['executable'],
             blocked_reasons=cfields['blocked_reasons'],
+            skipped_checks=cfields['skipped_checks'],
         )
 
     def analyze_stocks(self, stock_pool: Dict[str, str]) -> List[ReversalAlert]:

@@ -13,9 +13,11 @@ from .signal import (
     SCALE_VOTE_NORM,
     SCALE_WEIGHTED,
     SCALE_ZSCORE,
+    Selection,
     Signal,
     action_from_flags,
     apply_constraints,
+    selections_to_frame,
     signal_to_dict,
     signals_to_frame,
 )
@@ -23,6 +25,7 @@ from .signal import (
 __all__ = [
     "FetchResult",
     "Signal",
+    "Selection",
     "ACTION_BUY",
     "ACTION_HOLD",
     "ACTION_SELL",
@@ -34,6 +37,7 @@ __all__ = [
     "SCALE_ZSCORE",
     "action_from_flags",
     "apply_constraints",
+    "selections_to_frame",
     "signal_to_dict",
     "signals_to_frame",
 ]

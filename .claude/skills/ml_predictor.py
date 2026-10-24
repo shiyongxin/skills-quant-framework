@@ -76,6 +76,79 @@ class PredictionResult:
     # 交易约束前置检查 (审计 C-P1-12): False = 停牌/涨跌停/流动性阻断
     executable: bool = True
     blocked_reasons: List[str] = field(default_factory=list)
+    skipped_checks: List[str] = field(default_factory=list)
+
+    def to_signal(self, execute_at=None):
+        """→ 统一契约 Signal (审计 C #9b).
+
+        映射: prediction up→BUY / down→SELL / hold→HOLD;
+        strength = probability ([0,1], 无符号 scale='prob' — 方向由 action
+        表达, 分值是"模型对预测方向的把握"); confidence 透传契约 confidence。
+
+        Args:
+            execute_at: 可执行时点; None = 交由执行层 (t+1 开盘) 决定
+
+        Returns:
+            core.signal.Signal
+        """
+        from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                                 SCALE_PROB, Signal, normalize_date)
+
+        action = (ACTION_BUY if self.prediction == 'up'
+                  else ACTION_SELL if self.prediction == 'down'
+                  else ACTION_HOLD)
+        return Signal(
+            symbol=self.symbol,
+            signal_date=normalize_date(self.date),
+            action=action,
+            strength=float(self.probability),
+            scale=SCALE_PROB,
+            reasons=[],
+            confidence=(float(self.confidence)
+                        if self.confidence is not None else None),
+            execute_at=execute_at,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='ml_predictor',
+            extra={'features': dict(self.features or {})},
+        )
+
+    def to_signal(self, execute_at=None):
+        """→ 统一契约 Signal (审计 C #9b).
+
+        映射: prediction up→BUY / down→SELL / hold→HOLD;
+        strength = probability ([0,1], 无符号 scale='prob' — 方向由 action
+        表达); confidence 透传契约 confidence 字段。
+
+        Args:
+            execute_at: 可执行时点; None = 由执行层 (t+1 开盘) 决定
+
+        Returns:
+            core.signal.Signal
+        """
+        from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL,
+                                 SCALE_PROB, Signal, normalize_date)
+
+        action = (ACTION_BUY if self.prediction == 'up'
+                  else ACTION_SELL if self.prediction == 'down'
+                  else ACTION_HOLD)
+        return Signal(
+            symbol=self.symbol,
+            signal_date=normalize_date(self.date),
+            action=action,
+            strength=float(self.probability),
+            scale=SCALE_PROB,
+            reasons=[],
+            confidence=float(self.confidence)
+            if self.confidence is not None else None,
+            execute_at=execute_at,
+            executable=bool(self.executable),
+            blocked_reasons=list(self.blocked_reasons or []),
+            skipped_checks=list(self.skipped_checks or []),
+            source='ml_predictor',
+            extra={'features': dict(self.features or {})},
+        )
 
 
 @dataclass
@@ -458,6 +531,7 @@ class MLPredictor:
             features=feature_values,
             executable=cfields['executable'],
             blocked_reasons=cfields['blocked_reasons'],
+            skipped_checks=cfields['skipped_checks'],
         )
 
     def predict_batch(self, data_dict: Dict[str, pd.DataFrame]) -> Dict[str, PredictionResult]:

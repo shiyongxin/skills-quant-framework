@@ -23,12 +23,25 @@ ACTION_SELL = 'SELL'
 ACTIONS = (ACTION_BUY, ACTION_HOLD, ACTION_SELL)
 
 # 强度刻度 (声明量纲, 便于跨模块比较时显式对齐)
-SCALE_VOTE = 'vote'            # S1 分项求和, [-10, 10]
-SCALE_VOTE_NORM = 'vote_norm'  # S2 归一化, [-1, 1]
-SCALE_WEIGHTED = 'weighted'    # 0-100 加权评分 (镜像分)
-SCALE_PROB = 'prob'            # 概率 [0, 1] (ML)
-SCALE_SCORE = 'score'          # 0-100 绝对分 (SS/LTS)
-SCALE_ZSCORE = 'zscore'        # 横截面 z 分 (MFS)
+# 约定: vote/vote_norm/weighted 为**有符号**分 (正=买方一侧, 负=卖方一侧);
+#       prob/score 为**无符号**分 (方向由 action 表达, 分值是"对该方向的把握")。
+SCALE_VOTE = 'vote'            # S1 分项求和, 有符号 [-10, 10]
+SCALE_VOTE_NORM = 'vote_norm'  # S2 归一化, 有符号 [-1, 1]
+SCALE_WEIGHTED = 'weighted'    # (买方分-卖方分)/10, 有符号 [-10, 10]
+SCALE_PROB = 'prob'            # 模型对预测方向的概率, 无符号 [0, 1]
+SCALE_SCORE = 'score'          # 0-100 绝对分 (SS/LTS/reversal 置信度), 无符号 [0, 100]
+SCALE_ZSCORE = 'zscore'        # 横截面 z 分 (MFS), 有符号无固定界
+
+# 有符号刻度 → 量纲边界 (校验用); 无符号刻度单独校验
+_SIGNED_BOUNDS = {
+    SCALE_VOTE: (-10.0, 10.0),
+    SCALE_VOTE_NORM: (-1.0, 1.0),
+    SCALE_WEIGHTED: (-10.0, 10.0),
+}
+_UNSIGNED_BOUNDS = {
+    SCALE_PROB: (0.0, 1.0),
+    SCALE_SCORE: (0.0, 100.0),
+}
 
 
 @dataclass(frozen=True)
@@ -70,16 +83,14 @@ class Signal:
         if self.action not in ACTIONS:
             raise ValueError(
                 f"action 必须是 {ACTIONS} 之一, 收到 {self.action!r}")
-        # 刻度校验: prob ∈ [0,1]; vote_norm ∈ [-1,1] (负值=卖方一侧)
-        if self.scale == SCALE_PROB and not 0.0 <= float(self.strength) <= 1.0:
-            raise ValueError(
-                f"scale={SCALE_PROB} 要求 strength ∈ [0, 1], "
-                f"收到 {self.strength}")
-        if self.scale == SCALE_VOTE_NORM and \
-                not -1.0 <= float(self.strength) <= 1.0:
-            raise ValueError(
-                f"scale={SCALE_VOTE_NORM} 要求 strength ∈ [-1, 1], "
-                f"收到 {self.strength}")
+        bounds = _SIGNED_BOUNDS.get(self.scale) or \
+            _UNSIGNED_BOUNDS.get(self.scale)
+        if bounds:
+            value = float(self.strength)
+            if not bounds[0] <= value <= bounds[1]:
+                raise ValueError(
+                    f"scale={self.scale} 要求 strength ∈ "
+                    f"[{bounds[0]}, {bounds[1]}], 收到 {self.strength}")
 
     @property
     def is_actionable(self) -> bool:
@@ -104,6 +115,64 @@ def normalize_date(value) -> str:
     if not text:
         return ''
     return text.split(' ')[0].split('T')[0]
+
+
+@dataclass(frozen=True)
+class Selection:
+    """统一选股结果契约 (L1 横截面选股层; 审计 C #9b, 项 21).
+
+    与 `Signal` **分立** (用户决策): `Selection` 回答"池内哪些标的排名如何、
+    是否入选"; `Signal` 回答"何时买卖、能否执行"。两者都带交易约束字段
+    (executable/blocked_reasons/skipped_checks), 因此"选出来的票能不能买"
+    在两个契约里是同一套语义。
+
+    Attributes:
+        symbol: 标的代码
+        as_of: 选股基准日 (point-in-time); '' = 产出模块暂无 as-of 语义
+            (MFS 有真实公告日过滤; SS/LTS 为实盘实时筛选 — 审计 L10 待修,
+            契约如实留空, 不伪造基准日)
+        score: 综合分, 量纲见 `scale`
+        scale: 分数刻度 (SCALE_ZSCORE / SCALE_SCORE)
+        rank: 池内排名 (1-based); None = 未排名
+        selected: 是否入选 (过阈值 / TopN / 档位判定)
+        grade: 档位标签 (如 LTS 的 STRONG_BUY/BUY/HOLD/AVOID); None = 无档位
+        reasons: 入选原因 (产出模块能给出时)
+        executable: 是否通过交易约束前置检查
+        blocked_reasons: 阻断原因 (可执行性检查)
+        skipped_checks: 因缺数据而诚实跳过的检查项
+        source: 产出模块名
+        extra: 模块特有字段快照 (因子明细/价格/收益率等)
+    """
+    symbol: str
+    as_of: str = ''
+    score: float = 0.0
+    scale: str = SCALE_SCORE
+    rank: Optional[int] = None
+    selected: bool = True
+    grade: Optional[str] = None
+    reasons: List[str] = field(default_factory=list)
+    executable: bool = True
+    blocked_reasons: List[str] = field(default_factory=list)
+    skipped_checks: List[str] = field(default_factory=list)
+    source: str = ''
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # score 刻度: 'score' → [0,100]; 'zscore' 有符号无固定界, 不校验
+        bounds = _UNSIGNED_BOUNDS.get(self.scale)
+        if bounds:
+            value = float(self.score)
+            if not bounds[0] <= value <= bounds[1]:
+                raise ValueError(
+                    f"scale={self.scale} 要求 score ∈ "
+                    f"[{bounds[0]}, {bounds[1]}], 收到 {self.score}")
+        if self.rank is not None and int(self.rank) < 1:
+            raise ValueError(f"rank 必须 1-based, 收到 {self.rank}")
+
+    @property
+    def is_selected(self) -> bool:
+        """入选且可执行 (供组合构建直接筛选)"""
+        return bool(self.selected) and bool(self.executable)
 
 
 def action_from_flags(buy: bool, sell: bool, strict: bool = True) -> str:
@@ -154,6 +223,26 @@ def signal_to_dict(signal: Signal) -> Dict[str, Any]:
     d['skipped_checks'] = list(signal.skipped_checks or [])
     d['is_actionable'] = signal.is_actionable
     return d
+
+
+def selections_to_frame(selections: List[Selection]):
+    """Selection 列表 → 扁平 DataFrame (序列落盘/组合消费)."""
+    import pandas as pd
+
+    rows = []
+    for s in selections:
+        d = asdict(s)
+        d.pop('extra', None)
+        d['reasons'] = '; '.join(s.reasons or [])
+        d['blocked_reasons'] = '; '.join(s.blocked_reasons or [])
+        d['skipped_checks'] = '; '.join(s.skipped_checks or [])
+        rows.append(d)
+    columns = ['symbol', 'as_of', 'score', 'scale', 'rank', 'selected',
+               'grade', 'reasons', 'executable', 'blocked_reasons',
+               'skipped_checks', 'source']
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows)
 
 
 def signals_to_frame(signals: List[Signal]):
