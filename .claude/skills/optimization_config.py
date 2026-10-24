@@ -118,6 +118,11 @@ class OptimizationConfig:
     # 优化模式
     mode: str = "full"  # "global", "regime", "robust", "iterative", "full"
 
+    # 信号引擎模式 (审计 E-P1 死维度接线): True=4 因子加权评分
+    # (score_*_threshold 触发, 参数空间 6 个评分维参与 fitness),
+    # False=投票制 (buy/sell_threshold, 优化器旧基线)
+    use_weighted_scoring: bool = True
+
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
@@ -145,6 +150,7 @@ class OptimizationConfig:
             'created_at': self.created_at,
             'version': self.version,
             'mode': self.mode,
+            'use_weighted_scoring': self.use_weighted_scoring,
             'data': asdict(self.data),
             'ga': asdict(self.ga),
             'walk_forward': asdict(self.walk_forward),
@@ -163,6 +169,7 @@ class OptimizationConfig:
         config.created_at = data.get('created_at', '')
         config.version = data.get('version', '1.0')
         config.mode = data.get('mode', 'full')
+        config.use_weighted_scoring = bool(data.get('use_weighted_scoring', True))
 
         if 'data' in data:
             config.data = DataConfig(**data['data'])

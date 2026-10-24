@@ -130,6 +130,75 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     )
 
 
+def weighted_factor_scores(df: pd.DataFrame, params: dict) -> tuple:
+    """
+    4 因子加权评分 (0-100 连续买卖分), 审计 E-P1 死维度接线 (P1-1)。
+
+    移植已删 web_backtest.calculate_weighted_score 的评分制语义, 向量化:
+      trend   : MA 多头排列(+40) / 仅 fast>slow(+20) + MACD 多头(+40)
+                + 上穿慢线(+20), 封顶 100 (排列与 fast>slow 互斥, 同原版 elif)
+      mom     : RSI14 阶梯 (<30→90, <50→70, <70→40, 否则 10; 缺数视为 50→40)
+                + K>D 且 K<80 (+10), 封顶 100
+      risk    : 布林带位置倒置 (1-pos)*100 — 越靠近下轨分越高;
+                带宽退化/缺数 → 50
+      perf    : 50 + ret5*500 clip [0,100] (前收缺失 → 50)
+    卖方子分 = 100 - 买方子分 (web_backtest 同构镜像);
+    总分 = Σ w_i·子分_i / Σw (wsum<=0 时按 100 归一)。
+    仅用截至当 bar 的状态 — 无未来函数。
+
+    Returns:
+    --------
+    (buy_score, sell_score) : 均为 0-100 的 pd.Series
+    """
+    w_trend = float(params.get('w_trend', 30))
+    w_momentum = float(params.get('w_momentum', 25))
+    w_risk = float(params.get('w_risk', 15))
+    w_performance = float(params.get('w_performance', 30))
+    wsum = w_trend + w_momentum + w_risk + w_performance
+    if wsum <= 0:
+        wsum = 100.0
+
+    close = df['收盘']
+
+    # ---- trend_bull ----
+    trend_bull = pd.Series(0.0, index=df.index)
+    ma_align = (df['ma_fast'] > df['ma_mid']) & (df['ma_mid'] > df['ma_slow'])
+    trend_bull += ma_align.astype(float) * 40
+    trend_bull += ((~ma_align) & (df['ma_fast'] > df['ma_slow'])).astype(float) * 20
+    trend_bull += (df['macd'] > df['macd_signal']).astype(float) * 40
+    cross_up = (close > df['ma_slow']) & (close.shift(1) <= df['ma_slow'].shift(1))
+    trend_bull += cross_up.astype(float) * 20
+    trend_bull = trend_bull.clip(0, 100)
+
+    # ---- momentum_bull ----
+    rsi = df['rsi'].fillna(50)
+    mom_bull = pd.Series(
+        np.select([rsi < 30, rsi < 50, rsi < 70], [90.0, 70.0, 40.0],
+                  default=10.0),
+        index=df.index, dtype=float)
+    kdj_up = (df['k'] > df['d']) & (df['k'] < 80)
+    mom_bull = (mom_bull + kdj_up.astype(float) * 10).clip(0, 100)
+
+    # ---- risk_bull ----
+    bb_range = df['bb_upper'] - df['bb_lower']
+    bb_pos = ((close - df['bb_lower']) / bb_range.replace(0, np.nan)).clip(0, 1)
+    risk_bull = ((1 - bb_pos) * 100).fillna(50.0)
+
+    # ---- performance_bull ----
+    prev_close = close.shift(1)
+    ret5 = (close / prev_close - 1).where(prev_close > 0)
+    perf_bull = (50 + ret5 * 500).clip(0, 100).fillna(50.0)
+
+    # ---- 加权归一 (卖方 = 100 - 买方镜像) ----
+    buy_score = (w_trend * trend_bull + w_momentum * mom_bull
+                 + w_risk * risk_bull + w_performance * perf_bull) / wsum
+    sell_score = (w_trend * (100 - trend_bull)
+                  + w_momentum * (100 - mom_bull)
+                  + w_risk * (100 - risk_bull)
+                  + w_performance * (100 - perf_bull)) / wsum
+    return buy_score, sell_score
+
+
 class VectorizedBacktester:
     """
     向量化回测引擎
@@ -287,10 +356,31 @@ class VectorizedBacktester:
         """
         向量化生成买卖信号
 
+        双模式 (审计 E-P1 死维度接线):
+        - 投票制 (默认): 各指标事件加权点数 vs buy/sell_threshold (旧基线)
+        - 评分制 (use_weighted_scoring=True): 4 因子 0-100 加权分
+          vs score_buy/sell_threshold, 状态触发
+
         Returns:
         --------
         pd.Series : 1=买入, -1=卖出, 0=持有
         """
+        if bool(params.get('use_weighted_scoring', False)):
+            w_buy, w_sell = weighted_factor_scores(df, params)
+            score_buy_threshold = float(params.get('score_buy_threshold', 60.0))
+            score_sell_threshold = float(params.get('score_sell_threshold', 35.0))
+
+            signals = pd.Series(0, index=df.index)
+            signals[w_buy >= score_buy_threshold] = 1
+            signals[w_sell >= score_sell_threshold] = -1
+            conflict = ((w_buy >= score_buy_threshold)
+                        & (w_sell >= score_sell_threshold))
+            signals[conflict] = -1
+
+            warmup = min(60, max(10, len(df) // 3))
+            signals.iloc[:warmup] = 0
+            return signals
+
         buy_threshold = float(params.get('buy_threshold', 2.0))
         sell_threshold = float(params.get('sell_threshold', 2.0))
         rsi_oversold = float(params.get('rsi_oversold', 30))

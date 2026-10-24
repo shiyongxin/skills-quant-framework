@@ -590,11 +590,26 @@ class OptimizationEngine:
             walk_forward_config=config.walk_forward if config else None)
         self.n_workers = n_workers
         self.seed = seed
+        # 审计 E-P1 死维度接线 (P1-1): 优化器路径默认启用4 因子加权评分,
+        # 使 parameter_space 中 w_trend/w_momentum/w_risk/w_performance/
+        # score_buy_threshold/score_sell_threshold 六维真正影响 fitness;
+        # config.use_weighted_scoring=False 可回退投票制旧基线。
+        self._use_weighted_scoring = bool(
+            config.use_weighted_scoring if config is not None else True)
         self._ga_runs = []  # 各阶段GA运行元数据, save_results 落盘
 
         self.results = {}       # {regime: OptimizationResult}
         self.stock_data = {}    # {symbol: DataFrame}
         self.regime_labels = {} # {symbol: pd.Series}
+
+    def _eval_params(self, params: dict) -> dict:
+        """GA 个体参数 → fitness 评估参数 (审计 E-P1 死维度接线 P1-1)。
+
+        注入 use_weighted_scoring 开关: True 时 _generate_signals 走
+        4 因子加权评分 (score_*_threshold 触发), 参数空间 6 个评分维
+        从噪声变为有效搜索维; False 时保持投票制 (buy/sell_threshold)。
+        """
+        return {**params, 'use_weighted_scoring': self._use_weighted_scoring}
 
     def _merge_ga_cfg(self, stage_cfg: dict, ga_params=None) -> dict:
         """阶段 GA 默认 × config.ga × 显式参数 三级合并 (审计 E-P1 接线)。
@@ -770,7 +785,7 @@ class OptimizationEngine:
 
         def evaluate(params):
             evals['n'] += 1
-            return self.evaluator.evaluate(params, sample_data)
+            return self.evaluator.evaluate(self._eval_params(params), sample_data)
 
         # 运行GA
         ga = GeneticAlgorithm(**ga_cfg)
@@ -880,7 +895,8 @@ class OptimizationEngine:
             def evaluate(params, r=regime):
                 evals['n'] += 1
                 return self.evaluator.evaluate(
-                    params, sample_data, self.regime_labels, r
+                    self._eval_params(params), sample_data,
+                    self.regime_labels, r
                 )
 
             ga = GeneticAlgorithm(**ga_cfg)
@@ -970,6 +986,7 @@ class OptimizationEngine:
         def evaluate_robust(params):
             """稳健适应度: 各体制fitness的最小值(忽略无数据体制)"""
             evals['n'] += 1
+            params = self._eval_params(params)
             if not all_regimes or not self.regime_labels:
                 return self.evaluator.evaluate(params, sample_data)
 
@@ -1092,7 +1109,7 @@ class OptimizationEngine:
 
             def evaluate(params):
                 evals['n'] += 1
-                return self.evaluator.evaluate(params, sample_data)
+                return self.evaluator.evaluate(self._eval_params(params), sample_data)
 
             ga = GeneticAlgorithm(
                 population_size=cfg['population_size'],
