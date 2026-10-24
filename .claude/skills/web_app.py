@@ -27,7 +27,8 @@ for _p in (_SKILLS_DIR, _REPO_ROOT):
 IMPORT_ERROR: Optional[str] = None
 try:
     from stock_data_fetcher import StockDataFetcher
-    from signal_generator import SignalGenerator
+    from signal_generator import SignalGenerator, generator_from_params
+    from optimized_params import load_optimized_params, list_systems
     from chart_visualizer import ChartVisualizer, ChartStyle
     from backtest_framework import BacktestEngine, PositionConfig
     from portfolio_manager import PortfolioManager
@@ -118,6 +119,11 @@ def init_session_state():
     if 'watchlist' not in st.session_state:
         st.session_state.watchlist = ['600519', '000858', '002415']
 
+    # 优化参数下发状态 (E-P1 #19): None = 出厂投票制;
+    # 加载 best_params.json 后 generator 换实例, 信号面全站跟随
+    if 'optimized_params' not in st.session_state:
+        st.session_state.optimized_params = None
+
     if 'selected_stock' not in st.session_state:
         st.session_state.selected_stock = '600519'
 
@@ -183,6 +189,64 @@ def render_sidebar():
         # 数据天数
         data_days = st.slider("数据天数", 30, 500, 120)
         st.session_state.data_days = data_days
+
+        st.divider()
+
+        # 优化参数下发 (审计 E-P1 #19 闭环: best_params.json → 信号层)
+        # 加载后 st.session_state.generator 换实例 — 首页/分析页/信号图/
+        # 回测多因子四个调用面零改动即跟随
+        st.subheader("🎯 优化参数")
+        _opt_params = st.session_state.optimized_params
+        if _opt_params:
+            _mode = ("加权评分" if _opt_params.get('use_weighted_scoring')
+                     else "投票制")
+            st.caption(f"已加载 {len(_opt_params)} 键 · {_mode}")
+            if st.button("清除 (回出厂投票制)", key="sidebar_params_clear"):
+                st.session_state.optimized_params = None
+                st.session_state.generator = SignalGenerator()
+                st.rerun()
+
+        params_path = st.text_input(
+            "结果文件", value="stock_data/optimization_result.json",
+            key="sidebar_params_path",
+            help="OptimizationEngine save_results 落盘的 best_params JSON")
+
+        systems = []
+        if params_path:
+            try:
+                systems = list_systems(params_path)
+            except FileNotFoundError:
+                st.caption("文件不存在 — 先运行优化器产出结果")
+            except Exception as e:
+                st.caption(f"结果文件读取失败: {e}")
+
+        regime_options = None
+        regime_choice = None
+        if systems:
+            regime_options = ["自动 (全局优先)"] + [
+                f"{s['regime'] or 'GLOBAL'} · {s['name']}" for s in systems]
+            regime_choice = st.selectbox(
+                "体制系统", regime_options, key="sidebar_params_regime",
+                help="多体制结果需显式选择; 自动=全局系统优先")
+        else:
+            st.caption("检测到结果文件后可选择体制系统")
+
+        if systems and st.button("⬇️ 加载参数", key="sidebar_params_load"):
+            idx = (regime_options.index(regime_choice) - 1
+                   if regime_choice and regime_choice != "自动 (全局优先)"
+                   else -1)
+            regime = None if idx < 0 else systems[idx]['regime']
+            try:
+                params = load_optimized_params(params_path, regime=regime)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state.optimized_params = params
+                st.session_state.generator = generator_from_params(params)
+                _mode = ("加权评分" if params.get('use_weighted_scoring')
+                         else "投票制")
+                st.success(f"已加载 {len(params)} 键 · {_mode} — 信号即刻生效")
+                st.rerun()
 
         st.divider()
 

@@ -5,8 +5,12 @@
   use_weighted_scoring 标注); save_results 落盘新增模式键
 - signal_generator: use_weighted_scoring 双模式 (默认 False 生产零变化),
   综合信号走 weighted_factor_scores 列名适配, 便捷函数 params 直通
+- web_app 侧边栏优化参数入口: 加载/清除 best_params.json → generator
+  换实例, 首页/分析页/信号图/回测多因子调用面零改动跟随
 """
+import inspect
 import json
+import os
 
 import numpy as np
 import pandas as pd
@@ -207,3 +211,44 @@ class TestSignalGeneratorDualMode:
         out = sg_module.generate_signals(df, params)
         assert (out['signal_buy'] == 0).all()
         assert (out['signal_sell'] == 0).all()
+
+
+_SKILLS = os.path.join(os.path.dirname(__file__), '..', '.claude', 'skills')
+
+
+def _web_src() -> str:
+    with open(os.path.join(_SKILLS, 'web_app.py'), encoding='utf-8') as f:
+        return f.read()
+
+
+class TestWebAppParamEntry:
+    """web_app 侧边栏优化参数入口 (源码级诚实性, 无 streamlit 运行时)"""
+
+    def test_imports_and_state_wiring(self):
+        src = _web_src()
+        assert ('from optimized_params import load_optimized_params, list_systems'
+                in src)
+        assert ('from signal_generator import SignalGenerator, '
+                'generator_from_params' in src)
+        # init: 缺键补默认 None
+        assert 'st.session_state.optimized_params = None' in src
+        # 加载: 换实例 (全站信号面跟随) ; 清除: 回出厂投票制
+        assert 'st.session_state.generator = generator_from_params(params)' in src
+        assert 'st.session_state.generator = SignalGenerator()' in src
+
+    def test_entry_section_present(self):
+        src = _web_src()
+        assert '🎯 优化参数' in src
+        assert '加载参数' in src
+        assert '清除 (回出厂投票制)' in src
+
+    def test_public_generator_from_params(self):
+        g = sg_module.generator_from_params(None)
+        assert g.use_weighted_scoring is False
+        g2 = sg_module.generator_from_params(
+            {'use_weighted_scoring': True, 'score_buy_threshold': 70})
+        assert g2.use_weighted_scoring is True
+        assert g2.scoring_params['score_buy_threshold'] == 70
+        # 便捷函数经公开入口 (契约面稳定)
+        assert 'generator_from_params' in inspect.getsource(
+            sg_module.generate_signals)

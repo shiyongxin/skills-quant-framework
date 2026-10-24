@@ -502,10 +502,11 @@ class SignalGenerator:
 
 
 # 便捷函数
-def _generator_from_params(params):
-    """便捷函数参数契约 (E-P1 #19 下发): None → 出厂投票制;
+def generator_from_params(params):
+    """按下发参数构造生成器 (E-P1 #19 契约公开入口): None → 出厂投票制;
     dict → optimized_params.load_optimized_params 下发字典直通
-    (阈值/模式/评分参数同源)。"""
+    (阈值/模式/评分参数同源)。web_app 加载优化参数时经此换实例,
+    既有 signal_buy/sell/strength 调用面零改动。"""
     if not params:
         return SignalGenerator()
     return SignalGenerator(
@@ -517,12 +518,12 @@ def _generator_from_params(params):
 
 def generate_signals(data, params=None):
     """生成交易信号 (params: 优化器下发参数字典, 可选)"""
-    return _generator_from_params(params).generate_signals(data)
+    return generator_from_params(params).generate_signals(data)
 
 
 def get_latest_signal(data, params=None):
     """获取最新信号 (params 同上)"""
-    return _generator_from_params(params).get_latest_signal(data)
+    return generator_from_params(params).get_latest_signal(data)
 
 
 def format_signal_report(signal_info):
