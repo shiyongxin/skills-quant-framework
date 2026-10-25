@@ -168,11 +168,15 @@ class ModelEvaluation:
 # =============================================================================
 
 class FeatureEngineer:
-    """特征工程器"""
+    """特征工程器
 
-    def __init__(self):
-        """初始化特征工程器"""
-        self.scaler = StandardScaler()
+    纯 pandas/numpy 实现 —— **不依赖 scikit-learn**。
+
+    历史遗留的 `self.scaler = StandardScaler()` 是死属性 (只赋值、从未被读取;
+    缩放实际由 MLPredictor/RegressionPredictor 自己的 scaler + Pipeline 完成),
+    且缺 sklearn 时会抛裸 `NameError: name 'StandardScaler' is not defined`,
+    误导使用者以为本类依赖 sklearn。已删除 —— 缺 sklearn 时本类照常可用。
+    """
 
     def create_technical_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """

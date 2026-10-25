@@ -188,6 +188,62 @@ class TestMlPredictorDegradation:
         with pytest.raises(ImportError, match='scikit-learn'):
             mod.RegressionPredictor()
 
+    def test_feature_engineer_still_works_without_sklearn(self):
+        """FeatureEngineer 是纯 pandas/numpy 实现 → 缺 sklearn 也应照常可用。
+
+        (旧实现里 `self.scaler = StandardScaler()` 是死属性: 只赋值从不读取,
+          缺 sklearn 时抛裸 NameError, 让人误以为本类依赖 sklearn)
+        """
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with missing('sklearn'):
+                mod = _fresh('ml_predictor')
+
+        engineer = mod.FeatureEngineer()          # 不应抛任何异常
+        df = pd.DataFrame({
+            '日期': pd.bdate_range('2024-01-01', periods=30),
+            '开盘': [10.0] * 30,
+            '最高': [10.5] * 30,
+            '最低': [9.5] * 30,
+            '收盘': [10.0 + i * 0.1 for i in range(30)],
+            '成交量': [1e5] * 30,
+        })
+        out = engineer.create_technical_features(df)
+        assert 'price_change' in out.columns
+        assert len(out) == 30
+
+    def test_feature_engineer_must_not_depend_on_sklearn(self):
+        """门禁: FeatureEngineer 内不得引用 sklearn 符号。
+
+        若确需引入, 必须同步 (a) 加 SKLEARN_AVAILABLE 守卫,
+        (b) 把 test_feature_engineer_still_works_without_sklearn 改成
+        "缺依赖时抛 ImportError" 的契约。
+        """
+        tree = ast.parse((_SKILLS / 'ml_predictor.py').read_text(encoding='utf-8'))
+        sklearn_names = {
+            'StandardScaler', 'Pipeline', 'TimeSeriesSplit', 'GridSearchCV',
+            'cross_val_score', 'RandomForestClassifier', 'RandomForestRegressor',
+            'GradientBoostingClassifier', 'LogisticRegression', 'LinearRegression',
+            'accuracy_score', 'precision_score', 'recall_score', 'f1_score',
+            'mean_squared_error', 'mean_absolute_error', 'classification_report',
+            'confusion_matrix',
+        }
+        offenders = []
+        for node in tree.body:
+            if not (isinstance(node, ast.ClassDef)
+                    and node.name == 'FeatureEngineer'):
+                continue
+            for n in ast.walk(node):
+                if isinstance(n, ast.Name) and n.id in sklearn_names:
+                    ctx = type(n.ctx).__name__
+                    # dataclass 字段名 (ModelEvaluation 那种) 不算依赖
+                    if ctx == 'Store' and isinstance(n.ctx, ast.Attribute):
+                        continue
+                    offenders.append(f"line {n.lineno}: {n.id}")
+        assert not offenders, (
+            f"FeatureEngineer 不得依赖 sklearn (纯 pandas 实现): {offenders} —— "
+            "若确需引入, 请同步加 SKLEARN_AVAILABLE 守卫并更新降级契约")
+
 
 # =============================================================================
 # 3. strategy_optimizer: backtest_framework 缺失
