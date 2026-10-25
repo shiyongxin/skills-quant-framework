@@ -65,4 +65,5 @@ Still open (see audit): suspension modeling 的**根本限制仍在** (停牌日
 ## Architecture docs
 
 - `skills-quant-framework-analysis-extracted/analysis/` — external deep audit (7 Chinese MD reports) against upstream `14b2f59`. Claims about files present locally are accurate as of that baseline; many have since been fixed — see "Audit fix status" above.
+- `docs/OPEN_ITEMS_PLAN_2026-10-25.md` — **待办台账**: 审计 7 份报告逐条对照当前代码复核后的未落地项 (~43 条), 分 4 个批次 (确凿小 bug / 回测数值口径 / 研究有效性 / 工程基座与副本治理), 每条带证据行号 + 复验置信度 (✅已实测 / ⚠️需再核). 修完一条即划掉并回写本文件; ⚠️ 条目动手前必须先复验 (审计基线距今已 30+ 提交).
 - Root keeps only 8 entry docs (`README` / `CLAUDE` / `AGENTS` / `CHANGELOG` / `QUICK_START_GUIDE` / `API_REFERENCE*` / `DEPLOYMENT_GUIDE`); 29 legacy reports/manuals moved to `docs/` (audit F-P2 — links from entry docs now use `docs/` prefix). `README.md` is the entry point.
