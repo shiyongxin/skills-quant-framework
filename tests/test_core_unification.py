@@ -169,8 +169,10 @@ class TestMacdTrueCross:
         idxs = np.flatnonzero(cross_up.values)
         assert len(idxs) > 0, "构造数据中应存在 MACD 金叉"
         i = int(idxs[-1])
-        # 金叉当根: 标 'MACD金叉'
-        assert 'MACD金叉' in ta._analyze_signals(df.iloc[:i + 1].copy())
+        # 金叉当根: 标 'MACD金叉'  (_analyze_signals 返回 (signals, unavailable))
+        signals, _unavailable = ta._analyze_signals(df.iloc[:i + 1].copy())
+        assert 'MACD金叉' in signals
         if i + 1 < len(df):
             # 次根: 不再是金叉(旧 bug 水平比较会持续误标)
-            assert 'MACD金叉' not in ta._analyze_signals(df.iloc[:i + 2].copy())
+            signals_next, _ = ta._analyze_signals(df.iloc[:i + 2].copy())
+            assert 'MACD金叉' not in signals_next

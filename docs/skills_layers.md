@@ -143,7 +143,9 @@ L1 入选但 L2 为 SELL → 空仓等待，而非换股。
 | BOLL | `core/indicators.bollinger` | mid=SMA(period)；std=样本标准差(ddof=1)；±mult·std |
 | 量均线 / OBV / VWAP | `core/indicators.volume_ma` / `obv` / `vwap` | rolling mean；方向符号×量累加；累积 TP·V/累积V |
 | profit_factor / MDD / Sharpe | `core/metrics` | 求和式 PF；MDD 正值%；sharpe rf=0.03, ddof=1 |
-| 数据获取结果 | `core/fetch_result.FetchResult` | 失败必须 `ok=False`+`error`，禁止静默空 DF |
+| 数据获取结果 | `core/fetch_result.FetchResult` | 失败必须 `ok=False`+`error`，禁止静默空 DF；带 `adjust` 复权维度 |
+| 交易日历 / 停牌 | `core/trading_calendar.TradingCalendar` | 由**指数行情**反推交易日集合（指数每交易日有行 → 个股缺行 = 真停牌） |
+| 复权口径（落库维度） | `HistoricalDataManager` 文件名 + 元数据 + `FetchResult.adjust` | `{symbol}.parquet`=不复权 / `{symbol}_qfq.parquet` / `{symbol}_hfq.parquet`；缺口径时返回空 DF，不拿不复权冒充 |
 
 **共享指标引擎**（审计 #10）：`core/indicator_engine.IndicatorEngine` 是业务模块
 调用指标的统一入口 —— 只负责"取哪段、叫什么列名"，公式一律在 `core/indicators.py`：
@@ -168,6 +170,36 @@ BB_Middle / BB_Lower / BB_Std / TR / ATR / Vol_MA{p} / VWAP / OBV`；
 - K 线形态列（`scan_all_patterns` 产出）：布尔列 + `Pattern_Hammer`/`Pattern_HangingMan`
   为 True/None 对象列。形态判定函数统一 dict 返回
   （`{'is_xxx': bool}` / `{'is_xxx': bool, 'type': ...}`）。
+
+## 停牌建模与复权维度（审计 C-P1-12 遗留项 / P0-4）
+
+**停牌**：A 股停牌日**没有行情行**，数据侧无标记。解法是用**指数行情**当交易日历的
+真相源 —— 上证指数每个交易日都有行，个股缺行即真停牌（不误伤节假日）：
+
+```python
+from core.trading_calendar import ensure_calendar
+ensure_calendar()          # 显式注入 / 本地 JSON 缓存 / 本地指数 parquet 现算（不联网）
+```
+
+- `trade_constraints.check_last_bar(..., calendar=None)`：有日历时按**缺失交易日数**
+  判定停牌 → 阻断买卖，原因写"最近 N 个交易日无行情（停牌或数据缺失）"；
+  "数据过期"也改按**交易日**计（节假日不算过期）；无日历时降级为自然日 +
+  零成交启发式，并在 `skipped_checks` **如实注明**"未检查"。
+- `check_close_panel(..., calendar=...)`：横截面面板级停牌识别（个股最后有行情的
+  交易日落后于市场最新交易日 → 剔除）。
+- **根本限制**：无指数数据即无日历；此时停牌检查如实跳过。回测引擎侧的"停牌期间
+  持仓无法平仓"尚未显式建模。
+
+**复权**：复权是**数据维度**不是装饰 —— 不同口径混用会在除权日产生虚假跳空。
+
+- 落库：`{symbol}.parquet`（不复权）/ `{symbol}_qfq.parquet` / `{symbol}_hfq.parquet`，
+  元数据记 `adjust`；`load(adjust=...)` 只读对应口径，缺失时返回空 DF。
+- 取数：`stock_data_fetcher.get_quote_data/get_quote_result(..., adjust=...)` 显式
+  传参，随 `FetchResult.adjust` 记录。
+- 存量清洗：`python .claude/skills/data_cleaner.py --data-dir stock_data [--apply]`
+  —— 用 `成交额/成交量 ≈ 收盘价` 的中位数比值反推单位（股/手、元/万元）并归一；
+  结构清洗（列名/日期/排序/去重/补涨跌幅）；除权跳空**只标记不改写**（无除权因子
+  不可还原，正确处置是按复权口径重新取数）。
 
 ## 回测与优化
 

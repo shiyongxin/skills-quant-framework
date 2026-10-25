@@ -5,7 +5,14 @@
 使用Parquet格式高效管理A股30年历史数据。
 支持增量更新、批量获取、数据验证等功能。
 
-存储格式: 每只股票一个Parquet文件 (stock_data/historical/{symbol}.parquet)
+存储格式: 每只股票(+复权口径)一个Parquet文件
+    - 不复权 (adjust=''): stock_data/historical/{symbol}.parquet
+    - 复权   (adjust='qfq'/'hfq'): stock_data/historical/{symbol}_{adjust}.parquet
+
+复权是**数据维度**而非装饰 (审计 P0-4): 不同复权口径的序列混在一起会在除权日
+产生虚假跳空, 收益率与全部技术指标随之失真。因此复权口径进入文件名与元数据,
+不同口径互不覆盖; `load(..., adjust=...)` 只读对应口径的文件, 缺失时返回空
+DataFrame (不拿不复权数据冒充前复权)。
 """
 
 import akshare as ak
@@ -62,14 +69,28 @@ class HistoricalDataManager:
             return f'sz{symbol}'
         return symbol
 
-    def _get_parquet_path(self, symbol: str) -> Path:
-        """获取Parquet文件路径"""
-        return self.historical_dir / f"{str(symbol).zfill(6)}.parquet"
+    def _get_parquet_path(self, symbol: str, adjust: str = "") -> Path:
+        """获取Parquet文件路径 (复权口径进文件名, 审计 P0-4)
+
+        不复权 → {symbol}.parquet (向后兼容既有文件)
+        复权   → {symbol}_{adjust}.parquet (qfq/hfq 互不覆盖)
+        """
+        code = str(symbol).zfill(6)
+        tag = (adjust or "").strip().lower()
+        if not tag or tag in ("none", "raw", "bfq"):
+            return self.historical_dir / f"{code}.parquet"
+        return self.historical_dir / f"{code}_{tag}.parquet"
+
+    @staticmethod
+    def _adjust_tag(adjust: str) -> str:
+        """复权口径的规范标签 (''=不复权)"""
+        tag = (adjust or "").strip().lower()
+        return "" if tag in ("", "none", "raw", "bfq") else tag
 
     def fetch_and_cache(self, symbol: str, start_date: str = "19960101",
-                        end_date: str = None) -> pd.DataFrame:
+                        end_date: str = None, adjust: str = "") -> pd.DataFrame:
         """
-        获取并缓存股票历史数据（增量更新）
+        获取并缓存股票历史数据（增量更新, 按复权口径分文件存储）
 
         Parameters:
         -----------
@@ -79,16 +100,20 @@ class HistoricalDataManager:
             开始日期
         end_date : str
             结束日期，默认今天
+        adjust : str
+            复权口径 — ''(不复权, 默认) / 'qfq' / 'hfq'。不同口径写不同
+            Parquet 文件, 互不覆盖 (审计 P0-4)
 
         Returns:
         --------
         pd.DataFrame : 完整的历史数据
         """
         symbol = str(symbol).zfill(6)
+        adjust = self._adjust_tag(adjust)
         if end_date is None:
             end_date = datetime.now().strftime("%Y%m%d")
 
-        parquet_path = self._get_parquet_path(symbol)
+        parquet_path = self._get_parquet_path(symbol, adjust)
         existing_df = None
 
         # 检查已有数据
@@ -106,7 +131,7 @@ class HistoricalDataManager:
                 existing_df = None
 
         # 从API获取数据
-        new_df = self._fetch_from_api(symbol, start_date, end_date)
+        new_df = self._fetch_from_api(symbol, start_date, end_date, adjust)
 
         if new_df is None or len(new_df) == 0:
             # API失败或无新数据: 返回已有数据, 但明确提示"这是旧数据"
@@ -134,8 +159,10 @@ class HistoricalDataManager:
             csv_path = self.historical_dir / f"{symbol}.csv"
             combined.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
-        # 更新元数据
-        self.metadata["stocks"][symbol] = {
+        # 更新元数据 (复权口径入库, 审计 P0-4)
+        meta_key = symbol if not adjust else f"{symbol}_{adjust}"
+        self.metadata["stocks"][meta_key] = {
+            "adjust": adjust,
             "first_date": str(combined['日期'].iloc[0].date()) if hasattr(combined['日期'].iloc[0], 'date') else str(combined['日期'].iloc[0]),
             "last_date": str(combined['日期'].iloc[-1].date()) if hasattr(combined['日期'].iloc[-1], 'date') else str(combined['日期'].iloc[-1]),
             "row_count": len(combined),
@@ -146,9 +173,11 @@ class HistoricalDataManager:
 
         return combined
 
-    def _fetch_from_api(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """从akshare API获取数据"""
+    def _fetch_from_api(self, symbol: str, start_date: str, end_date: str,
+                        adjust: str = "") -> pd.DataFrame:
+        """从akshare API获取数据 (adjust=复权口径, 审计 P0-4)"""
         tencent_symbol = self._format_symbol(symbol)
+        adjust = self._adjust_tag(adjust)
 
         try:
             start_dt = datetime.strptime(start_date, "%Y%m%d").date()
@@ -157,7 +186,8 @@ class HistoricalDataManager:
             df = ak.stock_zh_a_daily(
                 symbol=tencent_symbol,
                 start_date=start_dt,
-                end_date=end_dt
+                end_date=end_dt,
+                adjust=adjust
             )
 
             if df is not None and len(df) > 0:
@@ -184,9 +214,9 @@ class HistoricalDataManager:
         return None
 
     def load(self, symbol: str, start_date: str = None,
-             end_date: str = None) -> pd.DataFrame:
+             end_date: str = None, adjust: str = "") -> pd.DataFrame:
         """
-        加载本地缓存的历史数据
+        加载本地缓存的历史数据 (按复权口径取对应文件)
 
         Parameters:
         -----------
@@ -196,13 +226,17 @@ class HistoricalDataManager:
             开始日期 (可选)
         end_date : str
             结束日期 (可选)
+        adjust : str
+            复权口径 (''/qfq/hfq) — 缺失该口径文件时返回**空 DataFrame**
+            (不拿不复权数据冒充前复权, 审计 P0-4)
 
         Returns:
         --------
         pd.DataFrame
         """
         symbol = str(symbol).zfill(6)
-        parquet_path = self._get_parquet_path(symbol)
+        adjust = self._adjust_tag(adjust)
+        parquet_path = self._get_parquet_path(symbol, adjust)
 
         if not parquet_path.exists():
             # 尝试CSV降级
@@ -407,6 +441,29 @@ class HistoricalDataManager:
             result["valid"] = len(result["issues"]) <= 1  # 1个问题以内算有效
 
         return result
+
+    def get_trading_calendar(self, index_code: str = "000001"):
+        """由本地指数行情构建交易日历 (审计 C-P1-12 遗留项: 停牌建模)。
+
+        指数每个交易日都有行情行 → 指数日期集合即交易日历;
+        个股缺失的交易日 = 真停牌日 (不再误伤节假日)。
+
+        Args:
+            index_code: 指数代码 (默认上证 000001; 本地无该数据时返回 None)
+
+        Returns:
+            core.trading_calendar.TradingCalendar 或 None (无指数数据, 不臆造)
+        """
+        from core.trading_calendar import build_calendar_from_index
+
+        try:
+            index_df = self.load(index_code)
+        except Exception as e:
+            print(f"[WARN] 交易日历构建失败({index_code}): {str(e)[:80]}")
+            return None
+        if index_df is None or len(index_df) == 0:
+            return None
+        return build_calendar_from_index(index_df, data_dir=str(self.data_dir))
 
     def get_all_symbols(self) -> list:
         """获取所有已缓存的股票代码"""

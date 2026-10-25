@@ -399,6 +399,15 @@ class DailySignalGenerator:
             self._current_regime = 'SIDEWAYS'
             return 'SIDEWAYS'
 
+        # 顺带把指数行情转成交易日历 (审计 C-P1-12 遗留项: 停牌建模) —
+        # 指数每交易日有行 → 交易日集合; 供 trade_constraints 判定真停牌。
+        # 失败不影响体制判定 (日历缺失时上层如实记 skipped_checks)。
+        try:
+            from core.trading_calendar import build_calendar_from_index
+            build_calendar_from_index(index_data)
+        except Exception:
+            pass
+
         close = index_data['收盘'].astype(float)
         ma60 = _core_sma(close, 60)
         ma120 = _core_sma(close, 120)

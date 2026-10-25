@@ -8,6 +8,7 @@ sys.path.append('.')
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from typing import List
 
 from stock_data_fetcher import StockDataFetcher
 from trend_indicators import TrendIndicators
@@ -58,8 +59,8 @@ class TechnicalAnalyzer:
         # 趋势分析
         trend = self._analyze_trend(data)
 
-        # 买卖信号
-        signals = self._analyze_signals(data)
+        # 买卖信号 (描述性: 收盘后成立, 次一交易日开盘可执行)
+        signals, signals_unavailable = self._analyze_signals(data)
 
         # 形态识别
         patterns = self._analyze_patterns(data)
@@ -80,6 +81,8 @@ class TechnicalAnalyzer:
             'analysis_date': latest['日期'],
             'trend': trend,
             'signals': signals,
+            'signals_unavailable': signals_unavailable,
+            'signal_timing': '信号基于最新bar收盘成立, 次一交易日开盘可执行 (t+1)',
             'patterns': patterns,
             'risk': risk,
             'levels': levels,
@@ -178,59 +181,106 @@ class TechnicalAnalyzer:
             return '纠缠'
 
     def _analyze_signals(self, data):
-        """分析买卖信号"""
+        """分析买卖信号 (最新 bar 收盘后成立 → 次一交易日开盘可执行)
+
+        口径约定 (审计 B10 / 审计 C #9b 诚实性):
+        - **真交叉**: MACD/KDJ 的"金叉/死叉"只在**当根与前一根发生交叉**时
+          报出 (与 signal_generator 的 shift(1) 交叉检测同源), 水平状态
+          (K>D / DIF>DEA) 一律用中性标签, 不冒充"金叉"。
+        - **NaN 不等于无信号**: 指标不可用 (数据不足) 时不静默跳过, 记入
+          `unavailable` 返回, 由调用方展示"数据不足", 不冒充"无信号"。
+        - **t+1 语义**: 信号基于最新 bar 收盘价成立, 最早只能在**次一交易日
+          开盘**执行 (与 execution_model 的 t+1 成交规则一致); 本模块是
+          描述性分析 (advisory), 不直接产生可成交指令。
+        """
         latest = data.iloc[-1]
-        signals = []
+        signals: List[str] = []
+        unavailable: List[str] = []
+
+        def _val(col: str):
+            """取末根指标值; NaN 记入 unavailable 并返回 None"""
+            if col not in data.columns:
+                unavailable.append(f'{col}(缺列)')
+                return None
+            v = latest[col]
+            if v is None or pd.isna(v):
+                unavailable.append(f'{col}(数据不足)')
+                return None
+            return float(v)
 
         # MACD信号（真交叉: 与前一根比较, 消除"水平比较当金叉"的口径冲突）
         macd = data['MACD']
         macd_signal = data['MACD_Signal']
         cross_up = (macd > macd_signal) & (macd.shift(1) <= macd_signal.shift(1))
         cross_down = (macd < macd_signal) & (macd.shift(1) >= macd_signal.shift(1))
-        if bool(cross_up.iloc[-1]):
+        macd_v = _val('MACD')
+        signal_v = _val('MACD_Signal')
+        if macd_v is None or signal_v is None:
+            pass
+        elif bool(cross_up.iloc[-1]):
             signals.append('MACD金叉')
         elif bool(cross_down.iloc[-1]):
             signals.append('MACD死叉')
-        elif macd.iloc[-1] > macd_signal.iloc[-1]:
-            signals.append('MACD多头')
-        elif macd.iloc[-1] < macd_signal.iloc[-1]:
-            signals.append('MACD空头')
+        elif macd_v > signal_v:
+            signals.append('MACD多头(未交叉)')
+        elif macd_v < signal_v:
+            signals.append('MACD空头(未交叉)')
 
-        # KDJ信号
-        k = latest.get('K', 50)
-        d = latest.get('D', 50)
-        if k > d and k < 80:
-            signals.append('KDJ金叉')
-        elif k < d and k > 20:
-            signals.append('KDJ死叉')
-        elif k < 20:
-            signals.append('KDJ超卖')
+        # KDJ信号 (真交叉 + 中性档位标签, 不把水平状态叫"金叉")
+        k = _val('K')
+        d = _val('D')
+        if k is None or d is None:
+            pass
+        else:
+            prev_k = data['K'].iloc[-2] if len(data) >= 2 else None
+            prev_d = data['D'].iloc[-2] if len(data) >= 2 else None
+            k_cross_up = (prev_k is not None and not pd.isna(prev_k)
+                          and not pd.isna(prev_d)
+                          and k > d and prev_k <= prev_d)
+            k_cross_down = (prev_k is not None and not pd.isna(prev_k)
+                            and not pd.isna(prev_d)
+                            and k < d and prev_k >= prev_d)
+            if k_cross_up:
+                signals.append('KDJ金叉')
+            elif k_cross_down:
+                signals.append('KDJ死叉')
+            elif k > d:
+                signals.append('KDJ多头(未交叉)')
+            elif k < d:
+                signals.append('KDJ空头(未交叉)')
+            if k > 80:
+                signals.append('KDJ超买')
+            elif k < 20:
+                signals.append('KDJ超卖')
 
         # RSI信号
-        rsi = latest.get('RSI', 50)
-        if rsi > 70:
-            signals.append('RSI超买')
-        elif rsi < 30:
-            signals.append('RSI超卖')
+        rsi = _val('RSI')
+        if rsi is not None:
+            if rsi > 70:
+                signals.append('RSI超买')
+            elif rsi < 30:
+                signals.append('RSI超卖')
 
         # 布林带信号
-        bb_upper = latest.get('BB_Upper', 0)
-        bb_lower = latest.get('BB_Lower', 0)
+        bb_upper = _val('BB_Upper')
+        bb_lower = _val('BB_Lower')
         close = latest['收盘']
-        if close >= bb_upper:
-            signals.append('突破上轨')
-        elif close <= bb_lower:
-            signals.append('触及下轨')
+        if bb_upper is not None and bb_lower is not None:
+            if close >= bb_upper:
+                signals.append('突破上轨')
+            elif close <= bb_lower:
+                signals.append('触及下轨')
 
         # 均线信号
-        ma5 = latest['MA5']
-        ma20 = latest['MA20']
-        if close > ma5 and ma5 > ma20:
-            signals.append('多头排列')
-        elif close < ma5 and ma5 < ma20:
-            signals.append('空头排列')
+        ma5 = _val('MA5')
+        ma20 = _val('MA20')
+        if ma5 is not None and ma20 is not None:
+            if close > ma5 and ma5 > ma20:
+                signals.append('多头排列')
+            elif close < ma5 and ma5 < ma20:
+                signals.append('空头排列')
 
-        return signals
+        return signals, unavailable
 
     def _analyze_patterns(self, data):
         """识别形态"""
@@ -431,6 +481,10 @@ class TechnicalAnalyzer:
                 lines.append(f"  - {signal}")
         else:
             lines.append("  无明显信号")
+        unavailable = analysis_result.get('signals_unavailable') or []
+        if unavailable:
+            lines.append(f"  [数据不足, 未判定] {', '.join(unavailable)}")
+        lines.append(f"  * {analysis_result.get('signal_timing', '')}")
         lines.append("")
 
         # 形态识别

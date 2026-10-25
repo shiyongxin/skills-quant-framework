@@ -18,10 +18,14 @@ long_term_selector / reversal_detector / ml_predictor) 在推荐与输出时
   一字跌停阻 (与 execution_model.can_buy/sell_at_open 语义对齐)。
   数据侧无涨跌停价列, 用前收+幅度近似; ST 幅度数据侧无 ST 标记,
   默认按非 ST 判定 (调用方可传 is_st=True)。
-- 停牌/数据过期: 数据侧无停牌标记 (停牌日无行, execution_model 同结论)
-    - 零成交末 bar (成交量==0 或 成交额==0) → 停牌嫌疑, 常开;
-    - as_of + max_stale_days: 最新 bar 距 as_of 自然日超限 → 阻断
-      (默认 max_stale_days=None 关闭 — 无交易日历, 节假日会误伤)。
+- 停牌/数据过期 (审计 C-P1-12 遗留项已落地, 见 core/trading_calendar.py):
+    - **真停牌识别**: 提供交易日历时, 用"个股缺失的交易日"判定停牌
+      (指数每交易日有行情 → 个股缺行 = 真停牌, 不误伤节假日);
+      缺失 ≥1 个交易日 → 阻断买卖, 原因如实写"停牌或数据缺失";
+    - 零成交末 bar (成交量==0 或 成交额==0) → 停牌嫌疑, 常开 (无日历时的兜底);
+    - as_of + max_stale_days: 最新 bar 距 as_of 超限 → 阻断;
+      **有日历时按"交易日"计** (节假日不算过期), 无日历时回退自然日
+      并在 skipped_checks 注明 (默认 max_stale_days=None 关闭)。
 - 流动性:
     - min_price: 最新收盘 < min_price (默认 1.0 元) → 阻断;
     - min_adv_amount: 20 日均成交额下限, 默认 0=关闭 (历史成交额
@@ -47,6 +51,7 @@ import pandas as pd
 
 import factor_library
 from core.indicators import sma as _core_sma
+from core.trading_calendar import TradingCalendar, get_calendar
 from execution_model import (
     limit_pct_for,
     is_limit_up_price,
@@ -61,7 +66,8 @@ class ConstraintConfig:
     min_adv_amount: float = 0.0               # 20日均成交额下限 (元); 0=关闭
     max_adv_participation: float = 0.1        # 目标金额/ADV20 上限
     min_market_cap: Optional[float] = None    # 最小市值 (元); None=关闭 (无市值数据)
-    max_stale_days: Optional[int] = None      # 最新bar距 as_of 自然日上限; None=关闭
+    max_stale_days: Optional[int] = None      # 最新bar距 as_of 上限; 有日历时按交易日计
+    suspension_check: bool = True             # 有交易日历时做真停牌识别 (缺行=停牌)
 
 
 @dataclass
@@ -123,7 +129,9 @@ def check_last_bar(df: pd.DataFrame,
                    config: Optional[ConstraintConfig] = None,
                    as_of=None,
                    is_st: bool = False,
-                   target_amount: Optional[float] = None) -> ConstraintReport:
+                   target_amount: Optional[float] = None,
+                   calendar: Optional[TradingCalendar] = None
+                   ) -> ConstraintReport:
     """
     对单只股票最新 bar 做交易约束检查 (审计 C-P1-12)。
 
@@ -135,6 +143,8 @@ def check_last_bar(df: pd.DataFrame,
         as_of: 检查基准日 (None → 数据过期检查跳过)
         is_st: 是否 ST (5% 幅度; 数据侧无 ST 标记, 默认 False)
         target_amount: 目标下单金额 (元, 给定时检查 ADV 占比上限)
+        calendar: 交易日历 (None → 取进程级日历; 无日历时停牌检查降级为
+            零成交启发式, 并在 skipped_checks 注明)
 
     Returns:
         ConstraintReport (永不抛异常; 缺数据项记 skipped_checks)
@@ -179,19 +189,45 @@ def check_last_bar(df: pd.DataFrame,
             else:
                 report.details['sealed_bar'] = False
 
-    # ---- 停牌嫌疑: 零成交末 bar (常开) ----
-    zero_checked = False
-    for col in ('成交量', '成交额'):
-        if col not in df.columns:
-            continue
-        zero_checked = True
-        try:
-            if float(latest[col]) == 0.0:
-                report.block(f'零{col} (停牌嫌疑) → 无法成交')
-        except (TypeError, ValueError):
-            pass
-    if not zero_checked:
-        report.skipped_checks.append('停牌/零成交: 缺成交量与成交额列, 未检查')
+    # ---- 停牌识别 (审计 C-P1-12 遗留项): 交易日历口径 ----
+    # 真停牌 = 个股在最近交易日无行情行 (指数每交易日有行 → 个股缺行即停牌);
+    # 无日历时降级为"零成交末 bar"启发式 (只能抓最后一根无成交的情形)。
+    cal = calendar if calendar is not None else get_calendar()
+    last_date = _last_bar_date(df)
+    if cal is not None and getattr(cal, 'days', None) and last_date is not None:
+        horizon = cal.last_day
+        if as_of is not None:
+            try:
+                as_of_day = pd.Timestamp(as_of).date()
+                if as_of_day < horizon:
+                    horizon = as_of_day
+            except (ValueError, TypeError):
+                pass
+        missing = cal.trading_days_since(last_date, horizon)
+        if missing is None:
+            report.skipped_checks.append(
+                '停牌: 日历不覆盖该区间, 未检查 (缺交易日=停牌)')
+        else:
+            report.details['missing_trading_days'] = missing
+            report.details['calendar_source'] = getattr(cal, 'source', 'unknown')
+            if missing > 0 and cfg.suspension_check:
+                report.block(
+                    f'最近 {missing} 个交易日无行情 (停牌或数据缺失) → 无法成交')
+    else:
+        report.skipped_checks.append(
+            '停牌(真): 无交易日历, 未检查 (仅有零成交启发式)')
+        zero_checked = False
+        for col in ('成交量', '成交额'):
+            if col not in df.columns:
+                continue
+            zero_checked = True
+            try:
+                if float(latest[col]) == 0.0:
+                    report.block(f'零{col} (停牌嫌疑) → 无法成交')
+            except (TypeError, ValueError):
+                pass
+        if not zero_checked:
+            report.skipped_checks.append('停牌/零成交: 缺成交量与成交额列, 未检查')
 
     # ---- 数据过期 (需 as_of + max_stale_days 同时给定) ----
     if as_of is None:
@@ -203,12 +239,26 @@ def check_last_bar(df: pd.DataFrame,
         if last_date is None or pd.isna(last_date):
             report.skipped_checks.append('数据过期: 无法定位最新 bar 日期, 未检查')
         else:
-            age = (pd.Timestamp(as_of).normalize()
-                   - last_date.normalize()).days
-            report.details['stale_days'] = age
+            cal = calendar if calendar is not None else get_calendar()
+            missing = None
+            if cal is not None and getattr(cal, 'days', None):
+                missing = cal.trading_days_since(last_date, as_of)
+            if missing is not None:
+                # 交易日口径: 节假日/周末不算过期 (审计 C-P1-12 遗留项)
+                report.details['stale_days'] = missing
+                report.details['stale_basis'] = 'trading_days'
+                age = missing
+            else:
+                age = (pd.Timestamp(as_of).normalize()
+                       - last_date.normalize()).days
+                report.details['stale_days'] = age
+                report.details['stale_basis'] = 'calendar_days'
+                report.skipped_checks.append(
+                    '数据过期: 无交易日历, 按自然日估算 (节假日可能误伤)')
             if age > cfg.max_stale_days:
+                unit = '交易日' if missing is not None else '天'
                 report.block(
-                    f'数据过期 {age} 天 > {cfg.max_stale_days} (停牌嫌疑)')
+                    f'数据过期 {age} {unit} > {cfg.max_stale_days} (停牌嫌疑)')
 
     # ---- 最低价格 ----
     if '收盘' not in df.columns:
@@ -273,14 +323,21 @@ def check_last_bar(df: pd.DataFrame,
 
 
 def check_close_panel(panel: Optional[pd.DataFrame],
-                      config: Optional[ConstraintConfig] = None
+                      config: Optional[ConstraintConfig] = None,
+                      calendar: Optional[TradingCalendar] = None
                       ) -> Tuple[pd.Series, Dict[str, str]]:
     """
     收盘横截面面板 (index=股票码, columns=日期) 的可执行性过滤 (S3 接线)。
 
-    仅收盘面板可查: 最低价格 + 最新交易日缺数据 (停牌嫌疑)。
+    仅收盘面板可查: 最低价格 + 停牌/数据缺失 (无日历时只能看最后一列;
+    有交易日历时可判定"个股最后有行情的交易日落后于市场最新交易日" = 真停牌)。
     一字板 (需高低价) / ADV (需成交额) 数据不可得 — 不伪造检查,
     由调用方 docstring 记录边界。
+
+    Args:
+        panel: index=股票码, columns=日期 的收盘价面板
+        config: 约束配置
+        calendar: 交易日历 (None → 取进程级日历)
 
     Returns:
         (keep: Series[bool] 按股票, reasons: {股票: 剔除原因})
@@ -291,6 +348,9 @@ def check_close_panel(panel: Optional[pd.DataFrame],
     latest = panel.iloc[:, -1]
     keep = pd.Series(True, index=panel.index)
     reasons: Dict[str, str] = {}
+    cal = calendar if calendar is not None else get_calendar()
+    has_calendar = cal is not None and bool(getattr(cal, 'days', None))
+
     for stock, close in latest.items():
         try:
             if pd.isna(close):
@@ -301,4 +361,21 @@ def check_close_panel(panel: Optional[pd.DataFrame],
                 reasons[stock] = f'收盘 {float(close):.2f} < 最低价格 {cfg.min_price}'
         except (TypeError, ValueError):
             continue
+
+    if has_calendar and cfg.suspension_check:
+        # 真停牌: 个股最后有行情的交易日落后于市场最新交易日
+        cols = [pd.Timestamp(c).date() for c in panel.columns]
+        market_last = cols[-1]
+        for stock in panel.index:
+            row = panel.loc[stock]
+            valid = [cols[i] for i in range(len(cols))
+                     if not pd.isna(row.iloc[i])]
+            if not valid:
+                continue
+            last_valid = valid[-1]
+            missing = cal.trading_days_since(last_valid, market_last)
+            if missing and missing > 0:
+                keep[stock] = False
+                reasons[stock] = (f'最近 {missing} 个交易日无行情 '
+                                  f'(停牌或数据缺失)')
     return keep, reasons

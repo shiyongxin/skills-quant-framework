@@ -27,6 +27,13 @@ class QuantWorkflow:
         self.stock_list = StockList()
         self.selector = StockSelector()
         self.technical_analyzer = TechnicalAnalyzer()
+        # 交易日历 (审计 C-P1-12 遗留项: 停牌建模) — 本地指数/缓存, 不联网
+        try:
+            from core.trading_calendar import ensure_calendar
+            ensure_calendar()
+        except Exception:
+            pass
+
         self.position_analyzer = PositionAnalyzer()
         self.signal_generator = SignalGenerator()
         self.risk_metrics = RiskMetrics()

@@ -104,7 +104,8 @@ class StockDataFetcher:
 
         return pd.DataFrame()
 
-    def get_quote_data(self, symbol, start_date=None, end_date=None, days=252):
+    def get_quote_data(self, symbol, start_date=None, end_date=None, days=252,
+                       adjust=""):
         """
         获取历史行情数据 - 使用新浪接口 (ak.stock_zh_a_daily)
 
@@ -113,6 +114,9 @@ class StockDataFetcher:
             start_date: 开始日期 (格式: "20200101" 或 datetime对象)
             end_date: 结束日期 (格式: "20231231" 或 datetime对象)，默认为今天
             days: 获取天数，默认252个交易日（约1年）
+            adjust: 复权口径 — ''=不复权 (默认, 与落库主口径一致) / 'qfq' /
+                'hfq'。**复权是数据维度**: 不同口径的序列混用会在除权日产生
+                虚假跳空, 收益率与全部指标随之失真 (审计 P0-4)。
 
         Returns:
             行情数据 DataFrame
@@ -138,7 +142,8 @@ class StockDataFetcher:
             df = ak.stock_zh_a_daily(
                 symbol=sina_symbol,
                 start_date=start_date.date(),
-                end_date=end_date.date()
+                end_date=end_date.date(),
+                adjust=adjust
             )
 
             if df is not None and len(df) > 0:
@@ -171,34 +176,52 @@ class StockDataFetcher:
                 df.to_csv(filepath, index=False, encoding='utf-8-sig')
 
                 print(f"[OK] 获取到 {len(df)} 条记录")
-                self.last_fetch_result = FetchResult.success(df, source=f"stock_zh_a_daily:{symbol}")
+                self.last_fetch_result = FetchResult.success(
+                    df, source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}",
+                    adjust=adjust)
                 return df
             else:
                 print(f"[WARN] {symbol} 没有数据")
-                self.last_fetch_result = FetchResult.failure(f"{symbol} 无数据", source=f"stock_zh_a_daily:{symbol}")
+                self.last_fetch_result = FetchResult.failure(
+                    f"{symbol} 无数据",
+                    source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}",
+                    adjust=adjust)
                 return pd.DataFrame()
 
         except Exception as e:
             print(f"[ERROR] 获取 {symbol} 数据失败: {str(e)[:100]}")
-            self.last_fetch_result = FetchResult.failure(str(e)[:200], source=f"stock_zh_a_daily:{symbol}")
+            self.last_fetch_result = FetchResult.failure(
+                str(e)[:200],
+                source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}",
+                adjust=adjust)
             return pd.DataFrame()
 
-    def get_quote_result(self, symbol, start_date=None, end_date=None, days=252):
+    def get_quote_result(self, symbol, start_date=None, end_date=None, days=252,
+                         adjust=""):
         """
         获取历史行情并返回结构化 FetchResult (审计项 11)
 
         与 get_quote_data 的区别: 失败不再只体现为空 DataFrame，
         调用方应检查 result.ok / result.error。
 
+        Args:
+            adjust: 复权口径 (''/qfq/hfq) — 随结果记录在 FetchResult.adjust,
+                调用方据此判断序列口径 (审计 P0-4: adjust 是数据维度)
+
         Returns:
             core.fetch_result.FetchResult
         """
-        df = self.get_quote_data(symbol, start_date=start_date, end_date=end_date, days=days)
+        df = self.get_quote_data(symbol, start_date=start_date,
+                                 end_date=end_date, days=days, adjust=adjust)
         if self.last_fetch_result is not None:
             return self.last_fetch_result
         if df is not None and len(df) > 0:
-            return FetchResult.success(df, source=f"stock_zh_a_daily:{symbol}")
-        return FetchResult.failure(f"{symbol} 获取失败(未知原因)", source=f"stock_zh_a_daily:{symbol}")
+            return FetchResult.success(
+                df, source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}",
+                adjust=adjust)
+        return FetchResult.failure(
+            f"{symbol} 获取失败(未知原因)",
+            source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}", adjust=adjust)
 
     def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust=""):
         """

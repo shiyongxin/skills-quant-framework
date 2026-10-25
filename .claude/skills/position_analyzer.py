@@ -25,6 +25,8 @@ class PositionAnalyzer:
             fetcher: StockDataFetcher实例，如果为None则创建新实例
         """
         self.fetcher = fetcher if fetcher else StockDataFetcher()
+        # 上次评分的"指标不可用"明细 (审计 C2: 数据不足 ≠ 技术面弱)
+        self._last_score_unavailable = []
 
     def get_stock_data(self, symbol, days=120):
         """
@@ -149,7 +151,9 @@ class PositionAnalyzer:
         resistance_20 = data['最高'].tail(20).max()
 
         # 技术评分
+        self._last_score_unavailable = []
         score = self._calculate_score(data, latest)
+        score_unavailable = list(self._last_score_unavailable)
 
         # 亏损等级判断
         if profit_loss_pct >= 0:
@@ -199,16 +203,26 @@ class PositionAnalyzer:
                 'resistance_20': resistance_20
             },
             'score': score,
+            'score_unavailable': score_unavailable,
             'advice': advice
         }
 
     def _calculate_score(self, data, latest):
-        """计算技术面评分"""
+        """计算技术面评分 (NaN 不静默当 0 分 — 审计 C2 诚实性)
+
+        指标不可用 (数据不足) 时, 对应分项不计分并记入
+        `self._last_score_unavailable`, 由 analyze_position 如实返回给调用方
+        ("数据不足" ≠ "技术面弱", 两者不可混同)。
+        """
+        unavailable = []
         score = 0
         close = data['收盘']
         current_price = latest['收盘']
 
         # 趋势评分 (30分)
+        for _col in ('MA5', 'MA10', 'MA20', 'MA60'):
+            if _col not in latest.index or pd.isna(latest[_col]):
+                unavailable.append(f'{_col}(数据不足)')
         if current_price > latest['MA5'] > latest['MA10'] > latest['MA20']:
             score += 30
         elif current_price > latest['MA5'] > latest['MA20']:
@@ -221,6 +235,8 @@ class PositionAnalyzer:
             score += 5
 
         # MACD评分 (20分)
+        if pd.isna(latest['MACD']) or pd.isna(latest['MACD_Signal']):
+            unavailable.append('MACD(数据不足)')
         if latest['MACD'] > 0 and latest['MACD_Signal'] > 0:
             score += 20
         elif latest['MACD'] > latest['MACD_Signal']:
@@ -228,6 +244,8 @@ class PositionAnalyzer:
 
         # RSI评分 (15分)
         rsi = latest['RSI']
+        if pd.isna(rsi):
+            unavailable.append('RSI(数据不足)')
         if 40 <= rsi <= 65:
             score += 15
         elif rsi < 30:
@@ -251,6 +269,8 @@ class PositionAnalyzer:
         elif latest['成交量'] > vol_ma5:
             score += 5
 
+        # 汇总"指标不可用"明细 (数据不足 ≠ 技术面弱)
+        self._last_score_unavailable = unavailable
         return min(score, 100)
 
     def _generate_advice(self, loss_level, score, latest, current_price, support, resistance):

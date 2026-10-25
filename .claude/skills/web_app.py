@@ -37,6 +37,12 @@ try:
     # 统一信号契约 (审计 C #9): web 层消费 Signal, 不再各页面自拼信号字典
     from core.signal import (ACTION_BUY, ACTION_HOLD, ACTION_SELL, Signal)
     from core.indicators import sma as _core_sma
+    # 交易日历 (审计 C-P1-12 遗留项: 停牌建模) — 本地指数/缓存, 不联网
+    try:
+        from core.trading_calendar import ensure_calendar
+        ensure_calendar()
+    except Exception:
+        pass
     MODULES_AVAILABLE = True
 except ImportError:
     MODULES_AVAILABLE = False
