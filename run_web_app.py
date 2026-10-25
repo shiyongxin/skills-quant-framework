@@ -9,21 +9,23 @@ import sys
 import subprocess
 
 def install_dependencies():
-    """安装Web应用依赖"""
-    print("正在安装Web应用依赖...")
+    """安装依赖 — 以依赖清单文件为唯一真相源
 
-    requirements = [
-        "streamlit>=1.28.0",
-        "redis>=5.0.0",
-        "psycopg2-binary>=2.9.9",
-        "SQLAlchemy>=2.0.0",
-        "scikit-learn>=1.3.0",
+    (旧实现内联硬编码列表, 已与实际依赖脱节: 仍装 redis/psycopg2/SQLAlchemy
+     —— 这三个模块早已删除; 反而漏装 matplotlib —— web 层图表的守卫依赖)
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    manifests = [
+        os.path.join(root, 'web_requirements.txt'),
+        os.path.join(root, '.claude', 'skills', 'requirements.txt'),
     ]
-
-    for req in requirements:
-        print(f"安装 {req}...")
-        subprocess.run([sys.executable, "-m", "pip", "install", req],
-                      capture_output=True)
+    for manifest in manifests:
+        if not os.path.exists(manifest):
+            print(f"[SKIP] 依赖清单不存在: {manifest}")
+            continue
+        print(f"安装 {manifest} ...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", manifest],
+                       capture_output=True)
 
     print("依赖安装完成！")
 

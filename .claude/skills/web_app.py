@@ -6,13 +6,22 @@ Stock Analysis Web Application
 基于Streamlit开发的交互式股票分析平台
 """
 
-import streamlit as st
+# Streamlit 是可选依赖: 缺失时模块仍可被 import (供测试/工具链导入),
+# 但界面不可用 —— 如实降级, 不再以 ImportError 硬崩 (审计: 可选依赖降级路径零覆盖)
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    st = None
+    STREAMLIT_AVAILABLE = False
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import sys
 import os
+import inspect
 import traceback
 
 # 模块路径: 基于 __file__, 不依赖启动时的工作目录
@@ -54,10 +63,24 @@ def render_import_error():
 
     修复审计 F-P1: 旧实现仅 print 一行 Warning 后静默降级,
     5 个页面各自 st.error 一句无诊断价值的提示。
+
+    streamlit 本身缺失时无界面可渲染 → 如实打到 stderr, 不假装成功。
     """
+    if st is None:
+        print("核心模块导入失败 — 功能不可用 (streamlit 未安装)", file=sys.stderr)
+        print(IMPORT_ERROR or "未知导入错误", file=sys.stderr)
+        return
     st.error("核心模块导入失败 — 功能不可用")
     st.code(IMPORT_ERROR or "未知导入错误", language="text")
     st.caption(f"skills 目录: {_SKILLS_DIR}")
+
+
+def render_missing_streamlit():
+    """streamlit 未安装: 无法启动界面, 如实报错并给出安装指引"""
+    print("=" * 60, file=sys.stderr)
+    print("[ERROR] 未安装 streamlit — Web 界面无法启动", file=sys.stderr)
+    print("       pip install streamlit", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
 
 # =============================================================================
@@ -117,7 +140,12 @@ def init_session_state():
             except ImportError:
                 st.session_state.visualizer = None
             st.session_state.manager = PortfolioManager()
-            st.session_state.rt_api = RealTimeQuoteAPI()
+            # requests 缺失时 RealTimeQuoteAPI() 会 raise — 降级为 None,
+            # 实时监控页显示提示而非整页崩溃
+            try:
+                st.session_state.rt_api = RealTimeQuoteAPI()
+            except ImportError:
+                st.session_state.rt_api = None
         else:
             st.session_state.fetcher = None
             st.session_state.generator = None
@@ -581,30 +609,30 @@ def render_analysis():
         if chart_type == "K线图":
             path = viz.plot_candlestick(
                 data, symbol=symbol, ma_periods=[5, 20, 60])
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
         elif chart_type == "MACD":
             path = viz.plot_macd(data, symbol=symbol)
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
         elif chart_type == "RSI":
             path = viz.plot_rsi(data, symbol=symbol)
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
         elif chart_type == "布林带":
             path = viz.plot_bollinger_bands(data, symbol=symbol)
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
         elif chart_type == "综合分析":
             path = viz.plot_combined_analysis(data, symbol=symbol)
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
         elif chart_type == "信号图":
             # (审计 #20: 图表买卖点与回测引擎用同一 generate_signals 产出,
             #  int 0/1 信号列, 不再有独立阈值/映射口径)
             signals_df = st.session_state.generator.generate_signals(data)
             path = viz.plot_signals(data, signals_df, symbol=symbol)
-            st.image(path, use_container_width=True)
+            st.image(path, **st_fill_width(st.image))
 
     except Exception as e:
         st.warning(f"图表生成失败: {str(e)}")
@@ -783,7 +811,7 @@ def render_backtest():
                         try:
                             eq_path = st.session_state.visualizer.plot_equity_curve(
                                 equity_curve, symbol=symbol)
-                            st.image(eq_path, use_container_width=True)
+                            st.image(eq_path, **st_fill_width(st.image))
                         except Exception as e:
                             st.warning(f"图表生成失败: {str(e)}")
                     else:
@@ -801,7 +829,7 @@ def render_backtest():
                                    if col in trades_df.columns]
                     st.dataframe(
                         trades_df[display_cols] if display_cols else trades_df,
-                        use_container_width=True
+                        **st_fill_width(st.dataframe)
                     )
                 else:
                     st.info("无交易记录")
@@ -904,7 +932,7 @@ def render_portfolio():
                             '盈亏': f"{pos.profit_loss_pct:.2%}"
                         })
 
-                    st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
+                    st.dataframe(pd.DataFrame(pos_data), **st_fill_width(st.dataframe))
                 else:
                     st.info("暂无持仓")
 
@@ -931,7 +959,7 @@ def render_portfolio():
                                     adj_df = pd.DataFrame(
                                         [{'代码': k, '调整股数': v}
                                          for k, v in adjustments.items()])
-                                    st.dataframe(adj_df, use_container_width=True)
+                                    st.dataframe(adj_df, **st_fill_width(st.dataframe))
                                 else:
                                     st.success("当前持仓已接近等权，无需调整")
                             except ValueError as e:
@@ -948,7 +976,7 @@ def render_portfolio():
                             if perf['positions']:
                                 st.dataframe(
                                     pd.DataFrame(perf['positions']),
-                                    use_container_width=True)
+                                    **st_fill_width(st.dataframe))
 
                 with col3:
                     if st.button("📄 报告", key=f"report_{portfolio['id']}"):
@@ -986,6 +1014,9 @@ def render_monitor():
         return
 
     rt_api = st.session_state.rt_api
+    if rt_api is None:
+        st.error("requests 未安装 — 实时行情不可用 (pip install requests)")
+        return
 
     with st.spinner("正在获取实时行情..."):
         quotes = {}
@@ -1061,6 +1092,35 @@ def render_monitor():
 # =============================================================================
 # 辅助函数
 # =============================================================================
+
+def st_fill_width(func) -> Dict[str, object]:
+    """返回"占满容器宽度"的参数 — streamlit 的宽度参数逐版漂移。
+
+    实测 (签名随版本变):
+      - 1.37 `st.image` 只有 `width`(int) + `use_column_width`，
+        **`use_container_width` 已被移除** → 硬传会 TypeError
+        ("ImageMixin.image() got an unexpected keyword argument")
+      - 1.40+ `width` 变成 'stretch'/'content'/int, `use_container_width` 弃用
+      - `st.altair_chart` 到 1.66 的 `width` 仍是 int (不能用 'stretch')
+
+    策略: 完全按**运行时签名**判定, 签名里不存在的参数一律不传
+    (宁可不铺满, 也不 TypeError)。
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return {}
+
+    width = params.get('width')
+    if width is not None and isinstance(width.default, str):
+        # 新 API: width 接受 'stretch' (默认值是字符串)
+        return {'width': 'stretch'}
+    if 'use_container_width' in params:
+        return {'use_container_width': True}
+    if 'use_column_width' in params:
+        return {'use_column_width': True}
+    return {}
+
 
 _STOCK_NAME_CACHE: Optional[Dict[str, str]] = None
 
@@ -1143,6 +1203,11 @@ def get_all_signals(symbols: List[str]) -> List[Signal]:
 
 def main():
     """主应用入口"""
+    # streamlit 缺失 → 无界面可渲染, 如实报错退出 (不硬崩, 不假装启动成功)
+    if not STREAMLIT_AVAILABLE:
+        render_missing_streamlit()
+        return
+
     # 配置页面
     setup_page_config()
 
@@ -1150,6 +1215,7 @@ def main():
     if not MODULES_AVAILABLE:
         render_import_error()
         st.stop()
+        return
 
     # 初始化Session State
     init_session_state()

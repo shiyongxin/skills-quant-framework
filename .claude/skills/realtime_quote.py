@@ -7,7 +7,13 @@ Real-Time Quote Module
 稳定、快速、免费
 """
 
-import requests
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    requests = None
+    REQUESTS_AVAILABLE = False
+
 import pandas as pd
 import re
 from datetime import datetime
@@ -62,6 +68,9 @@ class RealTimeQuoteAPI:
         Args:
             timeout: 请求超时时间(秒)
         """
+        if not REQUESTS_AVAILABLE:
+            raise ImportError(
+                "requests 未安装 — 实时行情不可用 (pip install requests)")
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({

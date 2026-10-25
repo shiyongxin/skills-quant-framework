@@ -20,6 +20,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 import json
 import time
 import os
@@ -56,9 +57,18 @@ class HistoricalDataManager:
         return {"last_update": None, "stock_count": 0, "stocks": {}}
 
     def _save_metadata(self):
-        """保存元数据"""
-        with open(self.metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+        """保存元数据 (原子写: 先写临时文件再改名, 避免读者读到半截 JSON)
+
+        写失败只告警不抛 —— 数据此时已落库, 元数据可事后重建, 不应让
+        整次取数失败。
+        """
+        try:
+            tmp = self.metadata_file.with_name(self.metadata_file.name + '.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+            tmp.replace(self.metadata_file)
+        except Exception as e:
+            print(f"[WARN] 元数据保存失败: {str(e)[:100]}")
 
     def _format_symbol(self, symbol: str) -> str:
         """格式化为腾讯接口格式"""
@@ -87,8 +97,60 @@ class HistoricalDataManager:
         tag = (adjust or "").strip().lower()
         return "" if tag in ("", "none", "raw", "bfq") else tag
 
+    def _get_csv_path(self, symbol: str, adjust: str = "") -> Path:
+        """获取CSV路径 (Parquet不可用时的降级路径, 审计 P0-4)
+
+        与 `_get_parquet_path` 同构: 文件名带复权口径标签, 不同口径互不覆盖。
+        旧实现降级时固定写 {symbol}.csv → qfq 数据占用"不复权"位置,
+        load(adjust='') 会把前复权序列当不复权返回 (口径冒充)。
+        """
+        code = str(symbol).zfill(6)
+        tag = self._adjust_tag(adjust)
+        if not tag:
+            return self.historical_dir / f"{code}.csv"
+        return self.historical_dir / f"{code}_{tag}.csv"
+
+    def _migrate_legacy_csv(self, symbol: str) -> Optional[Path]:
+        """存量迁移: 旧版无标签 CSV ({symbol}.csv) → 按元数据判定口径后改名
+
+        旧实现的降级文件不带复权标签, 可能装的是任一口径的序列。元数据
+        (metadata['stocks'][symbol*]['adjust']) 是旧文件口径的唯一证据:
+          - 只记录了一个**非不复权**口径 (qfq/hfq) → 该文件就是这一口径的
+            序列, 改名为 {symbol}_{tag}.csv, 之后各归各位 (不复权请求不再命中)
+          - 其它 (记的是不复权 / 记了多个口径 / 没有元数据) → 不动它,
+            按"不复权"惯例处理 (与 {symbol}.parquet 口径一致)
+
+        Returns:
+            迁移后的路径 (未迁移则 None)
+        """
+        code = str(symbol).zfill(6)
+        legacy = self.historical_dir / f"{code}.csv"
+        if not legacy.exists():
+            return None
+        recorded = set()
+        for key, meta in (self.metadata.get("stocks") or {}).items():
+            if key == code or key.startswith(f"{code}_"):
+                recorded.add(str((meta or {}).get("adjust") or ""))
+        if len(recorded) != 1:
+            return None
+        tag = next(iter(recorded))
+        if not tag:
+            return None
+        target = self._get_csv_path(code, tag)
+        if target.exists():
+            return None
+        try:
+            legacy.replace(target)
+        except OSError as e:
+            print(f"[WARN] {code} 存量CSV口径迁移失败: {str(e)[:80]}")
+            return None
+        print(f"[INFO] {code} 存量CSV口径迁移: {legacy.name} → {target.name} "
+              f"(依据元数据 adjust={tag})")
+        return target
+
     def fetch_and_cache(self, symbol: str, start_date: str = "19960101",
-                        end_date: str = None, adjust: str = "") -> pd.DataFrame:
+                        end_date: str = None, adjust: str = "",
+                        _persist_metadata: bool = True) -> pd.DataFrame:
         """
         获取并缓存股票历史数据（增量更新, 按复权口径分文件存储）
 
@@ -103,6 +165,9 @@ class HistoricalDataManager:
         adjust : str
             复权口径 — ''(不复权, 默认) / 'qfq' / 'hfq'。不同口径写不同
             Parquet 文件, 互不覆盖 (审计 P0-4)
+        _persist_metadata : bool
+            是否把元数据落盘 (默认 True)。批量路径传 False —— 由
+            batch_fetch 主线程统一落盘, 避免多线程并发写同一文件。
 
         Returns:
         --------
@@ -155,8 +220,8 @@ class HistoricalDataManager:
                               index=False)
         except Exception as e:
             print(f"[WARN] {symbol} Parquet保存失败: {e}")
-            # 降级保存为CSV
-            csv_path = self.historical_dir / f"{symbol}.csv"
+            # 降级保存为CSV (文件名同样带复权口径标签, 不与不复权口径互相冒充)
+            csv_path = self._get_csv_path(symbol, adjust)
             combined.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
         # 更新元数据 (复权口径入库, 审计 P0-4)
@@ -170,6 +235,11 @@ class HistoricalDataManager:
         }
         self.metadata["last_update"] = datetime.now().isoformat()
         self.metadata["stock_count"] = len(self.metadata["stocks"])
+        # 元数据落盘 (复权口径/日期范围/行数) —— 旧实现只改内存不落盘,
+        # 导致 metadata.json 永远不存在: get_cache_status/list_cached_symbols
+        # 恒空, 且存量 CSV 的口径判定 (按元数据) 无据可依
+        if _persist_metadata:
+            self._save_metadata()
 
         return combined
 
@@ -239,8 +309,10 @@ class HistoricalDataManager:
         parquet_path = self._get_parquet_path(symbol, adjust)
 
         if not parquet_path.exists():
-            # 尝试CSV降级
-            csv_path = self.historical_dir / f"{symbol}.csv"
+            # 存量: 旧版无标签 CSV 先按元数据判定口径并归位 (一次性迁移)
+            self._migrate_legacy_csv(symbol)
+            # 同口径标签: 缺 qfq 文件不拿不复权 CSV 冒充
+            csv_path = self._get_csv_path(symbol, adjust)
             if csv_path.exists():
                 df = pd.read_csv(csv_path, encoding='utf-8-sig')
                 df['日期'] = pd.to_datetime(df['日期'])
@@ -296,7 +368,8 @@ class HistoricalDataManager:
             semaphore.acquire()
             try:
                 time.sleep(delay)
-                df = self.fetch_and_cache(sym, start_date, end_date)
+                df = self.fetch_and_cache(sym, start_date, end_date,
+                                          _persist_metadata=False)
                 return sym, len(df) if df is not None else 0
             except Exception as e:
                 return sym, -1

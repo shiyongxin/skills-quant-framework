@@ -27,6 +27,15 @@ import os
 import time
 from pathlib import Path
 
+# requests 用于腾讯实时行情 (get_realtime_quote) — 守卫: 缺失时该功能
+# 不可用, 其余功能 (历史行情/财务/指标) 不受影响
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    requests = None
+    REQUESTS_AVAILABLE = False
+
 from core.fetch_result import FetchResult
 from core.indicator_engine import IndicatorEngine
 
@@ -341,9 +350,12 @@ class StockDataFetcher:
             symbol: 股票代码
 
         Returns:
-            实时行情数据字典
+            实时行情数据字典 (requests 缺失时返回 None)
         """
-        import requests
+        if not REQUESTS_AVAILABLE:
+            print("[ERROR] requests 未安装 — 实时行情不可用 "
+                  "(pip install requests)")
+            return None
 
         print(f"[INFO] 获取 {symbol} 实时行情...")
 

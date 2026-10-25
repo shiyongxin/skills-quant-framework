@@ -202,9 +202,14 @@ def scan_directory(data_dir: str = './stock_data', dry_run: bool = True
     if not hist_dir.exists():
         return []
     reports: List[Dict[str, object]] = []
-    for path in sorted(hist_dir.glob('*.parquet')):
+    # parquet 与 csv 都要扫: 无 pyarrow 环境下 CSV 才是主存储
+    paths = sorted(list(hist_dir.glob('*.parquet')) + list(hist_dir.glob('*.csv')))
+    for path in paths:
         try:
-            df = pd.read_parquet(path)
+            if path.suffix == '.csv':
+                df = pd.read_csv(path, encoding='utf-8-sig')
+            else:
+                df = pd.read_parquet(path)
         except Exception as e:
             reports.append({'file': path.name, 'error': str(e)[:120]})
             continue
@@ -219,8 +224,11 @@ def scan_directory(data_dir: str = './stock_data', dry_run: bool = True
         report['path'] = str(path)
         if not dry_run and report.get('actions'):
             try:
-                cleaned.to_parquet(path, engine='pyarrow',
-                                   compression='snappy', index=False)
+                if path.suffix == '.csv':
+                    cleaned.to_csv(path, index=False, encoding='utf-8-sig')
+                else:
+                    cleaned.to_parquet(path, engine='pyarrow',
+                                       compression='snappy', index=False)
                 report['written'] = True
             except Exception as e:
                 report['written'] = False
@@ -244,7 +252,7 @@ def main():
         print(json.dumps(reports, ensure_ascii=False, indent=2, default=str))
         return
     if not reports:
-        print(f"[INFO] {args.data_dir}/historical 无 parquet 文件")
+        print(f"[INFO] {args.data_dir}/historical 无 parquet/csv 文件")
         return
     for r in reports:
         if 'error' in r:

@@ -7,6 +7,7 @@
 - #20: plot_signals 对 int 0/1 与 bool 信号列均正确标注买卖点
 """
 
+import ast
 import os
 
 import pytest
@@ -152,3 +153,67 @@ class TestPlotSignalsSemantics:
         src = _web_src()
         assert 'generator.generate_signals(data)' in src, \
             "信号图应使用 generate_signals 同一真相源"
+
+
+class TestStreamlitWidthCompat:
+    """streamlit 宽度参数逐版漂移 → 按运行时签名选参数, 不硬传。
+
+    实测: streamlit 1.37 的 `st.image` **没有** `use_container_width`
+    (已移除), 硬传会报
+    "ImageMixin.image() got an unexpected keyword argument 'use_container_width'";
+    1.40+ 则改成 `width='stretch'`, 旧的 `use_container_width` 变成弃用参数。
+    """
+
+    def test_new_api_uses_width_stretch(self, web_app):
+        # 1.40+ : width 默认值是字符串 → 新 API
+        def fake_new(image, caption=None, width='content', clamp=False,
+                     channels='RGB', output_format='auto', *,
+                     use_container_width=None):
+            pass
+        assert web_app.st_fill_width(fake_new) == {'width': 'stretch'}
+
+    def test_streamlit_137_image_uses_use_column_width(self, web_app):
+        # 1.37: st.image 只有 width(int) + use_column_width
+        def fake_137(image, caption=None, width=None, use_column_width=None,
+                     clamp=False, channels='RGB', output_format='auto'):
+            pass
+        assert web_app.st_fill_width(fake_137) == {'use_column_width': True}
+
+    def test_legacy_api_uses_use_container_width(self, web_app):
+        # 1.30 前后: 只有 use_container_width
+        def fake_legacy(df, use_container_width=False):
+            pass
+        assert web_app.st_fill_width(fake_legacy) == \
+            {'use_container_width': True}
+
+    def test_never_invents_kwargs(self, web_app):
+        """返回的键必须都在被调函数签名里 (否则就是 TypeError 的来源)。"""
+        import inspect
+
+        def fake_plain(x):
+            pass
+        assert web_app.st_fill_width(fake_plain) == {}
+
+        def fake_altair(data, width=None, use_container_width=None):
+            pass
+        got = web_app.st_fill_width(fake_altair)
+        assert set(got) <= set(inspect.signature(fake_altair).parameters)
+
+    def test_call_sites_do_not_pass_use_container_width(self):
+        """st.image / st.dataframe 调用点不得硬传 use_container_width。"""
+        tree = ast.parse(_web_src())
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute)
+                    and func.attr in ('image', 'dataframe')
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == 'st'):
+                continue
+            for kw in node.keywords:
+                if kw.arg in ('use_container_width', 'width', 'use_column_width'):
+                    offenders.append(f"st.{func.attr}: {kw.arg}")
+        assert not offenders, \
+            f"st.image/st.dataframe 不得硬传宽度参数 (跨版本不兼容): {offenders}"

@@ -13,6 +13,9 @@ akshare           # stock_data_fetcher/historical_data_manager/long_term_selecto
 
 # ---- 运行时 (功能路径依赖, 缺失对应功能报错) ----
 pyarrow           # historical_data_manager.to_parquet(engine='pyarrow') parquet 读写
+requests          # realtime_quote 顶层 import + stock_data_fetcher.get_realtime_quote
+                  # (腾讯实时行情; try 守卫 — 缺失时仅实时行情不可用, 其余功能不受影响;
+                  #  akshare 已传递依赖 requests, 此处显式声明因我方直接 import)
 
 # ---- 可选 (try 守卫, 缺失时功能降级不崩溃) ----
 matplotlib        # chart_visualizer 绘图 (ImportError 守卫, web_app 降级提示)
