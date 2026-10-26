@@ -254,7 +254,10 @@ def ensure_calendar(data_dir: str = './stock_data',
 
     1. 已注入的进程级日历
     2. 本地缓存 JSON (stock_data/calendar/trading_days.json)
-    3. 本地指数 parquet (000001) 现算 —— 指数每交易日有行 → 交易日集合
+    3. 本地**指数**行情 (historical/index/000001) 现算 —— 指数每交易日有行
+       → 交易日集合 (审计 M12: 读 `load_index()` 指数命名空间; 此前读
+       `load('000001')` 个股命名空间 —— 那是平安银行, 会把个股的停牌日
+       当成市场休市日)
 
     不联网: akshare 日历需网络, 由部署方显式调用
     `TradingCalendar.from_akshare()` 落盘后本函数即可命中第 2 级。
@@ -266,11 +269,11 @@ def ensure_calendar(data_dir: str = './stock_data',
     if cached is not None:
         _CALENDAR = cached
         return cached
-    # 本地指数 parquet (晚导入, 避免与历史数据管理器循环依赖)
+    # 本地指数行情 (晚导入, 避免与历史数据管理器循环依赖)
     try:
         from historical_data_manager import HistoricalDataManager
         mgr = HistoricalDataManager(data_dir=data_dir)
-        index_df = mgr.load('000001')
+        index_df = mgr.load_index('000001')
         if index_df is not None and len(index_df) > 0:
             cal = build_calendar_from_index(index_df, data_dir=data_dir)
             if cal is not None:

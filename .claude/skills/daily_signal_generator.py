@@ -388,11 +388,11 @@ class DailySignalGenerator:
         str : 当前体制 "BULL" / "BEAR" / "SIDEWAYS" / "CRASH" / "RECOVERY"
         """
         if index_data is None:
-            # 尝试从缓存加载沪深300
-            index_data = self.data_manager.load('000300')
+            # 尝试从缓存加载沪深300 (指数命名空间, 审计 M12: 不读个股命名空间)
+            index_data = self.data_manager.load_index('000300')
             if len(index_data) == 0:
                 # 尝试加载上证指数
-                index_data = self.data_manager.load('000001')
+                index_data = self.data_manager.load_index('000001')
 
         if len(index_data) < 120:
             print("[WARN] 指数数据不足，默认SIDEWAYS")
@@ -402,9 +402,11 @@ class DailySignalGenerator:
         # 顺带把指数行情转成交易日历 (审计 C-P1-12 遗留项: 停牌建模) —
         # 指数每交易日有行 → 交易日集合; 供 trade_constraints 判定真停牌。
         # 失败不影响体制判定 (日历缺失时上层如实记 skipped_checks)。
+        # data_dir 必须跟随本实例: 此前用默认值会把日历写死到 CWD 的
+        # ./stock_data, 与实例自己的 data_dir 无关 (自定义 data_dir 时错位)
         try:
             from core.trading_calendar import build_calendar_from_index
-            build_calendar_from_index(index_data)
+            build_calendar_from_index(index_data, data_dir=self.data_dir)
         except Exception:
             pass
 

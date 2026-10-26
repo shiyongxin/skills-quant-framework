@@ -364,6 +364,82 @@ class TestHistoricalDataManagerDegradation:
         assert len(mgr.load('600000')) == 0, \
             "同一文件不得同时被当作不复权序列返回 (口径冒充)"
 
+    # ---- 审计 M13: 读路径与写路径对称降级 (此前 pd.read_parquet 裸调) ----
+
+    def test_load_parquet_unreadable_falls_back_to_csv(self, tmp_path, monkeypatch):
+        """写路径早有 CSV 降级 → 读路径缺 pyarrow 时应回退同口径 CSV, 而非抛 ImportError"""
+        from historical_data_manager import HistoricalDataManager
+        hist = tmp_path / 'historical'
+        hist.mkdir(parents=True, exist_ok=True)
+        frame = _ohlcv_frame()
+        frame.to_parquet(hist / '600000.parquet', index=False)
+        frame.to_csv(hist / '600000.csv', index=False, encoding='utf-8-sig')
+
+        mgr = HistoricalDataManager(data_dir=str(tmp_path))
+
+        def _no_pyarrow_read(*a, **k):
+            raise ImportError("No module named 'pyarrow'")
+        monkeypatch.setattr(pd, 'read_parquet', _no_pyarrow_read)
+
+        df = mgr.load('600000')
+        assert len(df) == 5, "Parquet 读失败 → 回退同口径 CSV"
+        assert pd.api.types.is_datetime64_any_dtype(df['日期']), \
+            "CSV 回退后日期列须还原为 datetime (与 Parquet 路径同契约)"
+
+    def test_load_unreadable_without_csv_returns_empty(self, tmp_path, monkeypatch):
+        """两者都读不了 → 空 DataFrame + WARN (与"缺口径"契约一致), 不抛 ImportError"""
+        from historical_data_manager import HistoricalDataManager
+        hist = tmp_path / 'historical'
+        hist.mkdir(parents=True, exist_ok=True)
+        _ohlcv_frame().to_parquet(hist / '600000.parquet', index=False)
+
+        mgr = HistoricalDataManager(data_dir=str(tmp_path))
+
+        def _no_pyarrow_read(*a, **k):
+            raise ImportError("No module named 'pyarrow'")
+        monkeypatch.setattr(pd, 'read_parquet', _no_pyarrow_read)
+
+        df = mgr.load('600000')
+        assert isinstance(df, pd.DataFrame) and len(df) == 0
+
+    def test_csv_stored_data_still_gets_incremental_update(self, tmp_path,
+                                                           monkeypatch):
+        """CSV 降级存的数据也要能增量更新 —— 此前只有 Parquet 参与增量判定,
+        CSV 存量每次都被从 1996 起全量重取"""
+        import historical_data_manager as hdm
+        mgr = hdm.HistoricalDataManager(data_dir=str(tmp_path))
+        frame = _ohlcv_frame()          # 2024-01-01 ~ 2024-01-05
+        monkeypatch.setattr(mgr, '_fetch_from_api',
+                            lambda *a, **k: frame.copy())
+
+        def _no_pyarrow(self, *a, **k):
+            raise ImportError("No module named 'pyarrow'")
+        monkeypatch.setattr(pd.DataFrame, 'to_parquet', _no_pyarrow)
+        mgr.fetch_and_cache('600000', end_date='20240105')
+        assert (tmp_path / 'historical' / '600000.csv').exists()
+
+        seen = {}
+
+        def _api(symbol, start_date, end_date, adjust=""):
+            seen['start'] = start_date
+            return pd.DataFrame()       # 无新数据
+        monkeypatch.setattr(mgr, '_fetch_from_api', _api)
+
+        out = mgr.fetch_and_cache('600000', end_date='20240110')
+        assert seen['start'] == '20240106', \
+            "CSV 存量须参与增量: API 起点 = 本地末日 + 1 (而非从头全量)"
+        assert len(out) == 5, "API 无新数据时返回本地旧数据"
+
+    def test_no_bare_read_parquet_outside_shared_reader(self):
+        """门禁: 读路径不得再裸调 pd.read_parquet —— 必须走 _read_local (带回退)"""
+        import ast as _ast
+        src = (_SKILLS / 'historical_data_manager.py').read_text(encoding='utf-8')
+        hits = [n.lineno for n in _ast.walk(_ast.parse(src))
+                if isinstance(n, _ast.Attribute) and n.attr == 'read_parquet'
+                and isinstance(n.value, _ast.Name) and n.value.id == 'pd']
+        assert len(hits) == 1, \
+            f"pd.read_parquet 只应出现在 _read_local 内 (共享降级读), 现见于行 {hits}"
+
 
 # =============================================================================
 # 6. optimized_params: parameter_space 缺失 → 软校验跳过

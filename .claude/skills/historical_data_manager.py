@@ -5,9 +5,16 @@
 使用Parquet格式高效管理A股30年历史数据。
 支持增量更新、批量获取、数据验证等功能。
 
-存储格式: 每只股票(+复权口径)一个Parquet文件
+存储格式:
+    个股 (+复权口径) 一个Parquet文件
     - 不复权 (adjust=''): stock_data/historical/{symbol}.parquet
     - 复权   (adjust='qfq'/'hfq'): stock_data/historical/{symbol}_{adjust}.parquet
+    指数 独立命名空间 (审计 M12)
+    - stock_data/historical/index/{symbol}.parquet (指数无复权口径)
+    与同代码个股互不覆盖: 000001 在个股命名空间是平安银行, 在指数命名空间
+    是上证指数 —— 请用 `load()` 读个股 / `load_index()` 读指数。
+    Parquet 不可用 (缺 pyarrow / 写失败) 时同名降级为 .csv, 读写两侧对称
+    (审计 M13)。
 
 复权是**数据维度**而非装饰 (审计 P0-4): 不同复权口径的序列混在一起会在除权日
 产生虚假跳空, 收益率与全部技术指标随之失真。因此复权口径进入文件名与元数据,
@@ -43,6 +50,11 @@ class HistoricalDataManager:
         self.data_dir = Path(data_dir)
         self.historical_dir = self.data_dir / "historical"
         self.historical_dir.mkdir(parents=True, exist_ok=True)
+        # 指数独立命名空间 (审计 M12): 沪深300(000300) 与上证指数(000001) 此前
+        # 与个股共用 {symbol}.parquet —— 000001 既是上证指数又是平安银行, 取错
+        # 前缀会把个股行情写进指数位置 (反之亦然), 体制判定/交易日历随之用错标的
+        self.index_dir = self.historical_dir / "index"
+        self.index_dir.mkdir(parents=True, exist_ok=True)
         self.metadata_file = self.historical_dir / "metadata.json"
         self.metadata = self._load_metadata()
 
@@ -51,10 +63,14 @@ class HistoricalDataManager:
         if self.metadata_file.exists():
             try:
                 with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    meta = json.load(f)
+                # 旧元数据无 indexes 段: 补空段, 避免调用方判 None
+                meta.setdefault("indexes", {})
+                return meta
             except:
                 pass
-        return {"last_update": None, "stock_count": 0, "stocks": {}}
+        return {"last_update": None, "stock_count": 0, "stocks": {},
+                "indexes": {}}
 
     def _save_metadata(self):
         """保存元数据 (原子写: 先写临时文件再改名, 避免读者读到半截 JSON)
@@ -70,14 +86,42 @@ class HistoricalDataManager:
         except Exception as e:
             print(f"[WARN] 元数据保存失败: {str(e)[:100]}")
 
-    def _format_symbol(self, symbol: str) -> str:
-        """格式化为腾讯接口格式"""
+    def _format_symbol(self, symbol: str, is_index: bool = False) -> str:
+        """格式化为新浪接口格式 (sh/sz 前缀)
+
+        个股: 6→sh (沪市主板), 0/3→sz (深市主板/创业板)
+        指数: 000xxx→sh (沪市指数, 如 沪深300=000300/上证50=000016),
+              399xxx→sz (深市指数, 如 深证成指=399001/创业板指=399006)
+
+        ⚠️ 指数必须显式声明 is_index=True, **不能靠代码猜** (审计 M12):
+        000001 既是上证指数(sh000001)又是平安银行(sz000001); 000905/000852
+        等也是"既有个股又有指数"的占用关系 (见 stock_list.csv)。此前无此
+        标志, 指数一律被映射成 sz000300 —— 沪深300 在沪市, 新浪无该代码,
+        取数必然落空; 而 000001 会取回**平安银行个股行情**冒充上证指数。
+        """
         symbol = str(symbol).zfill(6)
+        if is_index:
+            if symbol.startswith('399'):
+                return f'sz{symbol}'
+            # 000xxx (沪深300/上证50/中证500 等) 与其余指数码默认按沪市
+            return f'sh{symbol}'
         if symbol.startswith('6'):
             return f'sh{symbol}'
         elif symbol.startswith('0') or symbol.startswith('3'):
             return f'sz{symbol}'
         return symbol
+
+    def _get_index_path(self, symbol: str) -> Path:
+        """指数行情的Parquet路径 (独立命名空间, 审计 M12)
+
+        historical/index/{symbol}.parquet —— 与个股 {symbol}.parquet 隔离:
+        000001 在个股命名空间是平安银行, 在指数命名空间是上证指数, 互不覆盖。
+        """
+        return self.index_dir / f"{str(symbol).zfill(6)}.parquet"
+
+    def _get_index_csv_path(self, symbol: str) -> Path:
+        """指数行情的CSV降级路径 (与Parquet路径同构)"""
+        return self.index_dir / f"{str(symbol).zfill(6)}.csv"
 
     def _get_parquet_path(self, symbol: str, adjust: str = "") -> Path:
         """获取Parquet文件路径 (复权口径进文件名, 审计 P0-4)
@@ -148,23 +192,69 @@ class HistoricalDataManager:
               f"(依据元数据 adjust={tag})")
         return target
 
+    @staticmethod
+    def _read_local(parquet_path: Path, csv_path: Path,
+                    label: str = "") -> Optional[pd.DataFrame]:
+        """读本地缓存: Parquet 优先, 失败降级同口径 CSV (审计 M13)
+
+        写路径早有 CSV 降级 (pyarrow 缺失/to_parquet 失败时落 CSV), 读路径
+        此前却是裸 `pd.read_parquet` —— 缺 pyarrow 时 `load()` 直接抛
+        ImportError。两侧现在对称: 读不到 Parquet 就读同口径 CSV。
+
+        Returns:
+            DataFrame 或 None (两者都读不了 / 都不存在)
+        """
+        if parquet_path.exists():
+            try:
+                return pd.read_parquet(parquet_path)
+            except Exception as e:
+                print(f"[WARN] {label} Parquet读取失败({type(e).__name__}), "
+                      f"降级读同口径CSV: {str(e)[:80]}")
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path, encoding='utf-8-sig')
+                if '日期' in df.columns:
+                    df['日期'] = pd.to_datetime(df['日期'])
+                return df
+            except Exception as e:
+                print(f"[WARN] {label} CSV读取失败: {str(e)[:80]}")
+        return None
+
+    @staticmethod
+    def _save_local(df: pd.DataFrame, parquet_path: Path, csv_path: Path,
+                    label: str = "") -> None:
+        """落盘: Parquet 优先, 失败降级同口径 CSV (写路径, 原有行为不变)"""
+        try:
+            df.to_parquet(parquet_path, engine='pyarrow', compression='snappy',
+                          index=False)
+        except Exception as e:
+            print(f"[WARN] {label} Parquet保存失败: {e}")
+            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
     def fetch_and_cache(self, symbol: str, start_date: str = "19960101",
                         end_date: str = None, adjust: str = "",
+                        is_index: bool = False,
                         _persist_metadata: bool = True) -> pd.DataFrame:
         """
-        获取并缓存股票历史数据（增量更新, 按复权口径分文件存储）
+        获取并缓存历史数据（增量更新, 按复权口径分文件存储）
 
         Parameters:
         -----------
         symbol : str
-            股票代码，如 "000001"
+            股票代码，如 "000001"; is_index=True 时为指数代码 (如 "000300")
         start_date : str
             开始日期
         end_date : str
             结束日期，默认今天
         adjust : str
             复权口径 — ''(不复权, 默认) / 'qfq' / 'hfq'。不同口径写不同
-            Parquet 文件, 互不覆盖 (审计 P0-4)
+            Parquet 文件, 互不覆盖 (审计 P0-4)。指数无复权概念, is_index=True
+            时被忽略
+        is_index : bool
+            是否指数 (审计 M12)。True 时: ① 按指数规则加前缀 (000xxx→sh,
+            399xxx→sz) ② 走指数接口 stock_zh_index_daily ③ 存入独立命名空间
+            historical/index/, 与同代码个股 (如 000001 平安银行 vs 上证指数)
+            互不覆盖
         _persist_metadata : bool
             是否把元数据落盘 (默认 True)。批量路径传 False —— 由
             batch_fetch 主线程统一落盘, 避免多线程并发写同一文件。
@@ -175,28 +265,38 @@ class HistoricalDataManager:
         """
         symbol = str(symbol).zfill(6)
         adjust = self._adjust_tag(adjust)
+        if is_index and adjust:
+            print(f"[INFO] {symbol} 指数行情无复权口径, 忽略 adjust='{adjust}'")
+            adjust = ""
         if end_date is None:
             end_date = datetime.now().strftime("%Y%m%d")
 
-        parquet_path = self._get_parquet_path(symbol, adjust)
-        existing_df = None
+        if is_index:
+            parquet_path = self._get_index_path(symbol)
+            csv_path = self._get_index_csv_path(symbol)
+        else:
+            parquet_path = self._get_parquet_path(symbol, adjust)
+            csv_path = self._get_csv_path(symbol, adjust)
 
-        # 检查已有数据
-        if parquet_path.exists():
-            try:
-                existing_df = pd.read_parquet(parquet_path)
-                if len(existing_df) > 0:
-                    last_date = pd.to_datetime(existing_df['日期'].iloc[-1])
-                    # 如果数据足够新(距今3天内)，直接返回
-                    if last_date >= pd.to_datetime(end_date) - timedelta(days=3):
-                        return existing_df
-                    # 增量获取: 从最后日期的下一天开始
-                    start_date = (last_date + timedelta(days=1)).strftime("%Y%m%d")
-            except Exception:
-                existing_df = None
+        # 检查已有数据 (Parquet 优先, 读不到降级同口径 CSV — 审计 M13:
+        # 此前 CSV 降级存的数据在增量更新时读不到, 每次都从头全量重取)
+        existing_df = self._read_local(parquet_path, csv_path, label=symbol)
+        try:
+            if existing_df is not None and len(existing_df) > 0:
+                last_date = pd.to_datetime(existing_df['日期'].iloc[-1])
+                # 如果数据足够新(距今3天内)，直接返回
+                if last_date >= pd.to_datetime(end_date) - timedelta(days=3):
+                    return existing_df
+                # 增量获取: 从最后日期的下一天开始
+                start_date = (last_date + timedelta(days=1)).strftime("%Y%m%d")
+        except Exception:
+            existing_df = None
 
         # 从API获取数据
-        new_df = self._fetch_from_api(symbol, start_date, end_date, adjust)
+        if is_index:
+            new_df = self._fetch_index_from_api(symbol, start_date, end_date)
+        else:
+            new_df = self._fetch_from_api(symbol, start_date, end_date, adjust)
 
         if new_df is None or len(new_df) == 0:
             # API失败或无新数据: 返回已有数据, 但明确提示"这是旧数据"
@@ -214,25 +314,23 @@ class HistoricalDataManager:
         else:
             combined = new_df
 
-        # 保存到Parquet
-        try:
-            combined.to_parquet(parquet_path, engine='pyarrow', compression='snappy',
-                              index=False)
-        except Exception as e:
-            print(f"[WARN] {symbol} Parquet保存失败: {e}")
-            # 降级保存为CSV (文件名同样带复权口径标签, 不与不复权口径互相冒充)
-            csv_path = self._get_csv_path(symbol, adjust)
-            combined.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        # 保存 (Parquet 优先, 失败降级同口径 CSV)
+        self._save_local(combined, parquet_path, csv_path, label=symbol)
 
-        # 更新元数据 (复权口径入库, 审计 P0-4)
-        meta_key = symbol if not adjust else f"{symbol}_{adjust}"
-        self.metadata["stocks"][meta_key] = {
-            "adjust": adjust,
+        # 更新元数据 (复权口径入库, 审计 P0-4; 指数单独记, 不进股票池)
+        entry = {
             "first_date": str(combined['日期'].iloc[0].date()) if hasattr(combined['日期'].iloc[0], 'date') else str(combined['日期'].iloc[0]),
             "last_date": str(combined['日期'].iloc[-1].date()) if hasattr(combined['日期'].iloc[-1], 'date') else str(combined['日期'].iloc[-1]),
             "row_count": len(combined),
             "updated": datetime.now().isoformat()
         }
+        if is_index:
+            entry["symbol"] = self._format_symbol(symbol, is_index=True)
+            self.metadata["indexes"][symbol] = entry
+        else:
+            entry["adjust"] = adjust
+            meta_key = symbol if not adjust else f"{symbol}_{adjust}"
+            self.metadata["stocks"][meta_key] = entry
         self.metadata["last_update"] = datetime.now().isoformat()
         self.metadata["stock_count"] = len(self.metadata["stocks"])
         # 元数据落盘 (复权口径/日期范围/行数) —— 旧实现只改内存不落盘,
@@ -283,10 +381,48 @@ class HistoricalDataManager:
 
         return None
 
+    def _fetch_index_from_api(self, symbol: str, start_date: str,
+                              end_date: str) -> pd.DataFrame:
+        """从 akshare 指数接口获取数据 (审计 M12)
+
+        与个股分开走 `stock_zh_index_daily` (与 market_regime_classifier /
+        historical_backtest_validator 同一接口), 不复用个股的
+        `stock_zh_a_daily`: 指数与个股代码存在占用关系 (000001 上证指数 vs
+        平安银行), 只换前缀不换接口仍可能取错标的。
+        """
+        sina_symbol = self._format_symbol(symbol, is_index=True)
+        try:
+            df = ak.stock_zh_index_daily(symbol=sina_symbol)
+
+            if df is not None and len(df) > 0:
+                col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
+                           'low': '最低', 'close': '收盘', 'volume': '成交量'}
+                df = df.rename(columns=col_map)
+                if '日期' not in df.columns:
+                    print(f"[WARN] {symbol} 指数接口返回列异常, 无日期列")
+                    return None
+                df['日期'] = pd.to_datetime(df['日期'])
+                start_dt = pd.to_datetime(start_date)
+                end_dt = pd.to_datetime(end_date)
+                df = df[(df['日期'] >= start_dt) & (df['日期'] <= end_dt)]
+                df = df.sort_values('日期').reset_index(drop=True)
+
+                if '收盘' in df.columns and '涨跌幅' not in df.columns:
+                    df['涨跌幅'] = df['收盘'].pct_change() * 100
+
+                return df
+
+        except Exception as e:
+            print(f"[WARN] {symbol} 指数API获取失败: {str(e)[:120]}")
+
+        return None
+
     def load(self, symbol: str, start_date: str = None,
              end_date: str = None, adjust: str = "") -> pd.DataFrame:
         """
-        加载本地缓存的历史数据 (按复权口径取对应文件)
+        加载本地缓存的**个股**历史数据 (按复权口径取对应文件)
+
+        指数请用 `load_index()` (独立命名空间, 审计 M12)。
 
         Parameters:
         -----------
@@ -306,22 +442,52 @@ class HistoricalDataManager:
         """
         symbol = str(symbol).zfill(6)
         adjust = self._adjust_tag(adjust)
-        parquet_path = self._get_parquet_path(symbol, adjust)
-
-        if not parquet_path.exists():
-            # 存量: 旧版无标签 CSV 先按元数据判定口径并归位 (一次性迁移)
-            self._migrate_legacy_csv(symbol)
-            # 同口径标签: 缺 qfq 文件不拿不复权 CSV 冒充
-            csv_path = self._get_csv_path(symbol, adjust)
-            if csv_path.exists():
-                df = pd.read_csv(csv_path, encoding='utf-8-sig')
-                df['日期'] = pd.to_datetime(df['日期'])
-            else:
-                return pd.DataFrame()
-        else:
-            df = pd.read_parquet(parquet_path)
+        # 存量: 旧版无标签 CSV 先按元数据判定口径并归位 (一次性迁移)
+        self._migrate_legacy_csv(symbol)
+        # 同口径标签: 缺 qfq 文件不拿不复权 CSV 冒充
+        df = self._read_local(self._get_parquet_path(symbol, adjust),
+                              self._get_csv_path(symbol, adjust),
+                              label=symbol)
+        if df is None:
+            return pd.DataFrame()
 
         # 日期过滤
+        if start_date:
+            df = df[df['日期'] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df['日期'] <= pd.to_datetime(end_date)]
+
+        return df.reset_index(drop=True)
+
+    def load_index(self, symbol: str, start_date: str = None,
+                   end_date: str = None) -> pd.DataFrame:
+        """
+        加载本地缓存的**指数**历史数据 (独立命名空间, 审计 M12)
+
+        与个股命名空间隔离: 000001 在 `load()` 是平安银行, 在 `load_index()`
+        是上证指数, 互不覆盖。指数数据由
+        `fetch_and_cache(code, is_index=True)` 写入 historical/index/。
+
+        Parameters:
+        -----------
+        symbol : str
+            指数代码 (如 "000300" 沪深300 / "000001" 上证指数)
+        start_date : str
+            开始日期 (可选)
+        end_date : str
+            结束日期 (可选)
+
+        Returns:
+        --------
+        pd.DataFrame : 无缓存时返回空 DataFrame (不臆造)
+        """
+        symbol = str(symbol).zfill(6)
+        df = self._read_local(self._get_index_path(symbol),
+                              self._get_index_csv_path(symbol),
+                              label=f"指数{symbol}")
+        if df is None:
+            return pd.DataFrame()
+
         if start_date:
             df = df[df['日期'] >= pd.to_datetime(start_date)]
         if end_date:
@@ -522,7 +688,9 @@ class HistoricalDataManager:
         个股缺失的交易日 = 真停牌日 (不再误伤节假日)。
 
         Args:
-            index_code: 指数代码 (默认上证 000001; 本地无该数据时返回 None)
+            index_code: 指数代码 (默认上证 000001; 读**指数**命名空间
+                `load_index()`, 不是同代码个股 —— 000001 是上证指数不是
+                平安银行; 本地无该指数数据时返回 None)
 
         Returns:
             core.trading_calendar.TradingCalendar 或 None (无指数数据, 不臆造)
@@ -530,7 +698,7 @@ class HistoricalDataManager:
         from core.trading_calendar import build_calendar_from_index
 
         try:
-            index_df = self.load(index_code)
+            index_df = self.load_index(index_code)
         except Exception as e:
             print(f"[WARN] 交易日历构建失败({index_code}): {str(e)[:80]}")
             return None
@@ -560,11 +728,13 @@ def main():
     parser = argparse.ArgumentParser(description='历史数据管理器')
     subparsers = parser.add_subparsers(dest='command', help='子命令')
 
-    # fetch: 获取单只股票
-    p_fetch = subparsers.add_parser('fetch', help='获取单只股票数据')
-    p_fetch.add_argument('symbol', help='股票代码')
+    # fetch: 获取单只股票 (或指数, --index)
+    p_fetch = subparsers.add_parser('fetch', help='获取单只股票或指数数据')
+    p_fetch.add_argument('symbol', help='股票代码; --index 时为指数代码 (如 000300)')
     p_fetch.add_argument('--start', default='19960101', help='开始日期')
     p_fetch.add_argument('--end', default=None, help='结束日期')
+    p_fetch.add_argument('--index', action='store_true',
+                         help='按指数取数 (审计 M12: 前缀/接口/命名空间均按指数)')
 
     # batch: 批量获取
     p_batch = subparsers.add_parser('batch', help='批量获取数据')
@@ -591,8 +761,10 @@ def main():
     manager = HistoricalDataManager()
 
     if args.command == 'fetch':
-        df = manager.fetch_and_cache(args.symbol, args.start, args.end)
-        print(f"获取 {args.symbol}: {len(df)} 条记录")
+        df = manager.fetch_and_cache(args.symbol, args.start, args.end,
+                                     is_index=args.index)
+        kind = "指数" if args.index else "股票"
+        print(f"获取{kind} {args.symbol}: {len(df)} 条记录")
         manager._save_metadata()
 
     elif args.command == 'batch':

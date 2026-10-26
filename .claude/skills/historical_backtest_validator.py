@@ -154,8 +154,8 @@ class HistoricalBacktestValidator:
 
     def _load_index_data(self, index_code='000300'):
         """加载指数数据，尝试多个来源"""
-        # 1. 本地缓存
-        data = self.data_manager.load(index_code)
+        # 1. 本地缓存 (指数命名空间, 审计 M12: 000001 是上证指数不是平安银行)
+        data = self.data_manager.load_index(index_code)
         if len(data) > 0:
             return data
 
@@ -177,7 +177,7 @@ class HistoricalBacktestValidator:
 
         # 3. 备选: 用000001(上证指数)
         if index_code != '000001':
-            data = self.data_manager.load('000001')
+            data = self.data_manager.load_index('000001')
             if len(data) > 0:
                 print("[INFO] 用上证指数(000001)替代沪深300")
                 return data

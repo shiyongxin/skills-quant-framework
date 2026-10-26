@@ -3,6 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
+> **最近更新**: 2026-10-25 — 批次 1 的 **M12 + M13 已修**（测试基线 531 → **548**，含 `tests/test_index_namespace.py` 新建 13 例）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -33,22 +34,23 @@
 ## 2. 批次 1 —— 确凿小 bug（低风险，建议立刻做）
 
 全部 ✅ 实测复验。共同特征：改对了只会让行为更诚实，**不动回测数值**。
+其中 ~~M12 / M13~~ 已于 2026-10-25 修复（划线条目 = 已修，详见表内证据列）。
 
 | # | 问题 | 证据（当前代码） | 影响 |
 |---|---|---|---|
-| **M13** | **读路径无 CSV 降级** —— 写路径有降级，`pd.read_parquet` 裸调 → 缺 pyarrow 时**读**直接抛 ImportError | `historical_data_manager.py:187`、`:322` | 高。上一批（c0705fb）只修了写路径，读路径漏了 |
-| **M12** | 指数代码前缀映射错：`000300`→`sz000300`（沪深300 是**沪**市）、`000001`→`sz000001`（上证指数实为 `sh000001`） | `historical_data_manager.py:73-80` | 高。大盘体制判定**用错标的**；`daily_signal_generator.py:392` 消费 `load('000300')` |
+| ~~**M13**~~ | ~~**读路径无 CSV 降级**~~ → **✅ 已修** | 原 `:187`/`:322` 裸 `pd.read_parquet`；现共享 `_read_local()`（Parquet→同口径 CSV，两侧对称），`load`/`fetch_and_cache`/`load_index` 全走它；门禁：全文件只允许 1 处 `pd.read_parquet`（`_read_local` 内）。附带修掉"CSV 降级存的数据每轮全量重取"（增量判定此前只认 Parquet） | 已修 + 4 回归用例（`test_optional_deps.py`） |
+| ~~**M12**~~ | ~~指数代码前缀映射错~~ → **✅ 已修** | 原 `:73-80`；现 `is_index` 显式声明（不猜：000001/000905 等与个股代码互相占用）+ 指数走 `stock_zh_index_daily` 接口 + 独立命名空间 `historical/index/` + 新 API `load_index()` + CLI `fetch --index`。下游 3 个消费方同步改读指数命名空间（`daily_signal_generator`、`historical_backtest_validator`、`get_trading_calendar`/`core.ensure_calendar`）。**顺带修**：DSG `detect_current_regime` 建日历时写死 CWD `./stock_data`（应跟随实例 `data_dir`；曾因此在测试里写出假 2024 日历，致 29 用例连环失败） | 已修 + 13 回归用例（`tests/test_index_namespace.py` 新建，含源码级门禁：指数代码不得走个股 `load()`） |
 | **M17** | `get_cash_flow()` 调的是**财务指标 API**（`ak.stock_financial_analysis_indicator`），不是现金流量表 | `stock_data_fetcher.py:309` | 中。函数名与实际语义不符 |
-| **M14** | 裸 `except:` **11 处** → 静默失败 | `multi_factor_selection.py` 8 处（:738/744/750/757/762/1065/1114/1149）、`historical_data_manager.py:55`/`:463`、`realtime_quote.py:283` | 中。审计 F 的"静默降级"模式残留 |
+| **M14** | 裸 `except:` **11 处** → 静默失败 | `multi_factor_selection.py` 8 处（:738/744/750/757/762/1065/1114/1149）、`historical_data_manager.py:70`/`:629`（原 :55/:463，M12 修复后行号已移）、`realtime_quote.py:283` | 中。审计 F 的"静默降级"模式残留 |
 | **L6** | web_app 死 import：`ChartStyle`、`RealTimeMonitor` 各只出现于 import 行 | `web_app.py:41`、`:44` | 低 |
 | **L7** | `run_web_app.py --run` **解析了从不判断**（`:66-70` 直接 `run_app()`） | 同左 | 低 |
 | **L8** | `parameter_space` 文档漂移：docstring 说"25个参数 / 指标12个"，实际 **26 个** | `parameter_space.py:57` vs 26 个 `ParamDef(` | 低 |
 | **M2** | `FitnessConfig.target_probability` 接收并存入 `self`，`_compute_fitness` **从不使用** | `optimization_engine.py:86`/`:108` vs `:293-354` | 中。死配置 |
 | **M3** | `generations_run` 记的是**配置上限**而非实际代数（落盘 JSON 有 `convergence_gen` 兜住，内存对象仍错） | `optimization_engine.py:825/934/1060` | 中 |
 | **M9** | `risk_parity_position(risk_budget=...)` 声明后**函数体从未使用** | `risk_management.py:334-365` | 中。死参 |
-| **M22** | 聚合器语义错 + 不可复现：`max_drawdown = max(各股回撤)`（非组合口径）、`random.sample` 无种子、`_get_dominant_regime` 取**全历史**众数体制 | `multi_stock_backtester.py:109`/`:248`/`:259` | 中 |
-| **M15** | `historical_data_manager.get_stock_name` 用 CWD 相对硬编码路径，未复用 `stock_list_manager`（后者已改 `__file__` 基准） | `historical_data_manager.py:547` | 低 |
-| **M18** | 北交所（8xx/4xx）代码不加 `bj` 前缀 → 以裸 6 位码请求新浪，必然取不到数据且异常被吞 | `stock_data_fetcher.py:82-83`、`historical_data_manager.py:80` | 低 |
+| **M22** | 聚合器语义错 + 不可复现：`max_drawdown = max(各股回撤)`（非组合口径）、`random.sample` 无种子、`_get_dominant_regime` 取**全历史**众数体制 | `multi_stock_backtester.py:109`/`:248`/`:259` | 中。 |
+| **M15** | `historical_data_manager.get_stock_name` 用 CWD 相对硬编码路径，未复用 `stock_list_manager`（后者已改 `__file__` 基准） | `historical_data_manager.py:713-715`（原 :547） | 低 |
+| **M18** | 北交所（8xx/4xx）代码不加 `bj` 前缀 → 以裸 6 位码请求新浪，必然取不到数据且异常被吞 | `stock_data_fetcher.py:82-83`、`historical_data_manager.py:89`（`_format_symbol` 个股分支，原 :80） | 低。注意：M12 已把 `_format_symbol` 拆出 `is_index` 分支，个股分支未动 |
 | **M16** | `stock_data_fetcher` 每次取数写一个 `{symbol}_{起}_{止}.csv`，文件数无上限、同内容大量重叠 | `stock_data_fetcher.py:185` | 低。磁盘膨胀 |
 
 **建议**：这一批每条都能配一条回归测试，沿用 `tests/test_optional_deps.py` 的"源码级门禁 + 行为断言"模式。
