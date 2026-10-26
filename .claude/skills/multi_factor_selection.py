@@ -735,32 +735,32 @@ class MultiFactorSelector:
         # 价值因子
         try:
             _attach(self.factor_models.value_factor(financial_df), 'Value_Score')
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 价值因子计算失败, 该因子缺席: {str(e)[:80]}")
 
         # 成长因子
         try:
             _attach(self.factor_models.growth_factor(financial_df), 'Growth_Score')
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 成长因子计算失败, 该因子缺席: {str(e)[:80]}")
 
         # 质量因子
         try:
             _attach(self.factor_models.quality_factor(financial_df), 'Quality_Score')
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 质量因子计算失败, 该因子缺席: {str(e)[:80]}")
 
         # 动量和波动率因子 (需要价格数据)
         if price_df is not None and len(price_df) > 0:
             try:
                 _attach(self.factor_models.momentum_factor(price_df), 'Momentum_Score')
-            except:
-                pass
+            except Exception as e:
+                print(f"[WARN] 动量因子计算失败, 该因子缺席: {str(e)[:80]}")
 
             try:
                 _attach(self.factor_models.volatility_factor(price_df), 'Volatility_Score')
-            except:
-                pass
+            except Exception as e:
+                print(f"[WARN] 波动率因子计算失败, 该因子缺席: {str(e)[:80]}")
 
         return all_factors
 
@@ -1062,8 +1062,8 @@ class PortfolioOptimizer:
                     'sharpe_ratio': opt_sharpe,
                     'success': True
                 }
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 权重优化失败, 回退等权重: {str(e)[:80]}")
 
         # 如果优化失败，返回等权重
         equal_weights = np.array([1.0 / n_assets] * n_assets)
@@ -1111,8 +1111,8 @@ class PortfolioOptimizer:
             if result.success:
                 weights = result.x / result.x.sum()
                 return dict(zip(returns_df.columns, weights))
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 风险平价优化失败, 回退等权重: {str(e)[:80]}")
 
         # 失败时返回等权重
         equal_weights = np.array([1.0 / n_assets] * n_assets)
@@ -1146,8 +1146,8 @@ class PortfolioOptimizer:
             if result.success:
                 weights = result.x
                 return dict(zip(cov_matrix.index, weights))
-        except:
-            pass
+        except Exception as e:
+            print(f"[WARN] 最小方差优化失败, 回退等权重: {str(e)[:80]}")
 
         # 失败时返回等权重
         equal_weights = np.array([1.0 / n_assets] * n_assets)

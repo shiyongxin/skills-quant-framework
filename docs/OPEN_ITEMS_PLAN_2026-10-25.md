@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-25 — 批次 1 的 **M12 + M13 已修**（测试基线 531 → **548**，含 `tests/test_index_namespace.py` 新建 13 例）
+> **最近更新**: 2026-10-25 — 批次 1 的 **M12 + M13 + M17 + M14 已修**（测试基线 531 → **549**，含 `tests/test_index_namespace.py` 新建 13 例 + `tests/test_source_hygiene.py` 裸 `except:` 门禁）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -34,14 +34,14 @@
 ## 2. 批次 1 —— 确凿小 bug（低风险，建议立刻做）
 
 全部 ✅ 实测复验。共同特征：改对了只会让行为更诚实，**不动回测数值**。
-其中 ~~M12 / M13~~ 已于 2026-10-25 修复（划线条目 = 已修，详见表内证据列）。
+其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复（划线条目 = 已修，详见表内证据列）。
 
 | # | 问题 | 证据（当前代码） | 影响 |
 |---|---|---|---|
 | ~~**M13**~~ | ~~**读路径无 CSV 降级**~~ → **✅ 已修** | 原 `:187`/`:322` 裸 `pd.read_parquet`；现共享 `_read_local()`（Parquet→同口径 CSV，两侧对称），`load`/`fetch_and_cache`/`load_index` 全走它；门禁：全文件只允许 1 处 `pd.read_parquet`（`_read_local` 内）。附带修掉"CSV 降级存的数据每轮全量重取"（增量判定此前只认 Parquet） | 已修 + 4 回归用例（`test_optional_deps.py`） |
 | ~~**M12**~~ | ~~指数代码前缀映射错~~ → **✅ 已修** | 原 `:73-80`；现 `is_index` 显式声明（不猜：000001/000905 等与个股代码互相占用）+ 指数走 `stock_zh_index_daily` 接口 + 独立命名空间 `historical/index/` + 新 API `load_index()` + CLI `fetch --index`。下游 3 个消费方同步改读指数命名空间（`daily_signal_generator`、`historical_backtest_validator`、`get_trading_calendar`/`core.ensure_calendar`）。**顺带修**：DSG `detect_current_regime` 建日历时写死 CWD `./stock_data`（应跟随实例 `data_dir`；曾因此在测试里写出假 2024 日历，致 29 用例连环失败） | 已修 + 13 回归用例（`tests/test_index_namespace.py` 新建，含源码级门禁：指数代码不得走个股 `load()`） |
-| **M17** | `get_cash_flow()` 调的是**财务指标 API**（`ak.stock_financial_analysis_indicator`），不是现金流量表 | `stock_data_fetcher.py:309` | 中。函数名与实际语义不符 |
-| **M14** | 裸 `except:` **11 处** → 静默失败 | `multi_factor_selection.py` 8 处（:738/744/750/757/762/1065/1114/1149）、`historical_data_manager.py:70`/`:629`（原 :55/:463，M12 修复后行号已移）、`realtime_quote.py:283` | 中。审计 F 的"静默降级"模式残留 |
+| ~~**M17**~~ | ~~`get_cash_flow()` 调的是财务指标 API，不是现金流量表~~ → **✅ 已修（删除）** | 原 `:309` 调 `ak.stock_financial_analysis_indicator`（与 `get_financial_indicator` 同 API）；**零调用方 + 文档零记载**，属"名不副实的死代码"→ 直接删除而非改语义（改语义会新增未被任何生产路径需要的财务接口，且无法离线测） | 已删；若后续需要真现金流量表，应新增明确命名的方法并配 FetchResult |
+| ~~**M14**~~ | ~~裸 `except:` 静默失败~~ → **✅ 已修** | 实测 **13 处**（审计记 11，`examples/选股示例.py:48/:101` 另漏计 2）：MFS 8 处（因子附着 5 处 + 权重优化回退 3 处）改 `except Exception as e:` + WARN；`historical_data_manager.py` 元数据损坏改 `(json.JSONDecodeError, OSError)` + WARN（**顺带修掉元数据损坏静默重置**——此前会把"元数据损坏"伪装成"空股票池"）；`get_universe` 日期解析改 `(TypeError, ValueError)`；`realtime_quote._safe_float` 改 `(TypeError, ValueError)`；示例 2 处同理 | 已修 + **门禁**: `tests/test_source_hygiene.py::TestNoBareExcept` AST 扫描 `.claude/skills/**`，新增裸 `except:` 即失败 |
 | **L6** | web_app 死 import：`ChartStyle`、`RealTimeMonitor` 各只出现于 import 行 | `web_app.py:41`、`:44` | 低 |
 | **L7** | `run_web_app.py --run` **解析了从不判断**（`:66-70` 直接 `run_app()`） | 同左 | 低 |
 | **L8** | `parameter_space` 文档漂移：docstring 说"25个参数 / 指标12个"，实际 **26 个** | `parameter_space.py:57` vs 26 个 `ParamDef(` | 低 |

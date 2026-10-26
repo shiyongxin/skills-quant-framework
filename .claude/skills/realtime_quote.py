@@ -280,7 +280,8 @@ class RealTimeQuoteAPI:
         try:
             if value and str(value).strip():
                 return float(str(value).strip())
-        except:
+        except (TypeError, ValueError):
+            # 空串/非数字 → 默认 0.0 (非意外错误)
             pass
         return 0.0
 

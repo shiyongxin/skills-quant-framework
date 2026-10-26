@@ -45,7 +45,8 @@ def value_stock_strategy():
                         'ROE': roe
                     })
                     print(f"  ✅ 符合条件! PE={pe:.2f}, PB={pb:.2f}, ROE={roe:.2f}%")
-            except:
+            except (TypeError, ValueError):
+                # 财务字段缺失/非数值 → 跳过该股 (非意外错误)
                 pass
 
     # 结果
@@ -98,7 +99,8 @@ def growth_stock_strategy():
                         'profit_growth': profit_growth
                     })
                     print(f"  ✅ 符合条件! 营收增长={revenue_growth:.2f}%, 利润增长={profit_growth:.2f}%")
-            except:
+            except (TypeError, ValueError, ZeroDivisionError):
+                # 财务字段缺失/非数值/上年为零 → 跳过该股 (非意外错误)
                 pass
 
     if selected_stocks:

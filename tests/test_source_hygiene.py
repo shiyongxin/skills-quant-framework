@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""源码卫生门禁: 模块 docstring 必须是第一条语句
+"""源码卫生门禁: 模块 docstring 必须是第一条语句 + 无裸 except
 
 `from __future__ import annotations` 排到 docstring **之前**, docstring 会被
 降级成一条无意义的表达式语句 (PEP 257), `__doc__` 变 `None` —— 看着只像加了
 一行无害的 import, 实际悄悄丢了整个模块说明。
 
 此类问题运行时无感 (import 照常成功), 只能靠源码级门禁拦。
+
+裸 `except:` 会连 KeyboardInterrupt/SystemExit 一起吞, 静默失败 (审计 M14)。
 """
 import ast
 from pathlib import Path
@@ -59,3 +61,20 @@ class TestModuleDocstringIntegrity:
                     and len(body) > 1 and _is_docstring(body[1])):
                 broken.append(rel)
         assert not broken, f"模块 docstring 缺失或位置不对: {broken}"
+
+
+class TestNoBareExcept:
+    """裸 `except:` (AST ExceptHandler type=None) 会吞掉 KeyboardInterrupt /
+    SystemExit, 让静默失败无法排查 (审计 M14, 批次 1)。"""
+
+    def test_no_bare_except_in_skills(self):
+        offenders = []
+        for py, rel in _modules():
+            tree = ast.parse(py.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ExceptHandler) and node.type is None:
+                    offenders.append(f"{rel}:{node.lineno}")
+        assert not offenders, (
+            f"裸 except: 捕获范围包含 KeyboardInterrupt/SystemExit, "
+            f"会把意外崩溃变成静默失败 —— 请显式写 except Exception "
+            f"(或更具体的异常类型): {offenders}")

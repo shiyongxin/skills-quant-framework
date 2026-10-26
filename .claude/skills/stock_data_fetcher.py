@@ -301,22 +301,6 @@ class StockDataFetcher:
             print(f"[ERROR] 获取财务指标失败: {str(e)[:100]}")
             return pd.DataFrame()
 
-    def get_cash_flow(self, symbol, indicator="按年度"):
-        """获取现金流量表"""
-        print(f"[INFO] 获取 {symbol} 现金流量表...")
-
-        try:
-            df = ak.stock_financial_analysis_indicator(symbol=symbol, indicator=indicator)
-
-            if df is not None and len(df) > 0:
-                filename = f"{symbol}_cash_flow_{indicator}.csv"
-                filepath = self.data_dir / "reports" / filename
-                df.to_csv(filepath, index=False, encoding='utf-8-sig')
-                return df
-        except Exception as e:
-            print(f"[ERROR] 获取现金流量表失败: {str(e)[:100]}")
-            return pd.DataFrame()
-
     def get_stock_money_flow(self, symbol, market="sz"):
         """
         获取个股资金流向

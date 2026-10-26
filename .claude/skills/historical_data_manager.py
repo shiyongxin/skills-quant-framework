@@ -67,8 +67,9 @@ class HistoricalDataManager:
                 # 旧元数据无 indexes 段: 补空段, 避免调用方判 None
                 meta.setdefault("indexes", {})
                 return meta
-            except:
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                # 元数据损坏不是小事: 静默重置会让股票池/缓存状态凭空消失
+                print(f"[WARN] 元数据文件损坏, 重建空元数据: {str(e)[:80]}")
         return {"last_update": None, "stock_count": 0, "stocks": {},
                 "indexes": {}}
 
@@ -626,7 +627,8 @@ class HistoricalDataManager:
                 last_date = datetime.strptime(last_date_str, "%Y-%m-%d")
                 if last_date < cutoff_date:
                     continue
-            except:
+            except (TypeError, ValueError):
+                # 日期缺失/格式坏 → 视为数据不足, 跳过 (非意外错误)
                 continue
 
             universe.append(sym)
