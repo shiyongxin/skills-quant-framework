@@ -83,15 +83,13 @@ class FitnessEvaluator:
     """
 
     def __init__(self, backtester=None, target_return=None,
-                 target_probability=None, max_drawdown_limit=None,
+                 max_drawdown_limit=None,
                  fitness_config=None, walk_forward_config=None):
         """
         Parameters:
         -----------
         target_return : float or None
             目标收益率(%) — None 时取 FitnessConfig 默认 (10.0)
-        target_probability : float or None
-            目标达标概率 — None 时取 FitnessConfig 默认 (0.80)
         max_drawdown_limit : float or None
             最大回撤限制(%) — None 时取 FitnessConfig 默认 (25.0)
         fitness_config : FitnessConfig or None
@@ -100,12 +98,14 @@ class FitnessEvaluator:
         walk_forward_config : WalkForwardConfig or None
             Walk-Forward 窗口 (train/test/step_days) — 旧实现硬编码于
             evaluate() (审计 E-P1 接线: 配置成为真相源)
+
+        注: 原 target_probability 参数已删 (审计 M2) —— 存入 self 后
+        _compute_fitness 从未使用; FitnessConfig 同步删除该字段。
         """
         cfg = fitness_config or FitnessConfig()
         self.backtester = backtester or VectorizedBacktester()
         self.walk_forward_config = walk_forward_config or WalkForwardConfig()
         self.target_return = cfg.target_return if target_return is None else target_return
-        self.target_probability = cfg.target_probability if target_probability is None else target_probability
         self.max_drawdown_limit = cfg.max_drawdown_limit if max_drawdown_limit is None else max_drawdown_limit
         self.weights = {
             'target_rate': cfg.w_target_rate,
@@ -415,7 +415,10 @@ class GeneticAlgorithm:
         Returns:
         --------
         (best_individual: Individual, all_individuals: list[Individual],
-         convergence_gen: int)
+         convergence_gen: int, generations_run: int)
+         convergence_gen = 最后一次显著改善的代号 (0-based);
+         generations_run = 实际执行的代数 (提前收敛时 < max_generations,
+         审计 M3: 旧实现调用方记的是配置上限而非实际值)
         """
         if rng is None:
             rng = np.random.default_rng()
@@ -427,8 +430,10 @@ class GeneticAlgorithm:
         best_individual = None
         no_improve_count = 0
         convergence_gen = 0
+        generations_run = 0
 
         for gen in range(self.max_generations):
+            generations_run = gen + 1
             gen_start = time.time()
 
             # 评估适应度
@@ -484,7 +489,7 @@ class GeneticAlgorithm:
             if not valid:
                 raise ValueError(f"repair后最优参数仍非法: {violations}")
 
-        return best_individual, population, convergence_gen
+        return best_individual, population, convergence_gen, generations_run
 
     def _init_population(self, seed_params, rng):
         """初始化种群"""
@@ -795,10 +800,11 @@ class OptimizationEngine:
             print(f"  GA配置: pop={ga_cfg['population_size']}, "
                   f"max_gen={ga_cfg['max_generations']}")
 
-        best, all_inds, conv_gen = ga.run(evaluate, rng=self._stage_rng('global'),
-                                          verbose=verbose)
+        best, all_inds, conv_gen, gens_run = ga.run(
+            evaluate, rng=self._stage_rng('global'), verbose=verbose)
         total_time = time.time() - start_time
-        self._record_ga_run('global', ga_cfg, conv_gen, total_time, evals['n'])
+        self._record_ga_run('global', ga_cfg, conv_gen, total_time, evals['n'],
+                            generations_run=gens_run)
 
         # 构建结果
         system = IndicatorSystem(
@@ -822,7 +828,7 @@ class OptimizationEngine:
             best_individual=best,
             best_system=system,
             all_systems=[system],
-            generations_run=ga_cfg['max_generations'],
+            generations_run=gens_run,  # 审计 M3: 实际代数, 非配置上限
             total_time_sec=total_time,
             convergence_gen=conv_gen,
         )
@@ -903,12 +909,12 @@ class OptimizationEngine:
             start_time = time.time()
 
             # 各体制独立子流: 与体制循环顺序无关, 同 seed 同体制可复现
-            best, all_inds, conv_gen = ga.run(
+            best, all_inds, conv_gen, gens_run = ga.run(
                 evaluate, rng=self._stage_rng(f'regime:{regime}'), verbose=verbose
             )
             total_time = time.time() - start_time
             self._record_ga_run(f'regime:{regime}', ga_cfg, conv_gen,
-                                total_time, evals['n'])
+                                total_time, evals['n'], generations_run=gens_run)
 
             system = IndicatorSystem(
                 name=f"{regime_name_cn}专用型",
@@ -931,7 +937,7 @@ class OptimizationEngine:
                 best_individual=best,
                 best_system=system,
                 all_systems=[system],
-                generations_run=ga_cfg['max_generations'],
+                generations_run=gens_run,  # 审计 M3: 实际代数, 非配置上限
                 total_time_sec=total_time,
                 convergence_gen=conv_gen,
             )
@@ -1021,11 +1027,12 @@ class OptimizationEngine:
         ga = GeneticAlgorithm(**ga_cfg)
         start_time = time.time()
 
-        best, all_inds, conv_gen = ga.run(evaluate_robust,
-                                          rng=self._stage_rng('robust'),
-                                          verbose=verbose)
+        best, all_inds, conv_gen, gens_run = ga.run(evaluate_robust,
+                                                    rng=self._stage_rng('robust'),
+                                                    verbose=verbose)
         total_time = time.time() - start_time
-        self._record_ga_run('robust', ga_cfg, conv_gen, total_time, evals['n'])
+        self._record_ga_run('robust', ga_cfg, conv_gen, total_time, evals['n'],
+                            generations_run=gens_run)
 
         regime_scores = best.fitness_details.get('regime_fitnesses', {})
         regimes_used = best.fitness_details.get('regimes_used', [])
@@ -1057,7 +1064,7 @@ class OptimizationEngine:
             best_individual=best,
             best_system=system,
             all_systems=[system],
-            generations_run=ga_cfg['max_generations'],
+            generations_run=gens_run,  # 审计 M3: 实际代数, 非配置上限
             total_time_sec=total_time,
             convergence_gen=conv_gen,
         )
@@ -1119,12 +1126,12 @@ class OptimizationEngine:
             )
 
             start_time = time.time()
-            best, all_inds, conv_gen = ga.run(
+            best, all_inds, conv_gen, gens_run = ga.run(
                 evaluate, seed_params=seed_params, rng=rng, verbose=verbose
             )
             total_time = time.time() - start_time
             self._record_ga_run(f'iterative:r{round_idx + 1}', cfg, conv_gen,
-                                total_time, evals['n'])
+                                total_time, evals['n'], generations_run=gens_run)
 
             result = {
                 'round': round_idx + 1,
@@ -1132,6 +1139,7 @@ class OptimizationEngine:
                 'best_params': best.params,
                 'best_details': best.fitness_details,
                 'convergence_gen': conv_gen,
+                'generations_run': gens_run,  # 审计 M3: 实际代数
                 'time_sec': total_time,
             }
             all_round_results.append(result)
@@ -1172,7 +1180,10 @@ class OptimizationEngine:
                 ),
                 best_system=system,
                 all_systems=[system],
-                generations_run=sum(r.get('convergence_gen', 0) for r in all_round_results),
+                # 审计 M3: 各轮实际代数之和 (旧实现误用 convergence_gen 求和 —
+                # 那是"最后改善代号", 与"跑了几代"是两回事)
+                generations_run=sum(r.get('generations_run', 0)
+                                    for r in all_round_results),
                 total_time_sec=sum(r['time_sec'] for r in all_round_results),
                 convergence_gen=all_round_results[-1]['convergence_gen'],
             )
@@ -1192,12 +1203,18 @@ class OptimizationEngine:
             return random.Random()
         return random.Random(f"{self.seed}:{stage}")
 
-    def _record_ga_run(self, stage, ga_cfg, conv_gen, time_sec, n_evals):
-        """记录一次GA运行的元数据 (save_results 落盘 — E-P0-3)"""
+    def _record_ga_run(self, stage, ga_cfg, conv_gen, time_sec, n_evals,
+                       generations_run=None):
+        """记录一次GA运行的元数据 (save_results 落盘 — E-P0-3)
+
+        generations_run: 实际执行代数 (审计 M3; 与 max_generations 配置上限
+        区分 — 提前收敛时两者不等)
+        """
         self._ga_runs.append({
             'stage': stage,
             'population_size': ga_cfg.get('population_size'),
             'max_generations': ga_cfg.get('max_generations'),
+            'generations_run': generations_run,
             'convergence_threshold': ga_cfg.get('convergence_threshold'),
             'mutation_rate': ga_cfg.get('mutation_rate'),
             'convergence_gen': conv_gen,
@@ -1257,6 +1274,7 @@ class OptimizationEngine:
         print(f"  中位最大回撤: {system.median_max_drawdown:.1f}%")
         print(f"  平均持有天数: {system.median_holding_days:.0f}")
         print(f"  收敛代数: {result.convergence_gen}")
+        print(f"  实际运行代数: {result.generations_run}")
         print(f"  耗时: {result.total_time_sec:.1f}s")
 
     def get_all_systems(self) -> list:
@@ -1312,6 +1330,7 @@ class OptimizationEngine:
                 'num_trades': system.num_trades,
                 'sample_count': system.sample_count,
                 'regime': result.regime,
+                'generations_run': result.generations_run,
                 'convergence_gen': result.convergence_gen,
                 'total_time_sec': result.total_time_sec,
             })
@@ -1351,7 +1370,10 @@ class OptimizationEngine:
                 ),
                 best_system=system,
                 all_systems=[system],
-                generations_run=sys_data.get('convergence_gen', 0),
+                # 旧版 JSON 无 generations_run 键 → 退回 convergence_gen
+                # (近似: 最后改善代号 ≤ 实际代数; 诚实降级, 不冒充精确值)
+                generations_run=sys_data.get(
+                    'generations_run', sys_data.get('convergence_gen', 0)),
                 total_time_sec=sys_data.get('total_time_sec', 0),
                 convergence_gen=sys_data.get('convergence_gen', 0),
             )

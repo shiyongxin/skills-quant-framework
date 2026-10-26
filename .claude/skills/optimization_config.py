@@ -7,7 +7,7 @@
 """
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 from datetime import datetime
 
@@ -48,9 +48,13 @@ class WalkForwardConfig:
 
 @dataclass
 class FitnessConfig:
-    """适应度函数配置"""
+    """适应度函数配置
+
+    注: 原 target_probability (目标达标概率) 字段已删 (审计 M2) ——
+    接收/存储/校验/落盘俱全, 但 _compute_fitness 从未使用 (死配置)。
+    若需要机会约束型适应度, 应显式设计并接入 fitness 公式, 而非留死字段。
+    """
     target_return: float = 10.0         # 目标收益率(%)
-    target_probability: float = 0.80    # 目标达标概率
     max_drawdown_limit: float = 25.0    # 最大回撤限制(%)
     # 适应度权重
     w_target_rate: float = 0.40
@@ -160,6 +164,20 @@ class OptimizationConfig:
         }
         return result
 
+    @staticmethod
+    def _filter_known(cls, raw: dict, label: str) -> dict:
+        """丢弃未知键的存量 JSON 兼容层 (审计 M2 配套)
+
+        删除死配置字段后, 旧版保存的 JSON 仍含该键; dataclass 构造器会
+        TypeError 拒绝。这里显式过滤并 WARN —— 与"静默忽略"不同, 调用方
+        能看到哪个键被丢弃了。
+        """
+        known = {f.name for f in fields(cls)}
+        dropped = [k for k in raw if k not in known]
+        if dropped:
+            print(f"[WARN] 配置 {label} 含未知/已删除键, 已忽略: {dropped}")
+        return {k: v for k, v in raw.items() if k in known}
+
     @classmethod
     def _from_dict(cls, data: dict) -> 'OptimizationConfig':
         """从字典构建配置"""
@@ -172,18 +190,27 @@ class OptimizationConfig:
         config.use_weighted_scoring = bool(data.get('use_weighted_scoring', True))
 
         if 'data' in data:
-            config.data = DataConfig(**data['data'])
+            config.data = DataConfig(
+                **cls._filter_known(DataConfig, data['data'], 'data'))
         if 'ga' in data:
-            config.ga = GAConfig(**data['ga'])
+            config.ga = GAConfig(
+                **cls._filter_known(GAConfig, data['ga'], 'ga'))
         if 'walk_forward' in data:
-            config.walk_forward = WalkForwardConfig(**data['walk_forward'])
+            config.walk_forward = WalkForwardConfig(
+                **cls._filter_known(WalkForwardConfig, data['walk_forward'],
+                                    'walk_forward'))
         if 'fitness' in data:
-            config.fitness = FitnessConfig(**data['fitness'])
+            config.fitness = FitnessConfig(
+                **cls._filter_known(FitnessConfig, data['fitness'], 'fitness'))
         if 'regime' in data:
-            config.regime = RegimeConfig(**data['regime'])
+            config.regime = RegimeConfig(
+                **cls._filter_known(RegimeConfig, data['regime'], 'regime'))
         if 'iterative_rounds' in data:
             config.iterative_rounds = [
-                IterativeRoundConfig(**r) for r in data['iterative_rounds']
+                IterativeRoundConfig(
+                    **cls._filter_known(IterativeRoundConfig, r,
+                                        f'iterative_rounds[{i}]'))
+                for i, r in enumerate(data['iterative_rounds'])
             ]
 
         return config
@@ -205,7 +232,6 @@ class OptimizationConfig:
         """获取适应度参数字典"""
         return {
             'target_return': self.fitness.target_return,
-            'target_probability': self.fitness.target_probability,
             'max_drawdown_limit': self.fitness.max_drawdown_limit,
         }
 
@@ -230,9 +256,6 @@ class OptimizationConfig:
 
         if self.fitness.target_return <= 0:
             issues.append("target_return 应 > 0")
-
-        if not (0 < self.fitness.target_probability <= 1):
-            issues.append("target_probability 应在 (0, 1]")
 
         return issues
 

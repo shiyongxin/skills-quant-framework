@@ -170,8 +170,25 @@ class TestFitnessWeights:
         assert ev.weights == {'target_rate': 0.40, 'return': 0.25,
                               'sharpe': 0.20, 'drawdown': 0.15}
         assert ev.target_return == 10.0
-        assert ev.target_probability == 0.80
         assert ev.max_drawdown_limit == 25.0
+
+    def test_target_probability_dead_field_removed(self):
+        """审计 M2: target_probability 是死配置 (存入 self 从不使用) → 已删。
+
+        若将来接入机会约束型适应度, 应恢复字段并同时接入 _compute_fitness,
+        届时本门禁需同步更新 —— 不允许再出现"接收/存储/校验/落盘俱全、
+        唯独不参与计算"的字段。
+        """
+        import dataclasses
+        from optimization_config import FitnessConfig, OptimizationConfig
+        from optimization_engine import FitnessEvaluator
+        names = {f.name for f in dataclasses.fields(FitnessConfig)}
+        assert 'target_probability' not in names
+        assert not hasattr(FitnessEvaluator(), 'target_probability')
+        # 存量 JSON 兼容: 旧版配置文件带该键 → 过滤后仍可加载 (WARN 提示)
+        loaded = OptimizationConfig._from_dict(
+            {'fitness': {'target_return': 12.0, 'target_probability': 0.9}})
+        assert loaded.fitness.target_return == 12.0
 
     def test_config_weights_drive_fitness(self):
         from optimization_engine import FitnessEvaluator

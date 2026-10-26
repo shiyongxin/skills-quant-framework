@@ -47,19 +47,19 @@ class TestGAReproducible:
     """E-P0-3: 同 seed 同数据 → 逐位可复现"""
 
     def test_same_seed_same_result(self):
-        best_a, _, _ = _run_ga(42)
-        best_b, _, _ = _run_ga(42)
+        best_a, _, _, _ = _run_ga(42)
+        best_b, _, _, _ = _run_ga(42)
         assert best_a.params == best_b.params
         assert best_a.fitness == best_b.fitness
 
     def test_different_seed_differs(self):
-        best_a, _, _ = _run_ga(42)
-        best_b, _, _ = _run_ga(43)
+        best_a, _, _, _ = _run_ga(42)
+        best_b, _, _, _ = _run_ga(43)
         assert best_a.params != best_b.params
 
     def test_best_params_valid_after_repair(self):
         """E-P0-4: GA 结束后最优解强制 repair + validate"""
-        best, _, _ = _run_ga(7)
+        best, _, _, _ = _run_ga(7)
         ok, violations = ParameterSpace.validate(best.params)
         assert ok, violations
 
@@ -157,7 +157,8 @@ class TestEngineSeedAndManifest:
             best_system=system, all_systems=[system],
             generations_run=3, total_time_sec=1.0, convergence_gen=2)
         engine._record_ga_run('global', {'population_size': 10, 'max_generations': 3},
-                              conv_gen=2, time_sec=1.0, n_evals=30)
+                              conv_gen=2, time_sec=1.0, n_evals=30,
+                              generations_run=3)
 
         fp = tmp_path / 'opt.json'
         engine.save_results(str(fp))
@@ -178,8 +179,12 @@ class TestEngineSeedAndManifest:
         assert run['stage'] == 'global'
         assert run['population_size'] == 10
         assert run['max_generations'] == 3
+        assert run['generations_run'] == 3  # 审计 M3: 实际代数与上限区分落盘
         assert run['convergence_gen'] == 2
         assert run['n_evals'] == 30
+
+        # systems 块也落 generations_run (load_results 优先读它)
+        assert data['systems'][0]['generations_run'] == 3
 
         # 落盘 → 加载 往返
         engine2 = OptimizationEngine()

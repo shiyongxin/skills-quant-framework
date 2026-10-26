@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-26 — 批次 1 的 **L6 + L7 + L8 已修**（测试基线 549 → **553**，`tests/test_source_hygiene.py` 新增 3 个源码级门禁：死 import / 未读 CLI flag / docstring 参数计数）；此前 2026-10-25 修 M12 + M13 + M17 + M14（531 → 549）
+> **最近更新**: 2026-10-26 — 批次 1 的 **M2 + M3 + M9 已修**（测试基线 553 → **560**，新建 `tests/test_optimizer_honesty.py` 6 例 + `test_indicator_skill_p0.py` 增 M2 门禁 1 例）；同日早些 L6 + L7 + L8（549 → 553）、M12 + M13 + M17 + M14（2026-10-25，531 → 549）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -34,7 +34,7 @@
 ## 2. 批次 1 —— 确凿小 bug（低风险，建议立刻做）
 
 全部 ✅ 实测复验。共同特征：改对了只会让行为更诚实，**不动回测数值**。
-其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复、~~L6 / L7 / L8~~ 已于 2026-10-26 修复（划线条目 = 已修，详见表内证据列）。
+其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复、~~L6 / L7 / L8 / M2 / M3 / M9~~ 已于 2026-10-26 修复（划线条目 = 已修，详见表内证据列）。
 
 | # | 问题 | 证据（当前代码） | 影响 |
 |---|---|---|---|
@@ -45,9 +45,9 @@
 | ~~**L6**~~ | ~~web_app 死 import：`ChartStyle`、`RealTimeMonitor` 各只出现于 import 行~~ → **✅ 已修** | 复验实为 **5 个**（审计记 2，漏计 `numpy as np`、`datetime`/`timedelta`，`:19-20`）；全部删除（`ChartStyle`/`RealTimeMonitor` 亦从 import 中摘除）。顺带核实：仓库根 `run_web_app.py` 的 4 个 import 全在用 | 已修 + 门禁 `TestWebAppImportHygiene`（web_app + run_web_app 任一 import 名不再被 Name 引用即失败） |
 | ~~**L7**~~ | ~~`run_web_app.py --run` **解析了从不判断**~~ → **✅ 已修** | `--run` 删除（运行本就是默认行为，解析了却不判断的 flag 纯误导）；**复验新发现**：全仓 argparse AST 扫描另捕 `reversal_detector.py --top` 同病（`--top` 解析后从未生效，"显示Top N"是假的）→ 已接线 `analyze_stocks(stock_pool, top=)`（排序后截断，显示与返回一致，`top=None` 不限保持既有调用兼容） | 已修 + 门禁 `TestArgparseFlagsAreRead`（`.claude/skills/**` + `run_web_app.py` 所有 add_argument dest 必须出现在 `args.<attr>` 读取中） |
 | ~~**L8**~~ | ~~`parameter_space` 文档漂移：docstring 说"25个参数 / 指标12个"，实际 **26 个**~~ → **✅ 已修** | 复验三个数互不相等：声明"共25个"、分项和 24（12+4+4+4）、实际 **26**（indicator 13 / scoring 4 / signal 4 / position 5）→ docstring 改 26/13/4/4/5 | 已修 + 门禁 `TestParameterSpaceDocstringCounts`（docstring 总计与分项计数必须与 AST 实际 `ParamDef` 分组数一致，漂移即失败） |
-| **M2** | `FitnessConfig.target_probability` 接收并存入 `self`，`_compute_fitness` **从不使用** | `optimization_engine.py:86`/`:108` vs `:293-354` | 中。死配置 |
-| **M3** | `generations_run` 记的是**配置上限**而非实际代数（落盘 JSON 有 `convergence_gen` 兜住，内存对象仍错） | `optimization_engine.py:825/934/1060` | 中 |
-| **M9** | `risk_parity_position(risk_budget=...)` 声明后**函数体从未使用** | `risk_management.py:334-365` | 中。死参 |
+| ~~**M2**~~ | ~~`FitnessConfig.target_probability` 接收并存入 `self`，`_compute_fitness` **从不使用**~~ → **✅ 已修（删除）** | 复验确认零计算路径引用（`optimization_engine.py:108` 存，`:293-354` 从不读）；按 C-P1-17/M17"死代码删除"惯例移除 `FitnessConfig` 字段 + `FitnessEvaluator.__init__` 参数 + `validate` 校验 + `get_fitness_params` 项。**配套**：`_from_dict` 加 `_filter_known` 存量 JSON 兼容层（旧配置文件带该键 → 过滤 + WARN 提示，不再 TypeError 拒载）。若将来真要机会约束型适应度，应显式设计并接入 fitness 公式 | 已删 + 门禁 `test_indicator_skill_p0.py::test_target_probability_dead_field_removed`（字段/属性不存在 + 存量 JSON 兼容加载） |
+| ~~**M3**~~ | ~~`generations_run` 记的是**配置上限**而非实际代数~~ → **✅ 已修** | 复验确认三处 `OptimizationResult` 构造（global/regime/robust）全记 `ga_cfg['max_generations']`；`GeneticAlgorithm.run` 循环可提前 break 却只返回 `(best, pop, conv_gen)`，实际代数无处可取 → run 改返回 4 元组加 `generations_run`（= 实际迭代次数）；4 个调用点接线；迭代聚合 `sum(convergence_gen)` 求和是双重错（最后改善代号 ≠ 跑了几代）→ 改 `sum(各轮 generations_run)`；`_record_ga_run`/`save_results` 落盘增 `generations_run` 键，`load_results` 优先读它（旧 JSON 无键退回 convergence_gen 并注明近似）；`_print_result_summary` 增"实际运行代数"行 | 已修 + `tests/test_optimizer_honesty.py::TestM3GenerationsRunActual` 4 用例（提前收敛报实际代数 4≠上限 50 / 无提前收敛==上限 / 源码级门禁禁记配置上限 / 迭代聚合门禁） |
+| ~~**M9**~~ | ~~`risk_parity_position(risk_budget=...)` 声明后**函数体从未使用**~~ → **✅ 已修（删参）** | 复验确认零调用方 + 函数体为等风险贡献迭代（无逐资产预算维度）→ 删 `risk_budget` 参数与文档行（默认参数删除，不影响任何调用方） | 已删 + `tests/test_optimizer_honesty.py::TestM9RiskParityDeadParamRemoved` 2 用例（签名无该参 + 等权解行为回归） |
 | **M22** | 聚合器语义错 + 不可复现：`max_drawdown = max(各股回撤)`（非组合口径）、`random.sample` 无种子、`_get_dominant_regime` 取**全历史**众数体制 | `multi_stock_backtester.py:109`/`:248`/`:259` | 中。 |
 | **M15** | `historical_data_manager.get_stock_name` 用 CWD 相对硬编码路径，未复用 `stock_list_manager`（后者已改 `__file__` 基准） | `historical_data_manager.py:713-715`（原 :547） | 低 |
 | **M18** | 北交所（8xx/4xx）代码不加 `bj` 前缀 → 以裸 6 位码请求新浪，必然取不到数据且异常被吞 | `stock_data_fetcher.py:82-83`、`historical_data_manager.py:89`（`_format_symbol` 个股分支，原 :80） | 低。注意：M12 已把 `_format_symbol` 拆出 `is_index` 分支，个股分支未动 |
