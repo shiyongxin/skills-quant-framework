@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-26 — 批次 1 的 **M22 + M15 + M18 + M16 已修**（测试基线 560 → **599**，新建 `tests/test_batch1_m22_m15_m18_m16.py` 39 例 + `test_data_layer_p0.py` 2 例改打 `fetch_daily` 新缝）；同日早些 M2 + M3 + M9（553 → 560）、L6 + L7 + L8（549 → 553）、M12 + M13 + M17 + M14（2026-10-25，531 → 549）
+> **最近更新**: 2026-10-26 — 批次 1 **全部清账**: **L12 全仓死 import 已修**（测试基线 599 → **602**，死 import 门禁放宽到全仓 `TestUnusedImportsRepoWide` 3 例）；同日早些 M22+M15+M18+M16（560 → 599）、M2 + M3 + M9（553 → 560）、L6 + L7 + L8（549 → 553）、M12 + M13 + M17 + M14（2026-10-25，531 → 549）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -34,7 +34,7 @@
 ## 2. 批次 1 —— 确凿小 bug（低风险，建议立刻做）
 
 全部 ✅ 实测复验。共同特征：改对了只会让行为更诚实，**不动回测数值**。
-其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复、~~L6 / L7 / L8 / M2 / M3 / M9 / M22 / M15 / M18 / M16~~ 已于 2026-10-26 修复（划线条目 = 已修，详见表内证据列）。**批次 1 仅剩 L12 未动**（74 个死 import 需逐个核实，不宜机械删除）。
+其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复、~~L6 / L7 / L8 / M2 / M3 / M9 / M22 / M15 / M18 / M16 / L12~~ 已于 2026-10-26 修复（划线条目 = 已修，详见表内证据列）。**批次 1 至此全部清账**（15/15）。
 
 | # | 问题 | 证据（当前代码） | 影响 |
 |---|---|---|---|
@@ -52,7 +52,7 @@
 | ~~**M15**~~ | ~~`historical_data_manager.get_stock_name` 用 CWD 相对硬编码路径，未复用 `stock_list_manager`~~ → **✅ 已修** | 顶层 `from stock_list_manager import get_stock_name as _lookup_stock_name`（`:38`），`get_stock_name` 走 `__file__` 基准单例（`:731`）；digit 入参 `zfill(6)`（兼容 `int` 1 → 平安银行），查不到返回 `str(symbol)`；batch CLI 改 `get_stock_list().get_all_stocks()`（`:792-793`）。docstring 删掉 `Path(".claude` 字面（防源码级断言误报） | 已修 + `TestM15StockListPath` 3 用例（任意 cwd/整数入参/源码无 CWD 硬编码） |
 | ~~**M18**~~ | ~~北交所（8xx/4xx）代码不加 `bj` 前缀 → 裸 6 位码请求新浪，必然取不到数据且异常被吞~~ → **✅ 已修（方案升级）** | **复验推翻原"补 bj 分支"简单方案**：① `ak.stock_zh_a_daily` 对 bj **不可用**（主行情有数据，但 `getAmountBySymbol` 返回 `(null)` → demjson "No value to decode"，实测 bj430047/bj836247）；② 腾讯 fqkline 对 bj `day:[]`、东财 push2his 全 host ConnectionError；③ 股票池无 4/8 码但有 **315 只 920xxx 新码段** → bj 规则 = `4/8/92`。新真相源 `sina_daily.py`：`format_symbol()`（sh/sz/bj，900xxx 等不猜前缀原样返回）+ `fetch_daily()`（bj→新浪 klc 直连解码 + 新浪 qfq/hfq 因子 API，与 akshare 列契约对齐 outstanding_share/turnover 置 NaN 不拿 0 冒充；sh/sz→原样透传 akshare）。因子事件假行（outer+ffill 引入的无价行）按 ffill 前掩码剔除——**与 akshare 的有意差异**（akshare 保留假行）。**5 个调用方全部接线**（SDF `:68` / HDM `:93` / LTS / reversal_backtest / reversal_detector，后 3 个删掉内联 `f'sh{code}'` 与 `import akshare`）。无模块级 ImportError 守卫 → 不触发 `test_optional_deps` 登记门禁 | 已修 + 实网验证（bj920002 raw/qfq/hfq 各 20 行、bj430047 宽窗 1912→2024Q1 38 行、sh600000 透传、未知口径 ValueError）+ `TestM18*` 3 组（前缀规则/路由打桩/bj 离线解码） |
 | ~~**M16**~~ | ~~`stock_data_fetcher` 每次取数写一个 `{symbol}_{起}_{止}.csv`，文件数无上限、同内容大量重叠~~ → **✅ 已修（按口径去重，非删写入）** | `_dedupe_quote_cache(symbol, adjust, keep=filename)`（`:83`）先写后删：同 (股票, 口径) 只保留最新一次的文件；文件名 `{symbol}[_qfq\|_hfq]_{起}_{止}.csv`（raw 保持旧格式兼容）→ `get_quote_data` 写入处接线（`:215`）。`market_regime_classifier` 的 glob `{index_code}_*.csv` 两种命名都命中 → **MRC 源码无需改动**（实测兼容） | 已修 + 实网（`get_quote_data('920002')` 两区间 → 仅 1 个 raw + qfq 标签文件；其他股票/qfq 口径不误删）+ `TestM16QuoteCacheDedupe` |
-| **L12** | **全仓死 import**（L6 复验时全仓扫描新发现）：**32 个文件共 74 个** import 名未被 Name 引用（如 `ml_predictor` 的 `GridSearchCV/LinearRegression/classification_report`、`vectorized_backtest` 的 `limit_pct_for`、多文件的 `datetime/timedelta/typing` 类） | AST 扫描 2026-10-26，见 `tests/test_source_hygiene.py::_unused_imports` 逻辑 | 低。**动手前需逐个核实**再导出豁免 / `TYPE_CHECKING` / 字符串注解用途；核实后可把 `TestWebAppImportHygiene` 门禁放宽到全仓 |
+| ~~**L12**~~ | ~~**全仓死 import**（L6 复验时全仓扫描新发现）：**32 个文件共 74 个** import 名未被 Name 引用~~ → **✅ 已修** | skills 树实测 **32 文件 74 名**（与审计一致）+ `tests/` 另扫出 **10 名** → 共删 84 个。**逐名核实先行**（三项阴性检查：无 `__all__` 收录、无 `from <module> import <name>` 重导出、无字符串注解引用 —— 仅 2 处 docstring 叙述提及 `datetime`/`BacktestMetrics` 属文字，删 import 不破文档）；两个**有意保留**改加 `# noqa: F401` 豁免（`tests/conftest.py` 的 `import streamlit` 存在性探测、`test_indicator_skill_p0.py` 的 `plot_stock_chart` 存在性断言）；`_unused_imports` 认 noqa 豁免。**门禁放宽到全仓**：`TestUnusedImportsRepoWide` 3 用例（skills 全树含 examples/ + tests/ + `run_web_app.py`；根级 `test_*.py` 是 gitignored 遗留脚本不入册） | 已修 + 3 门禁用例；编译通过 + 48 模块逐一 import 冒烟（唯 `examples/自动更新数据.py` 缺第三方 `schedule`，与本批无关） |
 
 **建议**：这一批每条都能配一条回归测试，沿用 `tests/test_optional_deps.py` 的"源码级门禁 + 行为断言"模式。
 

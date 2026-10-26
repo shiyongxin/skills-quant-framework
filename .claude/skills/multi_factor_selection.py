@@ -9,8 +9,7 @@ Multi-Factor Stock Selection System - Enhanced Version
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Callable
-from datetime import datetime
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from scipy import stats
 from scipy.optimize import minimize

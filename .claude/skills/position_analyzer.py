@@ -7,10 +7,8 @@ import sys
 sys.path.append('.')
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
 from stock_data_fetcher import StockDataFetcher
-from risk_management import RiskMetrics
 from core.indicator_engine import IndicatorEngine
 
 

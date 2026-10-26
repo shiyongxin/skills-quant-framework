@@ -6,11 +6,10 @@ Machine Learning Predictor
 提供股票价格预测、趋势预测等功能
 """
 
-import sys
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
+from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass, field
 import warnings
 
@@ -19,13 +18,13 @@ from core.indicator_engine import IndicatorEngine
 import trade_constraints
 
 try:
-    from sklearn.model_selection import cross_val_score, GridSearchCV, TimeSeriesSplit
+    from sklearn.model_selection import cross_val_score, TimeSeriesSplit
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
-    from sklearn.linear_model import LogisticRegression, LinearRegression
+    from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error
-    from sklearn.metrics import classification_report, confusion_matrix
+    from sklearn.metrics import confusion_matrix
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False

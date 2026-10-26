@@ -11,7 +11,8 @@
 裸 `except:` 会连 KeyboardInterrupt/SystemExit 一起吞, 静默失败 (审计 M14)。
 
 死 import / 未读 CLI flag / docstring 计数漂移同样是运行时无感的诚实性问题
-(审计 L6/L7/L8, 批次 1)。
+(审计 L6/L7/L8, 批次 1)。L12 把死 import 门禁从 web_app 放宽到全仓
+(skills 全树 + tests + run_web_app), `# noqa: F401` 为有意保留豁免标记。
 """
 import ast
 import re
@@ -87,13 +88,21 @@ class TestNoBareExcept:
 
 
 def _unused_imports(py: Path) -> list:
-    """返回模块内顶层绑定后从未被 Name 引用的 import 名 (L6 死 import 探测)。"""
+    """返回模块内顶层绑定后从未被 Name 引用的 import 名 (L6 死 import 探测)。
+
+    `# noqa: F401` 标注的 import 视为有意保留 (存在性探测 / 副作用 import,
+    如 conftest 的 `import streamlit  # noqa: F401`), 不计入死 import。
+    """
     tree = ast.parse(py.read_text(encoding='utf-8'))
+    src_lines = py.read_text(encoding='utf-8').splitlines()
     imported = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if (isinstance(node, ast.ImportFrom)
                     and node.module == '__future__'):
+                continue
+            seg = src_lines[node.lineno - 1: node.end_lineno]
+            if any('noqa' in l for l in seg):
                 continue
             for a in node.names:
                 if a.name == '*':
@@ -121,6 +130,46 @@ class TestWebAppImportHygiene:
             f"删掉它; 若确实需要副作用 import, 请改用显式注册并在此豁免")
 
     def test_run_web_app_has_no_unused_imports(self):
+        unused = _unused_imports(_REPO_ROOT / 'run_web_app.py')
+        assert not unused, f"run_web_app.py 死 import: {unused}"
+
+
+class TestUnusedImportsRepoWide:
+    """全仓死 import 门禁 (审计 L12, 批次 1 最后一条)。
+
+    此前只覆盖 web_app/run_web_app (L6); 全仓实测 32 文件 74 个死 import
+    (typing 残留 / 未用 stdlib / sklearn 守卫里从不调用的估计器名等),
+    2026-10-26 已逐个核实后清除。本门禁把范围放宽到:
+      - `.claude/skills/**` 全树 (含 examples/)
+      - `tests/**`
+      - 仓库根 `run_web_app.py`
+    首个用例是源码级扫描, 任一 import 被删而名字仍被引用 → 立即失败。
+
+    有意保留的 import (副作用 / 存在性探测) 用 `# noqa: F401` 标注豁免,
+    `_unused_imports` 会跳过它们。
+    """
+
+    def test_skills_tree_has_no_unused_imports(self):
+        offenders = {}
+        for py, rel in _modules():
+            unused = _unused_imports(py)
+            if unused:
+                offenders[rel] = unused
+        assert not offenders, (
+            f"skills 树存在死 import: {offenders} —— 删除它; 若确需副作用/"
+            f"存在性 import, 加 `# noqa: F401` 并在此说明")
+
+    def test_tests_tree_has_no_unused_imports(self):
+        offenders = {}
+        for py in sorted((_REPO_ROOT / 'tests').glob('*.py')):
+            unused = _unused_imports(py)
+            if unused:
+                offenders[f"tests/{py.name}"] = unused
+        assert not offenders, f"tests 树存在死 import: {offenders}"
+
+    def test_repo_root_scripts_have_no_unused_imports(self):
+        # 仓库根只门禁 run_web_app.py —— 其余根级 test_*.py 是 gitignored
+        # 的遗留 ad-hoc 脚本 (非套件), 不在跟踪范围
         unused = _unused_imports(_REPO_ROOT / 'run_web_app.py')
         assert not unused, f"run_web_app.py 死 import: {unused}"
 

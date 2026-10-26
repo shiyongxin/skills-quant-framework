@@ -8,13 +8,11 @@ Real-Time Monitor Module
 """
 
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import json
-from pathlib import Path
 
 
 class AlertType(Enum):

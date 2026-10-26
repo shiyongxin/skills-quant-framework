@@ -17,14 +17,12 @@ signal_generator 完全一致 (单一真相源)。
 import pandas as pd
 from dataclasses import dataclass, field
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import random
 import subprocess
-import sys
 
 from historical_data_manager import HistoricalDataManager
-from vectorized_backtest import VectorizedBacktester
 from parameter_space import ParameterSpace
 from core.indicators import sma as _core_sma
 from core.indicator_engine import IndicatorEngine

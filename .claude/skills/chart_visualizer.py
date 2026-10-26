@@ -9,8 +9,7 @@ Chart Visualizer Module
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List
 from pathlib import Path
 import warnings
 
@@ -24,8 +23,6 @@ try:
     matplotlib.use('Agg')  # 使用非交互式后端
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
-    from matplotlib.patches import Rectangle
-    from matplotlib.lines import Line2D
 
     MATPLOTLIB_AVAILABLE = True
 except ImportError as e:

@@ -21,7 +21,7 @@
     eng = IndicatorEngine(df)                     # df 含 收盘/最高/最低/成交量
     df['MACD'], df['MACD_Signal'] = eng.macd_named('MACD', 'MACD_Signal')
 """
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, Optional, Sequence
 
 import pandas as pd
 

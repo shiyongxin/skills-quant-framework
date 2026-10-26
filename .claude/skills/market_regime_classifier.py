@@ -11,10 +11,9 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-import json
 
 from core.indicators import sma as _core_sma
 

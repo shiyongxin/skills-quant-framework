@@ -8,8 +8,8 @@ Portfolio Manager - Complete Version
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union
+from datetime import datetime
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import json

@@ -8,7 +8,6 @@
 """
 import numpy as np
 import pandas as pd
-import pytest
 
 
 def _mk_ohlcv(n=120, seed=5):

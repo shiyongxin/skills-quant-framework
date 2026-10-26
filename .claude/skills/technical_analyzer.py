@@ -7,12 +7,11 @@ import sys
 sys.path.append('.')
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from typing import List
 
 from stock_data_fetcher import StockDataFetcher
 from trend_indicators import TrendIndicators
-from pattern_recognition import CandlestickPatterns, PricePatterns
+from pattern_recognition import CandlestickPatterns
 from advanced_indicators import AdvancedIndicators
 from risk_management import RiskMetrics
 from core.indicator_engine import IndicatorEngine

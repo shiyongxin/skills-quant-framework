@@ -8,10 +8,9 @@
 - check_close_panel: 有日历时识别落后于市场的个股 (真停牌)
 """
 import json
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
-import pytest
 
 from core.trading_calendar import (TradingCalendar, build_calendar_from_index,
                                    get_calendar, set_calendar)

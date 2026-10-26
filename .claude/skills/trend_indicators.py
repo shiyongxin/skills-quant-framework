@@ -6,7 +6,6 @@ Trend Indicators Library
 包含: EMA, DEMA, TEMA, VWMA, Hull MA, 自适应MA等
 """
 
-import pandas as pd
 import numpy as np
 
 from core.indicators import ema as _core_ema, vwap as _core_vwap

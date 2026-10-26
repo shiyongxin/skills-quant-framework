@@ -19,17 +19,15 @@
     python historical_backtest_validator.py --n-dates 50 --top 10 --holding-days 180
 """
 
-import sys
 import argparse
 import json
 import numpy as np
 import pandas as pd
 
 from core.indicators import sma as _core_sma
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from historical_data_manager import HistoricalDataManager
 from vectorized_backtest import VectorizedBacktester

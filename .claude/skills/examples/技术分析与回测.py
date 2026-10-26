@@ -6,8 +6,6 @@
 import sys
 sys.path.append('..')
 from stock_data_fetcher import StockDataFetcher
-import pandas as pd
-import numpy as np
 
 def calculate_macd(df, fast=12, slow=26, signal=9):
     """

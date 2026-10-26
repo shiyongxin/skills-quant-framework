@@ -16,7 +16,7 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 
-from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok, limit_pct_for
+from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
 

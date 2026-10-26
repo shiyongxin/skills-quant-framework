@@ -5,9 +5,6 @@
 """
 import sys
 sys.path.append('.')
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 
 from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer

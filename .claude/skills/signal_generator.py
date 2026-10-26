@@ -10,7 +10,6 @@ import sys
 sys.path.append('.')
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
 import trade_constraints
 from core.indicators import sma as _core_sma, volume_ma as _core_volume_ma

@@ -12,8 +12,8 @@ sys.path.append('.claude/skills')
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 import warnings
 warnings.filterwarnings('ignore')
 

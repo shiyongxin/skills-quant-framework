@@ -10,8 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.indicators import (atr, bollinger, ema, kdj, macd, obv, rsi, sma,
-                             true_range, volume_ma, vwap)
+from core.indicators import (atr, bollinger, ema, kdj, macd, obv, sma, true_range, volume_ma, vwap)
 from core.indicator_engine import (CANONICAL_COLUMNS,
                                    LEGACY_COLUMN_ALIASES, IndicatorEngine,
                                    indicator_columns)

@@ -24,13 +24,11 @@ DataFrame (不拿不复权数据冒充前复权)。
 
 import akshare as ak
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import json
 import time
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore
 

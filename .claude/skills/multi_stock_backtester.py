@@ -8,7 +8,7 @@
 
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 import json

@@ -8,7 +8,7 @@ Pattern Recognition Module
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 from core.indicators import atr as _core_atr
 

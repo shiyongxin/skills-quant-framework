@@ -16,8 +16,7 @@ Backtesting Framework - Complete Version
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import List, Dict, Callable, Optional, Tuple, Union
+from typing import List, Dict, Callable, Optional
 
 from core import metrics as _core_metrics
 from core.indicators import (rsi as _core_rsi, atr as _core_atr,

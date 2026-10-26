@@ -6,19 +6,17 @@ Strategy Parameter Optimizer
 提供网格搜索、随机搜索、边界随机采样等参数优化功能
 """
 
-import sys
 import numpy as np
 import pandas as pd
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Callable, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Any
+from dataclasses import dataclass
 from itertools import product
 import random
 
 from core.indicators import rsi as _core_rsi, sma as _core_sma, macd as _core_macd
 
 try:
-    from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod, StopLossMethod
+    from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod
     MODULES_AVAILABLE = True
 except ImportError:
     MODULES_AVAILABLE = False

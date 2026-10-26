@@ -8,12 +8,10 @@
 """
 import inspect
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,

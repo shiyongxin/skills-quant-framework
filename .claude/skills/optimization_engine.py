@@ -12,7 +12,6 @@
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Optional
 from pathlib import Path
 from datetime import datetime
 import json
@@ -23,8 +22,7 @@ import zlib
 import hashlib
 
 from parameter_space import ParameterSpace
-from vectorized_backtest import (VectorizedBacktester, BacktestMetrics,
-                                 metrics_from_trades)
+from vectorized_backtest import (VectorizedBacktester, metrics_from_trades)
 from historical_data_manager import HistoricalDataManager
 from optimization_config import (FitnessConfig, WalkForwardConfig,
                                  OptimizationConfig)

@@ -8,7 +8,6 @@
 - data_cleaner: 单位判定 (股/手/元/万元) + 结构清洗 + 除权跳空只标记
 """
 import json
-from pathlib import Path
 
 import pandas as pd
 import pytest

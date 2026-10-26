@@ -6,7 +6,6 @@ Advanced Technical Indicators Library
 包含: ATR, KDJ, CCI, Williams %R, OBV, AD, DPO等
 """
 
-import pandas as pd
 import numpy as np
 
 from core.indicators import (atr as _core_atr, true_range as _core_true_range,
