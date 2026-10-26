@@ -389,8 +389,14 @@ class ReversalDetector:
             skipped_checks=cfields['skipped_checks'],
         )
 
-    def analyze_stocks(self, stock_pool: Dict[str, str]) -> List[ReversalAlert]:
-        """批量分析股票"""
+    def analyze_stocks(self, stock_pool: Dict[str, str],
+                       top: Optional[int] = None) -> List[ReversalAlert]:
+        """批量分析股票
+
+        Args:
+            top: 只保留置信度最高的前 N 条 (None=不限制; 审计 L7: CLI --top 此前
+                 解析后从未生效)
+        """
         print()
         print('*' * 80)
         print('转折点预警系统 - 买在低点，卖在高点')
@@ -418,6 +424,10 @@ class ReversalDetector:
 
         # 按置信度排序
         results = sorted(results, key=lambda x: x.confidence, reverse=True)
+
+        # CLI --top: 只保留前 N 条 (排序后截断, 显示与返回一致)
+        if top is not None and top > 0:
+            results = results[:top]
 
         # 显示结果
         self._display_results(results)
@@ -505,7 +515,7 @@ def main():
             name = row.get('name', f'股票{code}')
             stock_pool[code] = name
 
-        detector.analyze_stocks(stock_pool)
+        detector.analyze_stocks(stock_pool, top=args.top)
     else:
         print('请使用 --file 指定股票列表，或使用 --code 分析单只股票')
 

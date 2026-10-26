@@ -61,12 +61,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Skills Web应用启动器")
     parser.add_argument("--install", action="store_true", help="安装依赖")
-    parser.add_argument("--run", action="store_true", help="运行应用（默认）")
 
     args = parser.parse_args()
 
     if args.install:
         install_dependencies()
 
-    # 默认运行应用
+    # 默认运行应用 (无 --run flag: 运行本就是默认行为, 解析了却不判断的 flag 只会误导)
     run_app()

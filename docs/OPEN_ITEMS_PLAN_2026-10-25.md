@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-25 — 批次 1 的 **M12 + M13 + M17 + M14 已修**（测试基线 531 → **549**，含 `tests/test_index_namespace.py` 新建 13 例 + `tests/test_source_hygiene.py` 裸 `except:` 门禁）
+> **最近更新**: 2026-10-26 — 批次 1 的 **L6 + L7 + L8 已修**（测试基线 549 → **553**，`tests/test_source_hygiene.py` 新增 3 个源码级门禁：死 import / 未读 CLI flag / docstring 参数计数）；此前 2026-10-25 修 M12 + M13 + M17 + M14（531 → 549）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -34,7 +34,7 @@
 ## 2. 批次 1 —— 确凿小 bug（低风险，建议立刻做）
 
 全部 ✅ 实测复验。共同特征：改对了只会让行为更诚实，**不动回测数值**。
-其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复（划线条目 = 已修，详见表内证据列）。
+其中 ~~M12 / M13 / M17 / M14~~ 已于 2026-10-25 修复、~~L6 / L7 / L8~~ 已于 2026-10-26 修复（划线条目 = 已修，详见表内证据列）。
 
 | # | 问题 | 证据（当前代码） | 影响 |
 |---|---|---|---|
@@ -42,9 +42,9 @@
 | ~~**M12**~~ | ~~指数代码前缀映射错~~ → **✅ 已修** | 原 `:73-80`；现 `is_index` 显式声明（不猜：000001/000905 等与个股代码互相占用）+ 指数走 `stock_zh_index_daily` 接口 + 独立命名空间 `historical/index/` + 新 API `load_index()` + CLI `fetch --index`。下游 3 个消费方同步改读指数命名空间（`daily_signal_generator`、`historical_backtest_validator`、`get_trading_calendar`/`core.ensure_calendar`）。**顺带修**：DSG `detect_current_regime` 建日历时写死 CWD `./stock_data`（应跟随实例 `data_dir`；曾因此在测试里写出假 2024 日历，致 29 用例连环失败） | 已修 + 13 回归用例（`tests/test_index_namespace.py` 新建，含源码级门禁：指数代码不得走个股 `load()`） |
 | ~~**M17**~~ | ~~`get_cash_flow()` 调的是财务指标 API，不是现金流量表~~ → **✅ 已修（删除）** | 原 `:309` 调 `ak.stock_financial_analysis_indicator`（与 `get_financial_indicator` 同 API）；**零调用方 + 文档零记载**，属"名不副实的死代码"→ 直接删除而非改语义（改语义会新增未被任何生产路径需要的财务接口，且无法离线测） | 已删；若后续需要真现金流量表，应新增明确命名的方法并配 FetchResult |
 | ~~**M14**~~ | ~~裸 `except:` 静默失败~~ → **✅ 已修** | 实测 **13 处**（审计记 11，`examples/选股示例.py:48/:101` 另漏计 2）：MFS 8 处（因子附着 5 处 + 权重优化回退 3 处）改 `except Exception as e:` + WARN；`historical_data_manager.py` 元数据损坏改 `(json.JSONDecodeError, OSError)` + WARN（**顺带修掉元数据损坏静默重置**——此前会把"元数据损坏"伪装成"空股票池"）；`get_universe` 日期解析改 `(TypeError, ValueError)`；`realtime_quote._safe_float` 改 `(TypeError, ValueError)`；示例 2 处同理 | 已修 + **门禁**: `tests/test_source_hygiene.py::TestNoBareExcept` AST 扫描 `.claude/skills/**`，新增裸 `except:` 即失败 |
-| **L6** | web_app 死 import：`ChartStyle`、`RealTimeMonitor` 各只出现于 import 行 | `web_app.py:41`、`:44` | 低 |
-| **L7** | `run_web_app.py --run` **解析了从不判断**（`:66-70` 直接 `run_app()`） | 同左 | 低 |
-| **L8** | `parameter_space` 文档漂移：docstring 说"25个参数 / 指标12个"，实际 **26 个** | `parameter_space.py:57` vs 26 个 `ParamDef(` | 低 |
+| ~~**L6**~~ | ~~web_app 死 import：`ChartStyle`、`RealTimeMonitor` 各只出现于 import 行~~ → **✅ 已修** | 复验实为 **5 个**（审计记 2，漏计 `numpy as np`、`datetime`/`timedelta`，`:19-20`）；全部删除（`ChartStyle`/`RealTimeMonitor` 亦从 import 中摘除）。顺带核实：仓库根 `run_web_app.py` 的 4 个 import 全在用 | 已修 + 门禁 `TestWebAppImportHygiene`（web_app + run_web_app 任一 import 名不再被 Name 引用即失败） |
+| ~~**L7**~~ | ~~`run_web_app.py --run` **解析了从不判断**~~ → **✅ 已修** | `--run` 删除（运行本就是默认行为，解析了却不判断的 flag 纯误导）；**复验新发现**：全仓 argparse AST 扫描另捕 `reversal_detector.py --top` 同病（`--top` 解析后从未生效，"显示Top N"是假的）→ 已接线 `analyze_stocks(stock_pool, top=)`（排序后截断，显示与返回一致，`top=None` 不限保持既有调用兼容） | 已修 + 门禁 `TestArgparseFlagsAreRead`（`.claude/skills/**` + `run_web_app.py` 所有 add_argument dest 必须出现在 `args.<attr>` 读取中） |
+| ~~**L8**~~ | ~~`parameter_space` 文档漂移：docstring 说"25个参数 / 指标12个"，实际 **26 个**~~ → **✅ 已修** | 复验三个数互不相等：声明"共25个"、分项和 24（12+4+4+4）、实际 **26**（indicator 13 / scoring 4 / signal 4 / position 5）→ docstring 改 26/13/4/4/5 | 已修 + 门禁 `TestParameterSpaceDocstringCounts`（docstring 总计与分项计数必须与 AST 实际 `ParamDef` 分组数一致，漂移即失败） |
 | **M2** | `FitnessConfig.target_probability` 接收并存入 `self`，`_compute_fitness` **从不使用** | `optimization_engine.py:86`/`:108` vs `:293-354` | 中。死配置 |
 | **M3** | `generations_run` 记的是**配置上限**而非实际代数（落盘 JSON 有 `convergence_gen` 兜住，内存对象仍错） | `optimization_engine.py:825/934/1060` | 中 |
 | **M9** | `risk_parity_position(risk_budget=...)` 声明后**函数体从未使用** | `risk_management.py:334-365` | 中。死参 |
@@ -52,6 +52,7 @@
 | **M15** | `historical_data_manager.get_stock_name` 用 CWD 相对硬编码路径，未复用 `stock_list_manager`（后者已改 `__file__` 基准） | `historical_data_manager.py:713-715`（原 :547） | 低 |
 | **M18** | 北交所（8xx/4xx）代码不加 `bj` 前缀 → 以裸 6 位码请求新浪，必然取不到数据且异常被吞 | `stock_data_fetcher.py:82-83`、`historical_data_manager.py:89`（`_format_symbol` 个股分支，原 :80） | 低。注意：M12 已把 `_format_symbol` 拆出 `is_index` 分支，个股分支未动 |
 | **M16** | `stock_data_fetcher` 每次取数写一个 `{symbol}_{起}_{止}.csv`，文件数无上限、同内容大量重叠 | `stock_data_fetcher.py:185` | 低。磁盘膨胀 |
+| **L12** | **全仓死 import**（L6 复验时全仓扫描新发现）：**32 个文件共 74 个** import 名未被 Name 引用（如 `ml_predictor` 的 `GridSearchCV/LinearRegression/classification_report`、`vectorized_backtest` 的 `limit_pct_for`、多文件的 `datetime/timedelta/typing` 类） | AST 扫描 2026-10-26，见 `tests/test_source_hygiene.py::_unused_imports` 逻辑 | 低。**动手前需逐个核实**再导出豁免 / `TYPE_CHECKING` / 字符串注解用途；核实后可把 `TestWebAppImportHygiene` 门禁放宽到全仓 |
 
 **建议**：这一批每条都能配一条回归测试，沿用 `tests/test_optional_deps.py` 的"源码级门禁 + 行为断言"模式。
 
