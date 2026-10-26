@@ -65,13 +65,13 @@ class TestHistoricalDataManager:
         def boom(*a, **k):
             raise RuntimeError('quota exceeded')
 
-        # _fetch_from_api 内部使用 akshare — 通过替换模块级引用
-        original = hdm_mod.ak
+        # _fetch_from_api 经 sina_daily.fetch_daily 取数 — 通过替换模块级引用
+        original = hdm_mod.fetch_daily
         try:
-            hdm_mod.ak = type('A', (), {'stock_zh_a_daily': boom})()
+            hdm_mod.fetch_daily = boom
             result = mgr._fetch_from_api('600519', '20240101', '20240201')
         finally:
-            hdm_mod.ak = original
+            hdm_mod.fetch_daily = original
 
         assert result is None
         captured = capsys.readouterr()
@@ -93,13 +93,13 @@ class TestHistoricalDataManager:
         parquet_path = mgr._get_parquet_path('600519')
         old.to_parquet(parquet_path, index=False)
 
-        original = hdm_mod.ak
+        original = hdm_mod.fetch_daily
         try:
             # API 返回 None (失败)
-            hdm_mod.ak = type('A', (), {'stock_zh_a_daily': lambda **k: None})()
+            hdm_mod.fetch_daily = lambda **k: None
             result = mgr.fetch_and_cache('600519', start_date='20240104')
         finally:
-            hdm_mod.ak = original
+            hdm_mod.fetch_daily = original
 
         captured = capsys.readouterr()
         # 返回旧数据但必须有提示 (旧逻辑静默把旧当新)

@@ -19,7 +19,6 @@ sys.path.append('.claude/skills')
 
 import pandas as pd
 import numpy as np
-import akshare as ak
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
@@ -28,6 +27,7 @@ warnings.filterwarnings('ignore')
 
 import trade_constraints
 from core.indicators import sma as _core_sma
+from sina_daily import fetch_daily, format_symbol
 
 
 @dataclass
@@ -172,16 +172,14 @@ class LongTermSelector:
         if code in self.cache:
             return self.cache[code]
 
-        if len(str(code)) == 6:
-            full_code = f'sh{code}' if str(code).startswith('6') else f'sz{code}'
-        else:
-            full_code = code
+        # 前缀规则单一真相源 (审计 M18: 旧内联映射缺 bj 分支)
+        full_code = format_symbol(code)
 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days * 2)
 
         try:
-            df = ak.stock_zh_a_daily(
+            df = fetch_daily(
                 symbol=full_code,
                 start_date=start_date.date(),
                 end_date=end_date.date()

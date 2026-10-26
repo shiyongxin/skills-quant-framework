@@ -8,8 +8,10 @@ pandas
 numpy
 scipy>=1.11.0    # multi_factor_selection:15-16 顶层 import (缺失连模块都导不入);
                  # pattern_recognition/risk_management 函数内 import (find_peaks/gaussian_filter1d/stats.norm.ppf)
-akshare           # stock_data_fetcher/historical_data_manager/long_term_selector/
-                 # reversal_backtest/reversal_detector 顶层 import (行情获取)
+akshare           # sina_daily/stock_data_fetcher/historical_data_manager/
+                  # historical_backtest_validator/market_regime_classifier 顶层 import (行情获取;
+                  #  long_term_selector/reversal_backtest/reversal_detector 已改走 sina_daily.fetch_daily;
+                  #  sina_daily 内 py_mini_racer+akshare.stock.cons 由其传递提供, 仅 bj 解码路径函数内用)
 
 # ---- 运行时 (功能路径依赖, 缺失对应功能报错) ----
 pyarrow           # historical_data_manager.to_parquet(engine='pyarrow') parquet 读写

@@ -27,7 +27,12 @@ class StockEvalResult:
 
 @dataclass
 class AggregateStats:
-    """聚合统计"""
+    """聚合统计 — 个股指标的**横截面**聚合 (审计 M22)
+
+    ⚠️ 口径: 本模块没有组合净值曲线 (BacktestMetrics 是逐股指标), 全部统计
+    量都是"各股指标再聚合"。worst_drawdown = 各股回撤里的最大值 (最差个股),
+    **不是组合最大回撤** —— 跨截面无法还原组合层面的路径依赖回撤。
+    """
     count: int
     # 收益率统计
     mean_return: float
@@ -40,10 +45,10 @@ class AggregateStats:
     # 夏普比率统计
     mean_sharpe: float
     median_sharpe: float
-    # 回撤统计
+    # 回撤统计 (个股 max_drawdown 的横截面聚合, 非组合口径)
     mean_drawdown: float
     median_drawdown: float
-    max_drawdown: float
+    worst_drawdown: float   # 最差个股回撤 (=各股回撤最大值, 非组合最大回撤)
     # 其他
     mean_win_rate: float
     mean_trades: float
@@ -79,7 +84,7 @@ class MultiStockBacktester:
 
     def evaluate_system(self, params: dict, symbols: list = None,
                         n_stocks: int = 100, regime_labels: dict = None,
-                        min_rows: int = 2000) -> EvaluationReport:
+                        min_rows: int = 2000, seed: int = 42) -> EvaluationReport:
         """
         评估一套参数在多只股票上的表现
 
@@ -95,6 +100,9 @@ class MultiStockBacktester:
             {symbol: pd.Series} 体制标签
         min_rows : int
             最少数据行数
+        seed : int or None
+            抽样种子 (审计 M22): 默认 42 —— 同一股票池下跨体系用同一样本
+            可比、跨运行可复现; 传 None 显式选择不可复现的随机抽样。
 
         Returns:
         --------
@@ -106,7 +114,9 @@ class MultiStockBacktester:
 
         if len(symbols) > n_stocks:
             import random
-            symbols = random.sample(symbols, n_stocks)
+            # 固定种子抽样 (审计 M22: 旧实现 random.sample 无种子,
+            # 同一股票池两次运行评估的是不同样本, 体系间对比失真)
+            symbols = random.Random(seed).sample(symbols, n_stocks)
 
         print(f"[INFO] 评估参数在 {len(symbols)} 只股票上的表现...")
 
@@ -126,7 +136,12 @@ class MultiStockBacktester:
             try:
                 metrics = self.backtester.backtest(data, params)
                 if metrics.num_trades > 0:
-                    regime = self._get_dominant_regime(sym, regime_labels)
+                    # 体制按该股数据窗口对齐 (审计 M22: 旧实现取全历史众数,
+                    # 用"这只股票一生的体制"冒充"回测窗口内的体制")
+                    window = (data['日期'] if '日期' in data.columns
+                              else data.index)
+                    regime = self._get_dominant_regime(
+                        sym, regime_labels, window=window)
                     stock_results.append(StockEvalResult(
                         symbol=sym, metrics=metrics, regime=regime
                     ))
@@ -175,7 +190,8 @@ class MultiStockBacktester:
 
     def compare_systems(self, systems: list, symbols: list = None,
                         n_stocks: int = 100,
-                        regime_labels: dict = None) -> pd.DataFrame:
+                        regime_labels: dict = None,
+                        seed: int = 42) -> pd.DataFrame:
         """
         对比多套参数体系
 
@@ -183,6 +199,8 @@ class MultiStockBacktester:
         -----------
         systems : list[dict]
             参数字典列表，每个需包含 '_name' 键
+        seed : int or None
+            抽样种子 — 各体系共用同一种子 → 同一样本, 对比才公平 (审计 M22)
 
         Returns:
         --------
@@ -191,7 +209,7 @@ class MultiStockBacktester:
         reports = []
         for system in systems:
             report = self.evaluate_system(
-                system, symbols, n_stocks, regime_labels
+                system, symbols, n_stocks, regime_labels, seed=seed
             )
             if report:
                 reports.append(report)
@@ -212,7 +230,7 @@ class MultiStockBacktester:
                 '超10%占比%': s.pct_above_10,
                 '中位夏普': s.median_sharpe,
                 '中位回撤%': s.median_drawdown,
-                '最大回撤%': s.max_drawdown,
+                '最差个股回撤%': s.worst_drawdown,
                 '平均胜率%': s.mean_win_rate,
                 '平均交易次数': s.mean_trades,
                 '平均持有天数': s.mean_holding_days,
@@ -245,19 +263,39 @@ class MultiStockBacktester:
             median_sharpe=np.median(sharpes),
             mean_drawdown=np.mean(drawdowns),
             median_drawdown=np.median(drawdowns),
-            max_drawdown=max(drawdowns),
+            worst_drawdown=max(drawdowns),
             mean_win_rate=np.mean(win_rates),
             mean_trades=np.mean(trades),
             mean_holding_days=np.mean(holding_days),
             mean_profit_factor=np.mean(profit_factors),
         )
 
-    def _get_dominant_regime(self, symbol, regime_labels):
-        """获取股票主要处于的体制"""
-        if regime_labels and symbol in regime_labels:
-            labels = regime_labels[symbol]
-            return labels.value_counts().index[0] if len(labels) > 0 else "UNKNOWN"
-        return "UNKNOWN"
+    def _get_dominant_regime(self, symbol, regime_labels, window=None):
+        """获取股票在**数据窗口内**的主要体制 (审计 M22)
+
+        window: 该股回测数据的日期序列 (data['日期'])。传入时只统计窗口内
+        有标签的交易日 —— 旧实现取全历史众数, 用"这只股票一生的体制"冒充
+        "回测窗口内的体制"。窗口内无任何标签 → 如实返回 "UNKNOWN"。
+        window=None 时退回全历史众数 (兼容旧调用)。
+        """
+        if not (regime_labels and symbol in regime_labels):
+            return "UNKNOWN"
+        labels = regime_labels[symbol]
+        if labels is None or len(labels) == 0:
+            return "UNKNOWN"
+        if window is not None:
+            win = pd.to_datetime(pd.Index(list(window)),
+                                 errors="coerce").dropna().unique()
+            if len(win) == 0:
+                return "UNKNOWN"
+            lab = labels.copy()
+            lab.index = pd.to_datetime(lab.index, errors="coerce")
+            lab = lab[~lab.index.isna()]
+            aligned = lab.reindex(win).dropna()
+            if len(aligned) == 0:
+                return "UNKNOWN"  # 窗口内无标签 (不拿全历史冒充)
+            return aligned.value_counts().index[0]
+        return labels.value_counts().index[0]
 
     def format_report(self, report: EvaluationReport) -> str:
         """格式化评估报告"""
@@ -267,6 +305,7 @@ class MultiStockBacktester:
         lines.append("=" * 70)
         lines.append(f"  评估时间: {report.timestamp}")
         lines.append(f"  有效样本: {report.overall.count} 只股票")
+        lines.append("  口径: 个股指标的横截面聚合 (无组合净值曲线)")
         lines.append("")
 
         # 总体统计
@@ -279,8 +318,8 @@ class MultiStockBacktester:
         lines.append(f"  超10%收益占比: {s.pct_above_10:.1f}%")
         lines.append(f"  夏普比率: 中位={s.median_sharpe:.2f}  "
                      f"均值={s.mean_sharpe:.2f}")
-        lines.append(f"  最大回撤: 中位={s.median_drawdown:.1f}%  "
-                     f"最大={s.max_drawdown:.1f}%")
+        lines.append(f"  个股回撤(横截面): 中位={s.median_drawdown:.1f}%  "
+                     f"最差={s.worst_drawdown:.1f}% (最差个股, 非组合回撤)")
         lines.append(f"  胜率: {s.mean_win_rate:.1f}%")
         lines.append(f"  平均交易次数: {s.mean_trades:.1f}")
         lines.append(f"  平均持有天数: {s.mean_holding_days:.0f}")
@@ -330,6 +369,8 @@ def main():
                        help='参数JSON文件(优化结果)')
     parser.add_argument('--n-stocks', type=int, default=100,
                        help='评估股票数')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='抽样种子 (审计 M22: 固定种子保证可复现)')
     parser.add_argument('--regime-labels',
                        default='stock_data/regime_labels.csv',
                        help='体制标签文件')
@@ -357,7 +398,7 @@ def main():
 
     for params in systems:
         report = backtester.evaluate_system(
-            params, n_stocks=args.n_stocks
+            params, n_stocks=args.n_stocks, seed=args.seed
         )
         if report:
             print(backtester.format_report(report))

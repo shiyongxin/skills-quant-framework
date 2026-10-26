@@ -38,6 +38,7 @@ except ImportError:
 
 from core.fetch_result import FetchResult
 from core.indicator_engine import IndicatorEngine
+from sina_daily import fetch_daily, format_symbol
 
 
 class StockDataFetcher:
@@ -68,20 +69,42 @@ class StockDataFetcher:
         """
         格式化股票代码为 sh/sz/bj 前缀格式 (新浪财经接口要求)
 
+        规则的单一真相源是 `sina_daily.format_symbol` (审计 M18): 旧实现缺
+        bj 分支, 4/8/92 开头的北交所裸码原样发给新浪 → 404 且异常被吞。
+
         Args:
             symbol: 股票代码 (如 "600036" 或 "000001")
 
         Returns:
-            带前缀的代码 (如 "sh600036" 或 "sz000001")
+            带前缀的代码 (如 "sh600036" / "sz000001" / "bj920002")
         """
-        if len(symbol) == 6:
-            if symbol.startswith('6'):
-                return f'sh{symbol}'
-            elif symbol.startswith('0') or symbol.startswith('3'):
-                return f'sz{symbol}'
-            else:
-                return symbol
-        return symbol
+        return format_symbol(symbol)
+
+    def _dedupe_quote_cache(self, symbol, adjust="", keep=None):
+        """quotes/ 快照按 (股票, 复权口径) 去重 — 同口径只留最新 (审计 M16)
+
+        旧实现文件名 `{symbol}_{起}_{止}.csv` 与日期区间绑定: 同一股票每次
+        取数 (尤其重叠区间) 都新增一个文件, 目录无上限膨胀且内容大量重叠。
+        去重后每个 (symbol, 口径) 至多 1 个文件; raw 文件名保持旧格式
+        (无标签), qfq/hfq 带口径标签 —— MRC `_load_from_local_cache` 的
+        `{index_code}_*.csv` glob 对两种命名都仍然命中。
+
+        keep: 刚写入的新快照文件名 (先写后删, 写失败时旧快照仍在)。
+        """
+        tag = adjust if adjust in ("qfq", "hfq") else ""
+        quotes_dir = self.data_dir / "quotes"
+        for path in quotes_dir.glob(f"{symbol}_*.csv"):
+            if keep is not None and path.name == keep:
+                continue
+            # rest = "{tag_}YYYYMMDD_YYYYMMDD.csv" (tag 仅 qfq/hfq)
+            rest = path.name[len(str(symbol)) + 1:]
+            head = rest.split("_", 1)[0]
+            file_tag = "" if head.isdigit() else head
+            if file_tag == tag:
+                try:
+                    path.unlink()
+                except OSError as e:
+                    print(f"[WARN] 旧快照删除失败 {path.name}: {e}")
 
     def get_stock_list(self, market="A股") -> pd.DataFrame:
         """
@@ -147,8 +170,9 @@ class StockDataFetcher:
             start_date = datetime.strptime(start_date, "%Y%m%d")
 
         try:
-            # 使用新浪接口 (ak.stock_zh_a_daily)
-            df = ak.stock_zh_a_daily(
+            # 新浪接口 (sh/sz 透传 ak.stock_zh_a_daily; bj 走 klc 直连,
+            # akshare 对 bj 在 amount 步骤崩溃 — 审计 M18, 见 sina_daily)
+            df = fetch_daily(
                 symbol=sina_symbol,
                 start_date=start_date.date(),
                 end_date=end_date.date(),
@@ -179,10 +203,16 @@ class StockDataFetcher:
                 if '涨跌幅' not in df.columns:
                     df['涨跌幅'] = df['收盘'].pct_change() * 100
 
-                # 保存到本地
-                filename = f"{symbol}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
+                # 保存到本地 (同 (股票, 口径) 只留最新快照 — 审计 M16)
+                # 复权口径进文件名 (raw 保持旧名兼容; 审计 P0-4 同构)
+                tag_part = f"_{adjust}" if adjust in ("qfq", "hfq") else ""
+                filename = (f"{symbol}{tag_part}_"
+                            f"{start_date.strftime('%Y%m%d')}_"
+                            f"{end_date.strftime('%Y%m%d')}.csv")
                 filepath = self.data_dir / "quotes" / filename
                 df.to_csv(filepath, index=False, encoding='utf-8-sig')
+                # 先写后删: 写失败时旧快照仍完好
+                self._dedupe_quote_cache(symbol, adjust, keep=filename)
 
                 print(f"[OK] 获取到 {len(df)} 条记录")
                 self.last_fetch_result = FetchResult.success(

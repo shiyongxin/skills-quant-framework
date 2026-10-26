@@ -34,6 +34,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore
 
+from sina_daily import fetch_daily, format_symbol
+from stock_list_manager import get_stock_name as _lookup_stock_name
+
 
 class HistoricalDataManager:
     """
@@ -88,9 +91,11 @@ class HistoricalDataManager:
             print(f"[WARN] 元数据保存失败: {str(e)[:100]}")
 
     def _format_symbol(self, symbol: str, is_index: bool = False) -> str:
-        """格式化为新浪接口格式 (sh/sz 前缀)
+        """格式化为新浪接口格式 (sh/sz/bj 前缀)
 
-        个股: 6→sh (沪市主板), 0/3→sz (深市主板/创业板)
+        个股: 6→sh (沪市主板), 0/3→sz (深市主板/创业板),
+              4/8/92→bj (北交所, 规则单一真相源 sina_daily.format_symbol,
+              审计 M18 —— 旧实现缺 bj 分支, 920xxx 裸码取数静默失败)
         指数: 000xxx→sh (沪市指数, 如 沪深300=000300/上证50=000016),
               399xxx→sz (深市指数, 如 深证成指=399001/创业板指=399006)
 
@@ -106,11 +111,7 @@ class HistoricalDataManager:
                 return f'sz{symbol}'
             # 000xxx (沪深300/上证50/中证500 等) 与其余指数码默认按沪市
             return f'sh{symbol}'
-        if symbol.startswith('6'):
-            return f'sh{symbol}'
-        elif symbol.startswith('0') or symbol.startswith('3'):
-            return f'sz{symbol}'
-        return symbol
+        return format_symbol(symbol)
 
     def _get_index_path(self, symbol: str) -> Path:
         """指数行情的Parquet路径 (独立命名空间, 审计 M12)
@@ -344,16 +345,20 @@ class HistoricalDataManager:
 
     def _fetch_from_api(self, symbol: str, start_date: str, end_date: str,
                         adjust: str = "") -> pd.DataFrame:
-        """从akshare API获取数据 (adjust=复权口径, 审计 P0-4)"""
-        tencent_symbol = self._format_symbol(symbol)
+        """从新浪接口获取数据 (adjust=复权口径, 审计 P0-4)
+
+        sh/sz 透传 ak.stock_zh_a_daily; bj 走 sina_daily 的 klc 直连
+        (akshare 对 bj 在 amount 步骤崩溃 — 审计 M18)。
+        """
+        sina_symbol = self._format_symbol(symbol)
         adjust = self._adjust_tag(adjust)
 
         try:
             start_dt = datetime.strptime(start_date, "%Y%m%d").date()
             end_dt = datetime.strptime(end_date, "%Y%m%d").date()
 
-            df = ak.stock_zh_a_daily(
-                symbol=tencent_symbol,
+            df = fetch_daily(
+                symbol=sina_symbol,
                 start_date=start_dt,
                 end_date=end_dt,
                 adjust=adjust
@@ -713,14 +718,18 @@ class HistoricalDataManager:
         return sorted(self.metadata.get("stocks", {}).keys())
 
     def get_stock_name(self, symbol: str) -> str:
-        """获取股票名称(从stock_list.csv)"""
-        stock_list_path = Path(".claude/skills/stock_list.csv")
-        if stock_list_path.exists():
-            df = pd.read_csv(stock_list_path, encoding='utf-8-sig')
-            row = df[df['code'] == int(symbol)]
-            if len(row) > 0:
-                return row.iloc[0]['name']
-        return symbol
+        """获取股票名称 (stock_list_manager 单例, __file__ 基准 — 审计 M15)
+
+        旧实现用 CWD 相对路径读 skills 目录下的 stock_list.csv: 仓库根
+        以外运行即取不到; 每次调用重读 CSV; 用 int(symbol) 匹配 (非数字代码
+        直接 ValueError)。现复用 stock_list_manager 单例 (路径基于 __file__,
+        加载一次)。查不到时返回入参本身 (与旧行为一致)。
+        """
+        s = str(symbol)
+        if s.isdigit():
+            s = s.zfill(6)
+        name = _lookup_stock_name(s)
+        return name if name else str(symbol)
 
 
 def main():
@@ -778,10 +787,11 @@ def main():
             col = 'code' if 'code' in df.columns else '股票代码'
             symbols = [str(c).zfill(6) for c in df[col].tolist()]
         else:
-            # 从stock_list.csv加载
-            stock_list = Path(".claude/skills/stock_list.csv")
-            if stock_list.exists():
-                df = pd.read_csv(stock_list, encoding='utf-8-sig')
+            # 从 stock_list.csv 加载 (stock_list_manager 单例, __file__ 基准
+            # — 审计 M15: 旧实现 CWD 相对路径, 非仓库根运行即取不到)
+            from stock_list_manager import get_stock_list
+            df = get_stock_list().get_all_stocks()
+            if len(df) > 0:
                 col = 'code' if 'code' in df.columns else '股票代码'
                 all_symbols = [str(c).zfill(6) for c in df[col].tolist()]
                 if args.n < len(all_symbols):

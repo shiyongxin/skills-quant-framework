@@ -19,12 +19,13 @@ sys.path.append('.claude/skills')
 
 import pandas as pd
 import numpy as np
-import akshare as ak
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
+
+from sina_daily import fetch_daily, format_symbol
 
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
@@ -159,15 +160,13 @@ class ReversalDetector:
     def get_stock_data(self, code: str, days: int = 250) -> Optional[pd.DataFrame]:
         """获取股票数据"""
         try:
-            if len(str(code)) == 6:
-                full_code = f'sh{code}' if str(code).startswith('6') else f'sz{code}'
-            else:
-                full_code = code
+            # 前缀规则单一真相源 (审计 M18: 旧内联映射缺 bj 分支)
+            full_code = format_symbol(code)
 
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days * 2)
 
-            df = ak.stock_zh_a_daily(
+            df = fetch_daily(
                 symbol=full_code,
                 start_date=start_date.date(),
                 end_date=end_date.date()
