@@ -6,6 +6,8 @@
 - 向量化信号生成(无逐行循环)
 - 简化仓位跟踪(固定仓位比例，百分比止损)
 - 单股回测 ~10ms vs 现有BacktestEngine ~500ms
+- 成交容量约束 (审计 B14/H7): 单笔买入 ≤ 当日成交额 × 参与率 (默认 5%),
+  容量不足则部分成交 (逐笔仓位比例可变) —— 成交量不再只用于信号打分
 
 用途: 遗传算法优化中的大规模回测评估
 """
@@ -16,7 +18,8 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 
-from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok
+from execution_model import (CostModel, buy_open_ok, sell_open_ok, sell_intraday_ok,
+                            DEFAULT_MAX_VOLUME_PARTICIPATION, capacity_limit_notional)
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
 
@@ -55,6 +58,7 @@ class TradeDetail:
     pnl_pct: float          # 收益率(%)
     holding_days: int
     exit_reason: str        # "stop_loss" / "take_profit" / "signal" / "end"
+    position_pct: float = 0.0  # 本笔实际仓位比例 (成交容量约束可能小于配置值)
 
 
 def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
@@ -68,11 +72,27 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     - trade_spans: [(entry, exit)] 相对 close/open 时间轴的 bar 下标
     - 日频盯市近似: 入场日 开盘→收盘(不含隔夜跳空), 出场日仅保留隔夜跳空;
       仅用于 MDD/Sharpe, 不改 total_return
+    - position_size_pct: 标量(统一仓位比例) 或**逐笔数组** (成交容量约束
+      导致部分成交时每笔比例不同, 审计 B14/H7)。全部相等时走标量路径,
+      数值与旧版逐位一致。
     """
     pnl_arr = np.asarray(pnl_arr, dtype=np.float64)
     holding_arr = np.asarray(holding_arr, dtype=np.float64)
     if pnl_arr.size == 0:
         return BacktestMetrics()
+
+    frac_arr = np.asarray(position_size_pct, dtype=np.float64)
+    scalar_frac = frac_arr.ndim == 0
+    if scalar_frac:
+        frac = float(frac_arr)
+    else:
+        frac = frac_arr.reshape(-1)
+        if frac.size == pnl_arr.size and np.all(frac == frac[0]):
+            # 各笔比例相同 → 退化为标量路径 (与旧版逐位一致)
+            frac = float(frac[0])
+            scalar_frac = True
+        elif frac.size != pnl_arr.size:
+            frac = np.full(pnl_arr.shape, float(frac[-1]) if frac.size else 0.0)
 
     n = len(close)
 
@@ -85,7 +105,7 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     profit_factor = _core_metrics.profit_factor(pnl_arr)
 
     # 总收益(复利, 逐笔含费口径)
-    cumulative = np.cumprod(1 + pnl_arr / 100 * position_size_pct)
+    cumulative = np.cumprod(1 + pnl_arr / 100 * frac)
     total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
 
     # 年化收益
@@ -108,8 +128,17 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     held = np.zeros(n, dtype=bool)
     for e, x in trade_spans:
         held[e:x + 1] = True
-    mtm = np.concatenate(
-        [[1.0], np.cumprod(1 + daily_ret * position_size_pct * held)])
+    if scalar_frac:
+        mtm = np.concatenate(
+            [[1.0], np.cumprod(1 + daily_ret * frac * held)])
+    else:
+        # 逐笔仓位比例 → 每根 bar 用其所属持仓的比例
+        exposure = np.zeros(n, dtype=np.float64)
+        for idx, (e, x) in enumerate(trade_spans):
+            if e < n:
+                exposure[e:x + 1] = frac[idx] if idx < frac.size else 0.0
+        mtm = np.concatenate(
+            [[1.0], np.cumprod(1 + daily_ret * exposure)])
 
     max_drawdown = _core_metrics.max_drawdown_pct(mtm)
 
@@ -239,7 +268,11 @@ class VectorizedBacktester:
         data : pd.DataFrame
             历史数据，必须包含: 日期, 开盘, 最高, 最低, 收盘, 成交量
         params : dict
-            参数字典，来自ParameterSpace
+            参数字典，来自ParameterSpace。
+            成交容量相关 (审计 B14/H7):
+              - max_volume_participation: 单笔买入 ≤ 当日成交额 × 该比例
+                (默认 0.05; 0 = 关闭约束)
+              - capital: 名义资金 (默认 100 万), 仅用于把仓位比例折算成金额
         history : pd.DataFrame, optional (审计 B23/H8③)
             窗口前历史段。给定时与 data 拼接后计算指标与信号 —— 每窗重置的
             warmup 只落在历史段 (段长 ≥ warmup 上限 60 时窗口内信号不被清零),
@@ -515,6 +548,11 @@ class VectorizedBacktester:
         # 硬止损生效 (追踪/止盈/卖讯全部失效), 且 A 引擎无此概念 → 三引擎
         # 口径不一致; 显式配置时仍作为锁定期语义生效
         min_holding = int(params.get('min_holding_days', 0))
+        # 成交容量约束 (审计 B14/H7): 单笔买入金额 ≤ 当日成交额 × 参与率;
+        # capital = 名义资金 (仅用于把仓位比例折算成金额, 默认 100 万/股)
+        participation = float(params.get('max_volume_participation',
+                                         DEFAULT_MAX_VOLUME_PARTICIPATION))
+        capital = float(params.get('capital', 1_000_000))
         is_st = bool(params.get('is_st', False))
         code = params.get('symbol') or params.get('code')
 
@@ -523,6 +561,14 @@ class VectorizedBacktester:
         high_arr = df['最高'].values.astype(np.float64)
         low_arr = df['最低'].values.astype(np.float64)
         signals_arr = signals.values.astype(np.int8)
+
+        # 当日成交额 (容量约束用): 优先 '成交额' 列, 缺失时用 成交量×收盘价 近似
+        # (假设成交量单位为股 —— repo 的 data_cleaner 已把 手/股 归一为股)
+        turnover_arr = None
+        if '成交额' in df.columns:
+            turnover_arr = df['成交额'].values.astype(np.float64)
+        elif '成交量' in df.columns:
+            turnover_arr = df['成交量'].values.astype(np.float64) * close
 
         dates = pd.to_datetime(df['日期']).values if '日期' in df.columns else None
 
@@ -547,6 +593,7 @@ class VectorizedBacktester:
         trades_holding = []
         trades_reason = []
         trade_spans = []
+        trades_frac = []   # 每笔实际仓位比例 (容量约束可能部分成交)
         trade_details = [] if return_details else None
 
         i = 0
@@ -566,6 +613,19 @@ class VectorizedBacktester:
                                     code, is_st)[0]):
                 i += 1
                 continue
+
+            # 成交容量约束 (审计 B14/H7): 本笔最多成交 当日成交额×参与率
+            eff_fraction = position_size_pct
+            if participation > 0 and turnover_arr is not None and capital > 0:
+                cap_notional = capacity_limit_notional(
+                    float(turnover_arr[entry_bar]), participation)
+                if cap_notional is not None:
+                    eff_fraction = min(position_size_pct,
+                                       cap_notional / capital)
+                    if eff_fraction <= 0:
+                        # 当日零成交 → 买不进 (与引擎 A 同口径)
+                        i += 1
+                        continue
 
             # 入场价: 下一根开盘 + 滑点 + 买入成本(佣金+过户)
             entry_price = cm.buy_price_incl(float(open_arr[entry_bar]))
@@ -654,6 +714,7 @@ class VectorizedBacktester:
             trades_holding.append(holding_days)
             trades_reason.append(exit_reason)
             trade_spans.append((int(entry_bar), int(exit_offset)))
+            trades_frac.append(float(eff_fraction))
 
             if return_details:
                 trade_details.append(TradeDetail(
@@ -664,6 +725,7 @@ class VectorizedBacktester:
                     pnl_pct=float(pnl_pct),
                     holding_days=int(holding_days),
                     exit_reason=str(exit_reason) if exit_reason else "end",
+                    position_pct=float(eff_fraction),
                 ))
 
             # 扫描续点: 持仓期内(入场根~出场根)的买讯已被忽略;
@@ -676,8 +738,10 @@ class VectorizedBacktester:
         # 指标统一口径 (审计 E-P1: 共享 metrics_from_trades, 消除复制块)
         pnl_arr = np.array(trades_pnl, dtype=np.float64)
         holding_arr = np.array(trades_holding, dtype=np.float64)
+        # 逐笔仓位比例 (容量约束可能部分成交; 全部相等时 metrics 走标量路径)
+        frac_arr = np.array(trades_frac, dtype=np.float64)
         metrics = metrics_from_trades(pnl_arr, holding_arr, trade_spans,
-                                      close, open_arr, position_size_pct)
+                                      close, open_arr, frac_arr)
 
         if return_details:
             return metrics, trade_details

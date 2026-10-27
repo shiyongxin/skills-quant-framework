@@ -118,6 +118,93 @@ def next_open_fill(bar, prev_close: float, side: str,
 
 
 # ---------------------------------------------------------------------------
+# 成交容量约束 (审计 B14 / H7)
+# ---------------------------------------------------------------------------
+#
+# 旧问题: 成交量只用于信号打分 (放量/缩量), 从不做成交容量校验 —— 引擎可以在
+# 日成交额百万的票上买上亿元而不作任何惩罚 (↑乐观)。现按"单笔买入金额 ≤
+# 当日成交额 × 参与率" 封顶, 部分成交 (不足则按上限成交, 不足 1 手不买)。
+#
+# 数据口径: 优先 '成交额' 列; 缺失时用 '成交量' × 价格近似 (VWAP≈收盘价,
+# 假设成交量单位为股 —— repo 的 data_cleaner 已把 手/股 归一为股)。
+
+DEFAULT_MAX_VOLUME_PARTICIPATION = 0.05  # 默认单笔 ≤ 当日成交额的 5%
+
+
+def bar_turnover_amount(bar, price: Optional[float] = None) -> Optional[float]:
+    """取 bar 的当日成交额 (元)
+
+    Args:
+        bar: 含 '成交额'/'成交量'/'收盘' 的 Series 或 dict
+        price: 成交价 (缺省用 bar['收盘'])
+
+    Returns:
+        成交额 (元); 两列都缺 → None (调用方如实跳过容量检查)。
+        当日零成交返回 0.0 (不是 None) —— 零成交日不得成交。
+    """
+    def _get(obj, key):
+        try:
+            return obj.get(key)
+        except AttributeError:
+            return None
+
+    def _isna(v):
+        if v is None:
+            return True
+        if _pd is not None:
+            try:
+                return bool(_pd.isna(v))
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    amount = _get(bar, '成交额')
+    if amount is not None and not _isna(amount):
+        return float(amount)
+
+    volume = _get(bar, '成交量')
+    if volume is None or _isna(volume):
+        return None
+    px = price if price is not None else _get(bar, '收盘')
+    if px is None or _isna(px) or float(px) <= 0:
+        return None
+    return float(volume) * float(px)
+
+
+def capacity_limit_notional(amount: Optional[float],
+                             participation: Optional[float]) -> Optional[float]:
+    """单笔成交金额上限 (元) —— 当日成交额 × 参与率
+
+    Args:
+        amount: 当日成交额 (元); None = 数据缺失 → 无法判断
+        participation: 参与率上限 (0.05 = 当日成交额的 5%); <=0 = 关闭约束
+
+    Returns:
+        上限金额 (元); None = 不限制 (缺数据或显式关闭)。
+        当日零成交 (amount == 0) → 返回 0.0 (买不进, 不是"不限制")。
+    """
+    if participation is None:
+        return None
+    try:
+        part = float(participation)
+    except (TypeError, ValueError):
+        return None
+    if part <= 0:
+        return None
+    if amount is None:
+        return None
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if amt != amt:  # NaN
+        return None
+    if amt <= 0:
+        return 0.0
+    return amt * part
+
+
+# ---------------------------------------------------------------------------
 # 向量化版本（numpy 数组入参，供向量化引擎批量判定）
 # ---------------------------------------------------------------------------
 

@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-26 — 批次 2 第二条 **H9 已修（引擎 A walk-forward）**：测试窗口带预热（`run(warmup_data=)`，策略可见窗口前历史但账户空仓起步）+ 各窗口 OOS 净值曲线拼接（`_stitch_oos_equity`，OOS 总收益 = 各窗逐段复利），实测裸切片 OOS 仅 6 笔 → 带预热 12 笔；测试基线 611 → **618**；同日早些 **H8 已修（引擎 B 三处结构性偏差）**：持仓状态机（重叠买讯不再切出 0 持仓日伪交易）/ `min_holding_days` 默认 20→0（锁定期不再屏蔽退出）/ warmup 跨窗口继承（`backtest(history=)`，OOS 窗口不再被吃前 1/3）；**黄金快照已重评**（引擎 B ret 8.24→12.99、Sharpe 0.707→1.431、MDD 6.52→2.76，归因证明见下表），测试基线 602 → **611**；此前同日批次 1 全部清账（L12 收口 602、M22+M15+M18+M16 599、M2+M3+M9 560、L6+L7+L8 553、M12+M13+M17+M14 2026-10-25 531）
+> **最近更新**: 2026-10-26 — 批次 2 第三条 **H7 已修（回测引擎无流动性/容量约束）**：新增 `execution_model.bar_turnover_amount()` + `capacity_limit_notional()` 共享助手，A 引擎 `PositionConfig.max_volume_participation`（默认 5%）按 当日成交额×占比 截断买入股数，B 引擎 `params['max_volume_participation']` + `params['capital']` 支持逐笔部分成交（`metrics_from_trades` 支持逐笔仓位比例数组，全部相等时走标量路径 → 逐位兼容旧版）；**引擎 A 黄金快照已重评**（ret 20.03%→20.62%、Sharpe 0.810→0.838、MDD 14.19%→14.00%，归因：10 笔买入中 3 笔落在低量日被截断；关闭约束时逐位复现旧值），引擎 B 黄金不变；测试基线 618 → **629**；同日早些 **H9 已修（引擎 A walk-forward）**：测试窗口带预热（`run(warmup_data=)`，策略可见窗口前历史但账户空仓起步）+ 各窗口 OOS 净值曲线拼接（`_stitch_oos_equity`，OOS 总收益 = 各窗逐段复利），实测裸切片 OOS 仅 6 笔 → 带预热 12 笔；测试基线 611 → **618**；同日早些 **H8 已修（引擎 B 三处结构性偏差）**：持仓状态机（重叠买讯不再切出 0 持仓日伪交易）/ `min_holding_days` 默认 20→0（锁定期不再屏蔽退出）/ warmup 跨窗口继承（`backtest(history=)`，OOS 窗口不再被吃前 1/3）；**黄金快照已重评**（引擎 B ret 8.24→12.99、Sharpe 0.707→1.431、MDD 6.52→2.76，归因证明见下表），测试基线 602 → **611**；此前同日批次 1 全部清账（L12 收口 602、M22+M15+M18+M16 599、M2+M3+M9 560、L6+L7+L8 553、M12+M13+M17+M14 2026-10-25 531）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -64,7 +64,7 @@
 |---|---|---|---|
 | ~~**H8**~~ | ~~引擎 B 三处结构性偏差：① 重叠买入信号 → 0 持仓日伪交易（无持仓状态机）② 最小持有期屏蔽退出条件（`min_holding_days` 默认 20）③ warmup 吃掉 OOS 窗口 1/3~~ → **✅ 已修（黄金快照已重评）** | 复验确认三条全部属实（审计 D-backtest.md B21/B22/B23）：**①** 持仓期终点取"下一次买入信号"→ 密集买讯切出 0 持仓日伪交易；改为**持仓状态机**（空仓才开仓，持仓中新买讯忽略，出场只由止损/追踪/止盈/卖讯/期末决定，与 A 引擎"买入仅当无持仓"同口径）；**②** `min_holding_days` 默认 20 → **0（不锁）**，显式传值时锁定期语义保留（参数空间 `[10,90]` 本就已显式暴露该维，属审计建议的"或纳入参数空间"分支）；**③** warmup 公式提炼为 `warmup_bars()`，新增 `backtest(history=)` —— `walk_forward` 每窗带上**窗口前 60 根历史**，warmup 只落在历史段，OOS 窗口不再被清零前 1/3。**复现对照（同参数）**：① 旧 156 笔/均持仓 2.01 日/Sharpe -0.601 → 新 7 笔/85.7 日/+0.324；③ 旧 OOS 首窗 1 笔 → 新 3 笔 | 已修 + `tests/test_backtest_honesty.py::TestH8StructuralBiases` 9 用例（伪交易/买讯忽略/出场根再入场/默认不锁/显式锁/追踪止损不受锁/history 保活窗口信号/walk_forward 传 history）+ **黄金快照重评**（见下） |
 | ~~**H9**~~ | ~~引擎 A 的 walk-forward 无预热、**OOS 结果未拼成净值曲线**（返回每窗 dict 列表，拿不到真正 OOS 绩效）~~ → **✅ 已修** | 复验确认属实（审计 D-backtest.md **B25**）：`test_data = data.iloc[train_end:test_end]` 裸切片，策略在 A 内实时算 MA → 63 根窗口配 `slow=20` 只剩 43 根可用 bar；各窗口结果未拼接 → 无整体 OOS 绩效。**修复**：① `BacktestEngine.run(..., warmup_data=)` —— 策略可见窗口前历史（指标预热）但**账户仍从窗口首根空仓起步**（不带入预热期盈亏），`grid_search`/`walk_forward` 逐层透传（默认 `warmup_period=60`）；② 新增 `_stitch_oos_equity()` —— 各窗口日频净值曲线按资金连续性缩放拼成一条曲线，**OOS 总收益 = 各窗收益逐段复利**（不是平均），并给出聚合 OOS 指标（总收益/年化/夏普/回撤/交易统计/窗口数/OOS bar 数）；`walk_forward` 返回值由"每窗 dict 列表"改为 `{'windows', 'oos', 'oos_equity_curve'}`（该函数**零调用方**，无兼容负担）。**实测对照**（750 根、train 252/test 63、`ma_cross(5,20)`）：裸切片 OOS 仅 **6 笔**（7 个窗口里 3 个零交易）→ 带预热 **12 笔**（仅首个窗口无历史可预热，如实零交易）；OOS 总收益 10.67%→4.98%、Sharpe 0.327→0.050、MDD 12.93%→15.73%（**↓悲观方向** = OOS 不再被结构性削弱，与审计标注一致） | 已修 + `tests/test_backtest_honesty.py::TestH9WalkForwardOS` 7 用例（策略可见预热历史/预热段不参与交易/walk_forward 预热后 OOS 交易更多/返回 OOS 聚合+曲线/OOS 总收益=各窗复利/曲线覆盖全部 OOS bar/无预热时 run() 逐位不变）；**引擎 A 黄金快照逐位不变**（`run()` 无预热路径未改） |
-| **H7** | 回测引擎内**无流动性/容量约束**（ADV/成交额 0 命中）→ 可在成交量百万股的票上买 1 亿元无惩罚。`trade_constraints` 的 ADV 门槛只作用在信号层 | `backtest_framework.py`、`vectorized_backtest.py` | ⚠️ 需再核 |
+| ~~**H7**~~ | ~~回测引擎内**无流动性/容量约束**（ADV/成交额 0 命中）→ 可在成交量百万股的票上买 1 亿元无惩罚。`trade_constraints` 的 ADV 门槛只作用在信号层~~ → **✅ 已修（黄金快照已重评）** | 复验确认属实（审计 D-backtest.md **B14**）：`成交量` 只用于**信号打分**（放量/缩量），从不用于**成交容量**校验 —— A 的 `_calculate_position_size` 与 B 的 `position_size_pct` 均只受 `max_position_pct`/资金约束。**修复**：新增共享助手 `execution_model.bar_turnover_amount()`（当日成交额：优先 `成交额` 列，缺失时 `成交量×价格` 近似）与 `capacity_limit_notional()`（上限 = 成交额 × 参与率；数据缺失→不限制、当日零成交→上限 0 买不进）；**A** 新增 `PositionConfig.max_volume_participation`（默认 **0.05**）→ 买入股数按上限截断（不足 1 手不买）；**B** 新增 `params['max_volume_participation']`（默认 0.05）+ `params['capital']`（名义资金，默认 100 万，用于把仓位比例折算成金额）→ 逐笔**部分成交**，`metrics_from_trades` 支持逐笔仓位比例数组（全部相等时走标量路径 → 数值与旧版逐位一致）；`TradeDetail` 增 `position_pct` 字段。缺成交量/成交额列时 A 如实记 `capacity_checked=False`（不假装已受限） | 已修 + `tests/test_backtest_honesty.py::TestH7CapacityConstraint` 11 用例（共享助手口径/A 截断/关闭约束回旧行为/零成交日买不进/缺列如实标记/B 部分成交/B 零成交不成交/B 黄金不受影响）+ **引擎 A 黄金快照重评**（见下） |
 | **M1** | 残余指标口径分歧：`win_rate` 分母（B `pnl<=0` 全算输 vs A `len(win)/len(profits)`）、`max_consecutive_losses` 基准（交易序列 vs 日频净值序列） | `vectorized_backtest.py:71-73,112-117` vs `backtest_framework.py:455,495-507` | `core/metrics.py` 只统一了 3 个函数 |
 | **M5** | 优化器逐股回测失败**静默 `except Exception: continue`**，无失败计数、无惩罚 → 参数组可能在更少样本上被评估而不受罚 | `optimization_engine.py:161-162,219-220,236-237` | ⚠️ 需再核 |
 | **M4** | 短体制窗口冷启动（`ma_slow` 可达 120 > warmup 60）；`min_hold_end` 使止盈/移动止损在体制窗内永不触发 | `vectorized_backtest.py:448-450`、`optimization_engine.py:194-195` | ⚠️ 需再核 |
@@ -84,6 +84,17 @@
 | num_trades / win_rate | 2 / 50.0 | 2 / 50.0（不变） | — |
 
 归因证明（非猜测）：① 持仓状态机在黄金数据上**数值中性** —— 显式传 `min_holding_days=20` 时新实现与旧实现**逐位一致**（ret 8.2434717354 / sharpe 0.7067662023 / mdd 6.5168484346 / pf 2.4186901536，交易同为 143→158 stop_loss −8.17% 与 168→189 take_profit +19.77%），已固化为 `test_engine_b_golden_with_explicit_min_holding_lock`；③ history 只在 `walk_forward` 生效，`backtest()` 默认路径逐位不变。漂移**全部**来自 ②：同一笔持仓（bar143 入场）在旧默认下追踪止损被 20 日锁屏蔽 → 扛到 bar158 硬止损 −8.17%，新默认下 bar145 追踪止损 −3.05%（小亏不拖成大亏，回撤 6.52%→2.76%）。**新快照更诚实**：不再用"隐式锁定期"把止损出场推迟。
+
+**H7 黄金快照重评记录（2026-10-26，引擎 A，seed=3 / n=300）**：
+
+| 指标 | 旧快照 | 新快照 | 归因 |
+|---|---|---|---|
+| total_return | 20.0267552369 | **20.6168802842** | 容量约束 |
+| sharpe_ratio | 0.8098904709 | **0.8380161593** | 容量约束 |
+| max_drawdown | 14.1949051746 | **13.9992960062** | 容量约束 |
+| trade_count / win_rate / profit_factor | 9 / 33.33 / 1.2589570136 | 9 / 33.33 / 1.2589570136（不变） | — |
+
+归因证明：黄金数据 10 笔买入中 **3 笔落在低成交额日被截断**（2022-02-03: 97300→93100 股；2022-08-04: 89800→64800 股；2022-10-26: 85700→71800 股 —— 上限 = 当日成交额×5%），仓位变小 → 收益/夏普略升、回撤略降；**关闭容量约束（`max_volume_participation=0`）时新实现与修复前逐位一致**（ret 20.0267552369 / sharpe 0.8098904709 / mdd 14.1949051746 / trades 9 / len(trades) 19 / pf 1.2589570136），已固化为 `test_engine_a_golden_without_capacity_constraint` → 漂移**全部**来自容量约束本身，与撮合/指标口径无关。**引擎 B 黄金快照逐位不变**（两笔入场日成交额 ≈4856万/4156万，5% 上限 242万/207万 > 名义 80万 → 不截断；已固化为 `test_engine_b_golden_unaffected_by_capacity`）。**新快照更诚实**：低量日的买入不再按"想买多少买多少"成交。
 
 ---
 

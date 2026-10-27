@@ -578,6 +578,154 @@ class TestH9WalkForwardOS:
 
 
 # ---------------------------------------------------------------------------
+# H7 (审计 B14): 回测引擎无流动性/容量约束
+# ---------------------------------------------------------------------------
+
+class TestH7CapacityConstraint:
+    """H7: 成交量只用于信号打分, 从不做成交容量校验。
+
+    审计 B14: 引擎可以在日成交额百万的票上买上亿元而不作任何惩罚 (↑乐观)。
+    修复: 单笔买入金额 ≤ 当日成交额 × 参与率 (默认 5%), 不足则按上限部分成交。
+    """
+
+    # ---------- 共享助手 ----------
+
+    def test_capacity_limit_notional_rules(self):
+        from execution_model import capacity_limit_notional
+        # 参与率关闭 → 不限制
+        assert capacity_limit_notional(1e8, 0.0) is None
+        assert capacity_limit_notional(1e8, None) is None
+        # 数据缺失 → 不限制 (调用方如实跳过)
+        assert capacity_limit_notional(None, 0.05) is None
+        # 当日零成交 → 上限 0 (买不进, 不是"不限制")
+        assert capacity_limit_notional(0.0, 0.05) == 0.0
+        # 正常: 成交额 × 参与率
+        assert capacity_limit_notional(2e7, 0.05) == pytest.approx(1e6)
+
+    def test_bar_turnover_amount_sources(self):
+        from execution_model import bar_turnover_amount
+        # 有 成交额 → 直接用
+        assert bar_turnover_amount({'成交额': 3e7, '成交量': 1e6}) == 3e7
+        # 成交额为 0 (停牌/无成交) → 0.0 (不是 None)
+        assert bar_turnover_amount({'成交额': 0.0, '成交量': 0.0}) == 0.0
+        # 缺 成交额 → 成交量 × 价格 近似
+        assert bar_turnover_amount({'成交量': 2e6, '收盘': 10.0}) == pytest.approx(2e7)
+        # 两列都缺 → None (无法检查)
+        assert bar_turnover_amount({'收盘': 10.0}) is None
+
+    # ---------- 引擎 A ----------
+
+    @staticmethod
+    def _a_data(volume=1e6, n=60):
+        close = np.full(n, 10.0)
+        return pd.DataFrame({
+            '日期': pd.date_range('2024-01-01', periods=n, freq='B'),
+            '开盘': close.copy(), '最高': close * 1.01, '最低': close * 0.99,
+            '收盘': close.copy(), '成交量': np.full(n, volume),
+        })
+
+    @staticmethod
+    def _a_buy_at(df, bar=10):
+        def strat(d):
+            return 1 if len(d) == bar + 1 else 0
+        return strat
+
+    def test_engine_a_buy_capped_by_daily_turnover(self):
+        """低量票: 买入金额被截到 当日成交额×5% (部分成交)。"""
+        from backtest_framework import BacktestEngine, PositionConfig
+        # 日成交额 = 1e6 股 × 10 元 = 1000 万 → 5% 上限 = 50 万 → 5 万股
+        df = self._a_data(volume=1e6)
+        res = BacktestEngine(initial_cash=1000000).run(
+            df, self._a_buy_at(df), symbol='600519')
+        buys = res['trades'][res['trades']['action'] == 'buy']
+        assert len(buys) == 1
+        # 上限按**裸开盘价**折股数 (滑点在成交价上另计): 50 万 ÷ 10 元 = 5 万股
+        assert buys.iloc[0]['shares'] == 50000
+        assert buys.iloc[0]['shares'] * 10.0 <= 1e7 * 0.05 + 1e-6
+
+    def test_engine_a_unconstrained_when_participation_zero(self):
+        """participation=0 → 关闭约束 (退回旧行为, 数值中性)。"""
+        from backtest_framework import BacktestEngine, PositionConfig
+        df = self._a_data(volume=1e6)
+        res = BacktestEngine(
+            initial_cash=1000000,
+            position_config=PositionConfig(max_volume_participation=0.0)
+        ).run(df, self._a_buy_at(df), symbol='600519')
+        buys = res['trades'][res['trades']['action'] == 'buy']
+        notional = buys.iloc[0]['shares'] * buys.iloc[0]['price']
+        assert notional > 1e7 * 0.05               # 未被截断
+
+    def test_engine_a_zero_volume_day_cannot_buy(self):
+        """当日零成交 → 买不进 (与"不限制"区别开)。"""
+        from backtest_framework import BacktestEngine
+        df = self._a_data(volume=1e6)
+        df.loc[11, '成交量'] = 0.0                  # 入场日无量
+        res = BacktestEngine(initial_cash=1000000).run(
+            df, self._a_buy_at(df), symbol='600519')
+        assert len(res['trades']) == 0
+
+    def test_engine_a_reports_capacity_not_checked(self):
+        """数据缺成交额/成交量 → 如实标记 capacity_checked=False。"""
+        from backtest_framework import BacktestEngine
+        df = self._a_data()
+        df = df.drop(columns=['成交量'])
+        res = BacktestEngine(initial_cash=1000000).run(
+            df, self._a_buy_at(df), symbol='600519')
+        assert res['capacity_checked'] is False
+
+    # ---------- 引擎 B ----------
+
+    @staticmethod
+    def _b_signals(df):
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        return sig
+
+    def test_engine_b_position_capped_by_daily_turnover(self):
+        """低量票: 引擎 B 的仓位比例被容量上限截断 (部分成交)。"""
+        vb = VectorizedBacktester()
+        df = self._a_data(volume=1e6)              # 日成交额 1000 万
+        df = vb._compute_indicators(df, {})
+        m, det = vb._simulate_trades(df, self._b_signals(df),
+                                     {'capital': 1_000_000}, return_details=True)
+        assert len(det) == 1
+        # 名义 80 万 (position_size_pct 0.8) → 上限 50 万 → 比例 0.5
+        assert det[0].position_pct == pytest.approx(0.5)
+        assert det[0].position_pct < 0.8
+
+    def test_engine_b_unconstrained_when_participation_zero(self):
+        """引擎 B participation=0 → 关闭约束 (退回旧行为)。"""
+        vb = VectorizedBacktester()
+        df = self._a_data(volume=1e6)
+        df = vb._compute_indicators(df, {})
+        m, det = vb._simulate_trades(df, self._b_signals(df),
+                                     {'capital': 1_000_000,
+                                      'max_volume_participation': 0.0},
+                                     return_details=True)
+        assert det[0].position_pct == pytest.approx(0.8)
+
+    def test_engine_b_zero_volume_entry_day_cannot_buy(self):
+        """当日零成交 → 不成交 (引擎 B 与 A 同口径)。"""
+        vb = VectorizedBacktester()
+        df = self._a_data(volume=1e6)
+        df.loc[11, '成交量'] = 0.0
+        df = vb._compute_indicators(df, {})
+        m, det = vb._simulate_trades(df, self._b_signals(df),
+                                     {'capital': 1_000_000}, return_details=True)
+        assert len(det) == 0
+
+    def test_engine_b_golden_unaffected_by_capacity(self):
+        """引擎 B 黄金数据: 入场日成交额远高于名义额 → 容量约束不触发。
+
+        (两笔入场日成交额 ≈ 4856 万 / 4156 万, 5% 上限 242 万 / 207 万
+         > 名义 80 万 → 不截断, 黄金快照逐位不变)
+        """
+        m = VectorizedBacktester().backtest(TestGoldenMetrics._big(), {})
+        assert m.total_return == pytest.approx(12.99316444226517, rel=1e-6)
+        assert m.num_trades == 2
+
+
+# ---------------------------------------------------------------------------
 # D 引擎: reversal_backtest
 # ---------------------------------------------------------------------------
 
@@ -754,9 +902,49 @@ class TestGoldenMetrics:
 
         res = BacktestEngine(initial_cash=1000000).run(big, strat,
                                                        symbol='600519')
+        # 审计 B14/H7 后更新 (2026-10-26): 默认成交容量约束 (单笔 ≤ 当日
+        # 成交额 × 5%) 生效 —— 黄金数据里 10 笔买入有 3 笔落在低量日被截断
+        # (2022-02-03: 97300→93100 股; 2022-08-04: 89800→64800 股;
+        #  2022-10-26: 85700→71800 股), 仓位变小 → 总收益 20.03%→20.62%,
+        # 夏普 0.810→0.838, 回撤 14.19%→14.00%。
+        # 数值中性证明: 显式关闭容量约束 (participation=0) 时与修复前逐位一致
+        # (见 test_engine_a_golden_without_capacity_constraint) → 漂移只来自
+        # 容量约束本身, 与撮合/指标口径无关。
+        assert res['total_return'] == pytest.approx(20.616880284178162, rel=1e-6)
+        # core 统一口径: MDD 为正值百分比
+        assert res['max_drawdown'] == pytest.approx(13.999296006248338, rel=1e-6)
+        assert res['trade_count'] == 9
+        assert res['sharpe_ratio'] == pytest.approx(0.8380161593133549, rel=1e-6)
+        assert len(res['trades']) == 19
+        assert res['profit_factor'] == pytest.approx(1.2589570136340924, rel=1e-6)
+
+    def test_engine_a_golden_without_capacity_constraint(self):
+        """关闭容量约束 (participation=0) → 与修复前逐位一致 (数值中性证明)。"""
+        from backtest_framework import PositionConfig
+        big = self._big()
+        ma5 = pd.Series(big['收盘']).rolling(5).mean()
+        ma20 = pd.Series(big['收盘']).rolling(20).mean()
+
+        def strat(d):
+            i = len(d) - 1
+            if i < 21:
+                return 0
+            up = (ma5.iloc[i] > ma20.iloc[i]
+                  and ma5.iloc[i - 1] <= ma20.iloc[i - 1])
+            down = (ma5.iloc[i] < ma20.iloc[i]
+                    and ma5.iloc[i - 1] >= ma20.iloc[i - 1])
+            if up:
+                return 1
+            if down:
+                return -1
+            return 0
+
+        res = BacktestEngine(
+            initial_cash=1000000,
+            position_config=PositionConfig(max_volume_participation=0.0)
+        ).run(big, strat, symbol='600519')
         assert res['total_return'] == pytest.approx(20.02675523695121, rel=1e-6)
         assert res['sharpe_ratio'] == pytest.approx(0.8098904708567016, rel=1e-6)
-        # core 统一口径: MDD 为正值百分比
         assert res['max_drawdown'] == pytest.approx(14.194905174592487, rel=1e-6)
         assert res['trade_count'] == 9
         assert len(res['trades']) == 19

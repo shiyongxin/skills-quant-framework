@@ -12,6 +12,8 @@ Backtesting Framework - Complete Version
 - 增强绩效指标 (Enhanced Metrics)
 - 分仓交易 (Partial Position)
 - 详细报告 (Detailed Report)
+- 成交容量约束 (审计 B14/H7): 单笔买入 ≤ 当日成交额 × 参与率 (默认 5%),
+  容量不足则按上限部分成交 —— 成交量不再只用于信号打分
 """
 
 import pandas as pd
@@ -29,6 +31,7 @@ warnings.filterwarnings('ignore')
 
 from execution_model import (
     CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday,
+    bar_turnover_amount, capacity_limit_notional,
 )
 
 
@@ -55,6 +58,10 @@ class PositionConfig:
     sizing_method: PositionSizingMethod = PositionSizingMethod.PERCENT_OF_EQUITY
     sizing_value: float = 0.95          # 持仓规模参数 (金额/百分比/股数)
     max_position_pct: float = 1.0       # 最大持仓比例
+
+    # 成交容量约束 (审计 B14/H7): 单笔买入金额 ≤ 当日成交额 × 该比例
+    # 0 = 关闭 (退回旧行为)。数据缺 '成交额'/'成交量' 时如实跳过并告警。
+    max_volume_participation: float = 0.05
 
     # 止损配置
     stop_loss_method: StopLossMethod = StopLossMethod.PERCENTAGE
@@ -161,6 +168,11 @@ class BacktestEngine:
         if 'ATR' not in combined.columns:
             combined = self._calculate_atr(combined)
         window = combined.iloc[w:].reset_index(drop=True) if w else combined
+
+        # 成交容量约束是否可检查 (审计 B14/H7): 数据缺 成交额/成交量 列时
+        # 如实记 False (结果里可查), 不假装已施加容量上限
+        self.capacity_checked = bool(
+            ('成交额' in window.columns) or ('成交量' in window.columns))
 
         pending = None
 
@@ -302,6 +314,15 @@ class BacktestEngine:
             raw_price = float(fill)
             shares = self._calculate_position_size(raw_price, atr)
             shares = (shares // 100) * 100  # A股整手(100股)约束
+
+            # 成交容量约束 (审计 B14/H7): 单笔买入金额 ≤ 当日成交额 × 参与率
+            cap_notional = capacity_limit_notional(
+                bar_turnover_amount(bar, raw_price),
+                self.position_config.max_volume_participation)
+            if cap_notional is not None:
+                cap_shares = (int(cap_notional / raw_price) // 100) * 100
+                if cap_shares < shares:
+                    shares = cap_shares
             if shares < 100:
                 return None
 
@@ -525,6 +546,7 @@ class BacktestEngine:
         return {
             'symbol': symbol,
             'initial_cash': self.initial_cash,
+            'capacity_checked': bool(getattr(self, 'capacity_checked', True)),
             'final_value': final_value,
             'total_return': total_return,
             'annualized_return': annualized_return * 100,
