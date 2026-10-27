@@ -103,12 +103,11 @@
 ## 4. 批次 3 —— 研究有效性（高影响，**需先拍板再动手**）
 
 > 这一批不是"写错了"，是"**这套系统的回测结论目前不能当真**"。改完之后历史结论与现有产出**不可比**。
+> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
 
 | # | 问题 | 证据 | 性质 |
 |---|---|---|---|
-| ~~**H1**~~ | ~~优化器**无真样本外验证**：`vectorized_backtest.walk_forward` 已有 `param_space` 分支（IS 拟合能力**已备**），但生产路径不传 → GA 仍在同一批窗口上既评估又取最大~~ → **✅ 已修（真样本外隔离）** | **复验确认属实**（审计 E-optimization-portfolio §3.1 第 1/2 条）：`walk_forward` 的 `train_days` 只用于"跳过前 N 行"，训练段从未用于拟合；fitness = 各测试窗口指标聚合，而 GA 又在**同一批窗口**上取最大 → "样本外"窗口实为样本内，全流程无未被触碰的留出集。**修复（IS/OOS 隔离）**：① 新增 `optimization_engine.split_is_oos(windows, oos_ratio)` —— 按时间顺序把窗口切成 **IS（选择用）/ OOS（仅报告）**，末尾 `oos_ratio` 比例的窗口留作样本外；② `FitnessEvaluator.evaluate` 的**适应度只由 IS 窗口计算**（旧实现 `_compute_fitness(all_metrics)` 改为 `_compute_fitness(is_metrics)`），OOS 指标只进 `details['oos']`，**从不参与参数选择** —— GA 的选择偏差来源被切断；③ `IndicatorSystem` 增 `oos_*` 字段（IS 选择口径与 OOS 验证口径**分列**），`save_results` 落盘 `systems[].oos` + 顶层 `oos_policy`，`load_results` 读回，控制台摘要打印 `[样本外 OOS]` 行；④ 稳健模式跨体制汇总样本外证据（`_aggregate_oos` + `details['regime_oos']`）；⑤ `WalkForwardConfig.oos_ratio`（默认 **0.3**，走配置层三级优先级；0 = 关闭隔离仅供对照）；窗口数 < 2 时**如实标记** `available=False` + 原因，不静默假装有样本外证据  | 已修 + `tests/test_h1_oos_isolation.py` 21 用例（切分语义/适应度只用 IS/OOS 极端值不改适应度/不可用如实标记/字段与落盘往返/配置接线/稳健聚合/源码级门禁/真实引擎端到端） + 端到端实测（3 股 × 4 窗 → 9 IS + 3 OOS，控制台与 manifest 均分列） |
-
-> **为什么不接 `walk_forward(param_space=...)` 分支**（与台账原"能力已备、链路未接"表述的偏离说明）：该分支的语义是"每窗在训练段重新网格拟合指定维度，**拟合值覆盖 GA 候选值**"。若把它接到 GA 生产路径，被评估的参数（每窗拟合值）与最终**部署**的参数（GA 的 `best.params`）**不是同一套** → 报告出来的 OOS 指标无法代表部署参数的表现 = 制造新的口径冒充。本框架部署的是**固定参数**（`optimized_params` → `signal_generator`），没有逐窗重估的等价实现，因此正确做法是把 **GA 定位为 IS 拟合器**、给它一份**从未参与拟合的留出窗口**（即本次修复），`param_space` 分支保留为"自适应策略"研究工具，不接生产选择路径。另：`train_days` 段在修复后仍只是"窗口前置丢弃期（指标预热）"，不再是拟合段 —— 文档已按此口径描述。 |
+| ~~**H1**~~ | ~~优化器**无真样本外验证**：GA 在同一批 walk-forward 窗口上既评估又取最大，"样本外"窗口实为样本内~~ → **✅ 已修（真样本外隔离）** | 复验确认属实（审计 E-optimization-portfolio §3.1 第 1/2 条）：`walk_forward` 的 `train_days` 只用于"跳过前 N 行"，训练段从未用于拟合；fitness = 各测试窗口指标聚合，而 GA 又在**同一批窗口**上取最大 → 全流程无未被触碰的留出集 | 已修 + `tests/test_h1_oos_isolation.py` 21 用例；明细见下方说明 |
 | **H3** ✅ | `historical_backtest_validator` 的回测引擎是**死属性**（全文仅 `:86` 一处）；验证参数来自"全历史优化出的"产物 → IS/OOS 隔离仍破；样本按评估结果过滤（`:449-453` `forward_returns[hd] != 0`）；报告区间硬编码（`:504`） | `historical_backtest_validator.py` | 需重做验证链 |
 | **H4** ✅ | 幸存者偏差：`get_universe()` **无 `as_of` 参数**，用 `datetime.now()` 回溯到 1996；`stock_selector.get_hot_stocks` 硬编码热门股字典 | `historical_data_manager.py:433-434` `get_universe(min_history_days=5000, min_rows=2000)` —— **无 as_of 参数** | 与 C-P0-7 的 point-in-time 止血契约同源，但因子层没跟上 |
 | **H6** ✅ | 多因子权重拟合仍**样本内 + 前瞻收益**（`shift(-1)`），且与 `shift(1)` 的打分口径**互相矛盾** | `multi_factor_selection.py:176`/`:239` `shift(-1)` vs `:411` `shift(1)` —— 口径自相矛盾 | 因子层是选股入口，影响面大 |
@@ -116,7 +115,21 @@
 | **H10** ✅ | 优化结果无**多重检验校正 / 稳健性证据**：`save_results` 落盘无试验次数、最优 fitness 在随机基线上的分位数、Top-10 参数离散度、bootstrap 置信区间。而 `optimize_global` 3200 次 / `iterative` ~7000 次回测量级 | `optimization_engine.py:1282-1294` 落盘仅 `seed`/`n_stocks`/`fitness_weights`/`param_space`/`ga_runs` —— 无试验次数/分位数/bootstrap | 落盘层补字段成本低 |
 | **H5** | 停牌建模**只落在信号层**（`trade_constraints` + `core/trading_calendar.py`），4 套回测引擎侧**完全没接** —— "停牌期间持仓无法平仓"未建模 | `rg 停牌\|suspend` 在 `backtest_framework`/`vectorized_backtest`/`reversal_backtest`/`historical_backtest_validator` → **0 命中**；`execution_model.py:13-14` docstring 自述"停牌: 数据侧无停牌标记" | ✅ 已复验 |
 
-**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见上表）**；H10（只改落盘）建议下一个做；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计。
+**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；H10（只改落盘）建议下一个做；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计。
+
+**H1 修复明细（2026-10-26，真样本外隔离）**：
+
+| 环节 | 做法 |
+|---|---|
+| ① 窗口切分 | 新增 `optimization_engine.split_is_oos(windows, oos_ratio)` —— 按时间顺序把回测窗口切成 **IS（选择用）/ OOS（仅报告）**，末尾 `oos_ratio` 比例的窗口留作样本外；窗口数 < 2 或 ratio ≤ 0 → 无 OOS（调用方如实标记） |
+| ② 选择隔离 | `FitnessEvaluator.evaluate` 的**适应度只由 IS 窗口计算**（旧 `_compute_fitness(all_metrics)` → `_compute_fitness(is_metrics)`）；OOS 指标只进 `details['oos']`，**从不参与参数选择** —— GA 的选择偏差来源被切断（体制路径同样按时间顺序切分） |
+| ③ 指标分列 | `IndicatorSystem` 增 `oos_*` 字段（IS 选择口径 / OOS 验证口径）；`save_results` 落盘 `systems[].oos` + 顶层 `oos_policy`（隔离口径可审计）；`load_results` 读回；控制台摘要打印 `[样本外 OOS]` 行 |
+| ④ 稳健模式 | `_aggregate_oos` 跨体制汇总样本外证据 + `details['regime_oos']` 保留各体制块（不丢证据） |
+| ⑤ 配置与诚实性 | `WalkForwardConfig.oos_ratio`（默认 **0.3**，走配置层三级优先级；0 = 关闭隔离仅供对照）；窗口数不足时**如实标记** `available=False` + 原因，不静默假装有样本外证据 |
+
+端到端实测：3 股 × 4 窗 → 9 IS + 3 OOS，控制台摘要与落盘 manifest 均分列。
+
+> **为什么不接 `walk_forward(param_space=...)` 分支**（与台账原"能力已备、链路未接"表述的偏离说明）：该分支的语义是"每窗在训练段重新网格拟合指定维度，**拟合值覆盖 GA 候选值**"。若把它接到 GA 生产路径，被评估的参数（每窗拟合值）与最终**部署**的参数（GA 的 `best.params`）**不是同一套** → 报告出来的 OOS 指标无法代表部署参数的表现 = 制造新的口径冒充。本框架部署的是**固定参数**（`optimized_params` → `signal_generator`），没有逐窗重估的等价实现，因此正确做法是把 **GA 定位为 IS 拟合器**、给它一份**从未参与拟合的留出窗口**（即本次修复），`param_space` 分支保留为"自适应策略"研究工具，不接生产选择路径。另：`train_days` 段在修复后仍只是"窗口前置丢弃期（指标预热）"，不再是拟合段 —— `walk_forward` docstring 已按此口径改写。
 
 ---
 
