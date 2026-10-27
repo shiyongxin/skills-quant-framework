@@ -20,6 +20,7 @@ warnings.filterwarnings('ignore')
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
+from core import metrics as _core_metrics
 from sina_daily import fetch_daily, format_symbol
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
@@ -325,22 +326,27 @@ class ReversalBacktester:
         total_return = (total_value / self.initial_capital - 1) * 100
         excess_return = total_return - buy_hold_return
 
-        # 计算胜率 (按含费净额判定)
+        # 计算胜率 (按含费净额判定, 审计 M1: 走 core 统一口径)
         win_trades = 0
         lose_trades = 0
+        pair_pnls = []
         for i in range(0, len(trades) - 1, 2):
             if i + 1 < len(trades):
                 buy_trade = trades[i]
                 sell_trade = trades[i + 1]
                 buy_cost = buy_trade.price * buy_trade.shares + buy_trade.fee
                 sell_net = sell_trade.price * sell_trade.shares - sell_trade.fee
+                pair_pnls.append((sell_net - buy_cost) / buy_cost * 100
+                                 if buy_cost else
+                                 (1.0 if sell_net > buy_cost else -1.0))
                 if sell_net > buy_cost:
                     win_trades += 1
                 else:
                     lose_trades += 1
 
         total_trades = win_trades + lose_trades
-        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        # core 口径: 盈利配对 / 全部配对 (breakeven 计入分母但不算赢)
+        win_rate = _core_metrics.win_rate(pair_pnls)
 
         return BacktestResult(
             code=code,

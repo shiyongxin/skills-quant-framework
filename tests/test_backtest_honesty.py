@@ -917,6 +917,16 @@ class TestGoldenMetrics:
         assert res['sharpe_ratio'] == pytest.approx(0.8380161593133549, rel=1e-6)
         assert len(res['trades']) == 19
         assert res['profit_factor'] == pytest.approx(1.2589570136340924, rel=1e-6)
+        # 审计 M1 (B48): 连胜/连亏改为**交易序列**口径 (旧为日频净值口径,
+        # 旧值 35/4) —— 9 笔平仓的 pnl 序列为
+        # [0.396, -3.8, -4.952, -0.544, 1.511, -0.901, 15.23, -2.101, -1.315]
+        # → 连亏 3 笔 (-3.8/-4.952/-0.544), 连胜 1 笔 (0.396/1.511/15.23 各自独立)
+        assert res['max_consecutive_losses'] == 3
+        assert res['max_consecutive_wins'] == 1
+        assert res['win_rate'] == pytest.approx(100 / 3, rel=1e-9)
+        # 日频连涨/连跌 (独立且诚实的字段名; 持平 bar 不算涨)
+        assert res['max_consecutive_up_days'] == 8
+        assert res['max_consecutive_down_days'] == 4
 
     def test_engine_a_golden_without_capacity_constraint(self):
         """关闭容量约束 (participation=0) → 与修复前逐位一致 (数值中性证明)。"""
@@ -1062,8 +1072,12 @@ class TestTradeFilterMetricsConsistency:
             core_m.profit_factor([8.0, -3.0, -2.0]), rel=1e-12)
         assert m.win_rate == pytest.approx(100 / 3, rel=1e-12)
         assert m.num_trades == 3
-        # 与 B 引擎同款 legacy 语义: 连亏段按 onset 间隔计 (2 连亏 → 1)
-        assert m.max_consecutive_losses == 1
+        # 连亏统计 (审计 B48/M1): 统一为**交易序列**上的真实连亏笔数 ——
+        # 旧实现用 np.diff(np.where(is_loss)) 统计的是"亏损起始点之间的间隔",
+        # 既不是连亏笔数也不是连亏段数 (两笔相邻亏损恒报 1, 而两笔不相邻的
+        # 亏损反而报 2) → 现由 core.consecutive_streaks 给出正确口径 2。
+        assert m.max_consecutive_losses == 2
+        assert m.max_consecutive_wins == 1
         assert m.avg_holding_days == pytest.approx(10.0)
         assert np.isfinite(m.sharpe_ratio) and np.isfinite(m.max_drawdown)
 
@@ -1118,3 +1132,199 @@ class TestTradeFilterMetricsConsistency:
                                    {'000001': labels}, 'BULL')
         assert det.get('sample_count', 0) >= 1
         assert np.isfinite(fit)
+
+
+# ---------------------------------------------------------------------------
+# 审计 M1 (D-backtest.md B48 / 4.2 口径差异清单): 残余指标口径分歧
+# ---------------------------------------------------------------------------
+class TestM1MetricConventions:
+    """残余指标口径统一 (审计 M1 / B48)。
+
+    - win_rate: 两引擎公式其实已一致 (盈利笔/全部笔), 真正分歧在 **breakeven
+      (pnl==0) 的归类** → 统一为"计入分母但不算赢"(core.win_rate)。
+    - max_consecutive_losses: 旧引擎 A 统计在**日频净值**序列上, 旧引擎 B 统计在
+      **交易**序列上 (同名字段两套口径) → 统一为交易序列 (core.consecutive_streaks)。
+    - 附带修掉旧引擎 B 的连亏统计 bug: np.diff(np.where(is_loss)) 统计的是
+      "亏损起始点之间的间隔", 既不是连亏笔数也不是连亏段数 (两笔相邻亏损恒报 1,
+      两笔不相邻的亏损反而报 2)。
+    """
+
+    @staticmethod
+    def _core():
+        from core import metrics as core_m
+        return core_m
+
+    # --- core 单一真相源语义 ---
+    def test_core_win_rate_breakeven_in_denominator_not_a_win(self):
+        core_m = self._core()
+        assert core_m.win_rate([]) == 0.0
+        assert core_m.win_rate([1.0, 0.0, -1.0]) == pytest.approx(100 / 3)
+        assert core_m.win_rate([1.0, 2.0]) == pytest.approx(100.0)
+        assert core_m.win_rate([-1.0, -2.0]) == 0.0
+
+    def test_core_consecutive_streaks_trade_level(self):
+        core_m = self._core()
+        assert core_m.consecutive_streaks([]) == (0, 0)
+        assert core_m.consecutive_streaks([1.0, 1.0, -1.0, -1.0, -1.0, 0.0, 2.0]) \
+            == (2, 3)
+        # breakeven 打断两段 (既不算赢也不算亏)
+        assert core_m.consecutive_streaks([-1.0, -1.0, 0.0, -1.0]) == (0, 2)
+        assert core_m.consecutive_streaks([0.0, 0.0]) == (0, 0)
+
+    def test_core_streak_no_longer_gap_based(self):
+        """锁死旧实现的 gap bug: 相邻两笔亏损旧报 1, 不相邻两笔旧报 2。"""
+        core_m = self._core()
+        adjacent = core_m.consecutive_streaks([-1.0, -2.0])[1]
+        separated = core_m.consecutive_streaks([-1.0, 5.0, -2.0])[1]
+        assert adjacent == 2      # 旧实现给 1
+        assert separated == 1    # 旧实现给 2
+
+    def test_core_max_consecutive_true(self):
+        core_m = self._core()
+        assert core_m.max_consecutive_true([True, True, False, True]) == 2
+        assert core_m.max_consecutive_true([False, False]) == 0
+        assert core_m.max_consecutive_true([]) == 0
+
+    # --- 引擎 A ---
+    def test_engine_a_streaks_are_trade_level(self):
+        core_m = self._core()
+        big = TestGoldenMetrics._big()
+        ma5 = pd.Series(big['收盘']).rolling(5).mean()
+        ma20 = pd.Series(big['收盘']).rolling(20).mean()
+
+        def strat(d):
+            i = len(d) - 1
+            if i < 21:
+                return 0
+            up = (ma5.iloc[i] > ma20.iloc[i]
+                  and ma5.iloc[i - 1] <= ma20.iloc[i - 1])
+            down = (ma5.iloc[i] < ma20.iloc[i]
+                    and ma5.iloc[i - 1] >= ma20.iloc[i - 1])
+            return 1 if up else (-1 if down else 0)
+
+        res = BacktestEngine(initial_cash=1000000).run(big, strat,
+                                                       symbol='600519')
+        sells = res['trades'][res['trades']['action'] == 'sell']
+        pnls = sells['pnl_pct'].tolist()
+        wins, losses = core_m.consecutive_streaks(pnls)
+        assert res['max_consecutive_wins'] == wins
+        assert res['max_consecutive_losses'] == losses
+        # 旧口径 (日频净值连跌) 与交易级不同 → 证明基准确实换了
+        eq = res['equity_curve']['value']
+        legacy_down = core_m.max_consecutive_true((eq < eq.shift(1)).tolist())
+        assert res['max_consecutive_losses'] != legacy_down or legacy_down == 0
+
+    def test_engine_a_daily_streaks_use_honest_names(self):
+        big = TestGoldenMetrics._big()
+        res = BacktestEngine(initial_cash=1000000).run(
+            big, lambda d: 0, symbol='600519')
+        assert 'max_consecutive_up_days' in res
+        assert 'max_consecutive_down_days' in res
+        # 持平 bar 既不算涨也不算跌 (旧实现 value>=prev 把持平日算成涨)
+        eq = res['equity_curve']['value']
+        strict_up = core_m_strict_up(eq)
+        assert res['max_consecutive_up_days'] == strict_up
+        assert res['max_consecutive_up_days'] <= len(eq)
+
+    # --- 引擎 B ---
+    def test_engine_b_streaks_match_core(self):
+        core_m = self._core()
+        data = TestGoldenMetrics._big()
+        metrics, details = VectorizedBacktester().backtest_with_details(data, {})
+        pnls = [d.pnl_pct for d in details]
+        wins, losses = core_m.consecutive_streaks(pnls)
+        assert metrics.max_consecutive_wins == wins
+        assert metrics.max_consecutive_losses == losses
+        # B 现在也提供连胜笔数 (旧版字段缺失 → 与 A 不对等)
+        assert hasattr(metrics, 'max_consecutive_wins')
+
+    def test_cross_engine_same_trades_same_streaks(self):
+        """同一组交易 → A/B 引擎给出的连亏/连胜笔数必须一致 (口径统一验证)。"""
+        core_m = self._core()
+        big = TestGoldenMetrics._big()
+        ma5 = pd.Series(big['收盘']).rolling(5).mean()
+        ma20 = pd.Series(big['收盘']).rolling(20).mean()
+
+        def strat(d):
+            i = len(d) - 1
+            if i < 21:
+                return 0
+            up = (ma5.iloc[i] > ma20.iloc[i]
+                  and ma5.iloc[i - 1] <= ma20.iloc[i - 1])
+            down = (ma5.iloc[i] < ma20.iloc[i]
+                    and ma20.iloc[i - 1] >= ma20.iloc[i - 1])
+            return 1 if up else (-1 if down else 0)
+
+        res = BacktestEngine(initial_cash=1000000).run(big, strat,
+                                                       symbol='600519')
+        trades = res['trades']
+        sells = trades[trades['action'] == 'sell']
+        pnls = sells['pnl_pct'].tolist()
+        wins, losses = core_m.consecutive_streaks(pnls)
+
+        # 把 A 的同一组交易喂给 B 的共享指标函数 → 必须得到同样的连段数
+        date_idx = {d: i for i, d in enumerate(big['日期'])}
+        spans = []
+        pending = None
+        for _, row in trades.iterrows():
+            idx = date_idx.get(row['date'])
+            if row['action'] == 'buy':
+                pending = idx
+            elif pending is not None and idx is not None:
+                spans.append((pending, idx))
+                pending = None
+        m = metrics_from_trades(
+            np.array(pnls), np.array([1.0] * len(pnls)),
+            spans, big['收盘'].to_numpy(dtype=float),
+            big['开盘'].to_numpy(dtype=float), 0.8)
+        assert m.max_consecutive_losses == losses
+        assert m.max_consecutive_wins == wins
+        assert m.win_rate == pytest.approx(res['win_rate'])
+
+    # --- 引擎 D ---
+    def test_engine_d_win_rate_keeps_numeric_semantics(self):
+        import inspect
+        src = inspect.getsource(ReversalBacktester)
+        assert '_core_metrics.win_rate' in src
+
+    def test_engine_d_win_rate_identity(self):
+        data = mk_data(n=120, seed=7)
+        rb = ReversalBacktester()
+        rb.get_stock_data = lambda code, days=365: data
+        result = rb.backtest_single('000001', '测试')
+        if result is not None and result.total_trades > 0:
+            # 口径不变: 盈利配对 / 全部配对 (breakeven 计分母不算赢)
+            assert result.win_rate == pytest.approx(
+                result.win_trades / result.total_trades * 100)
+
+    # --- 源码级门禁: 胜率/连段不得在引擎内联 ---
+    def test_no_inline_win_rate_or_streak_computation(self):
+        import pathlib
+        skills = pathlib.Path(__file__).resolve().parents[1] / '.claude' / 'skills'
+        forbidden = ('win_rate = len(', 'win_rate = (len(', 'win_rate = len(wins)',
+                      'is_loss = pnl_arr', 'loss_streaks =')
+        offenders = []
+        for path in skills.rglob('*.py'):
+            if path.name == 'metrics.py' and path.parent.name == 'core':
+                continue
+            text = path.read_text(encoding='utf-8')
+            for token in forbidden:
+                if token in text:
+                    offenders.append(f"{path.name}: {token}")
+        assert not offenders, f"胜率/连段统计必须走 core/metrics: {offenders}"
+
+    def test_engines_route_win_rate_and_streaks_through_core(self):
+        import inspect
+        from backtest_framework import BacktestEngine as _A
+        from vectorized_backtest import metrics_from_trades as _m
+        a_src = inspect.getsource(_A)
+        assert '_core_metrics.win_rate' in a_src
+        assert '_core_metrics.consecutive_streaks' in a_src
+        assert '_core_metrics.win_rate' in inspect.getsource(_m)
+        assert '_core_metrics.consecutive_streaks' in inspect.getsource(_m)
+
+
+def core_m_strict_up(eq):
+    """辅助: 日频净值严格上涨的连段长度 (持平不算涨)。"""
+    from core import metrics as core_m
+    return core_m.max_consecutive_true((eq > eq.shift(1)).tolist())

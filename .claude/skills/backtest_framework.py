@@ -489,7 +489,8 @@ class BacktestEngine:
             win_trades = [p for p in profits if p > 0]
             lose_trades = [p for p in profits if p < 0]
 
-            win_rate = len(win_trades) / len(profits) * 100 if profits else 0
+            # 胜率: core 统一口径 (盈亏为 0 计入分母但不算赢)
+            win_rate = _core_metrics.win_rate(profits)
             avg_profit = np.mean(win_trades) if win_trades else 0
             avg_loss = np.mean(lose_trades) if lose_trades else 0
             # core 求和式口径（统一 A/B/优化器）
@@ -526,22 +527,23 @@ class BacktestEngine:
             take_profit_count = 0
             signal_exit_count = 0
 
-        # 胜负序列分析
-        equity_df['is_high'] = equity_df['value'] >= equity_df['value'].shift(1)
-        max_consecutive_wins = 0
-        max_consecutive_losses = 0
-        current_wins = 0
-        current_losses = 0
+        # 胜负序列分析 (审计 B48/M1): 连胜/连亏统计基准统一为**交易序列**
+        # (与引擎 B 同口径) —— 旧实现统计在日频净值曲线上, 同名字段两套口径。
+        if len(sell_trades) > 0:
+            max_consecutive_wins, max_consecutive_losses = \
+                _core_metrics.consecutive_streaks(
+                    sell_trades['pnl_pct'].tolist())
+        else:
+            max_consecutive_wins, max_consecutive_losses = 0, 0
 
-        for is_high in equity_df['is_high']:
-            if is_high:
-                current_wins += 1
-                current_losses = 0
-                max_consecutive_wins = max(max_consecutive_wins, current_wins)
-            else:
-                current_losses += 1
-                current_wins = 0
-                max_consecutive_losses = max(max_consecutive_losses, current_losses)
+        # 日频净值序列上的连涨/连跌 bar 数 (与上面的**交易**序列口径不同,
+        # 故用独立且诚实的字段名, 不再占用 max_consecutive_* 名)
+        values = equity_df['value']
+        prev = values.shift(1)
+        up_day = values > prev
+        down_day = values < prev
+        max_consecutive_up_days = _core_metrics.max_consecutive_true(up_day)
+        max_consecutive_down_days = _core_metrics.max_consecutive_true(down_day)
 
         return {
             'symbol': symbol,
@@ -569,6 +571,8 @@ class BacktestEngine:
             'signal_exit_count': signal_exit_count,
             'max_consecutive_wins': max_consecutive_wins,
             'max_consecutive_losses': max_consecutive_losses,
+            'max_consecutive_up_days': max_consecutive_up_days,
+            'max_consecutive_down_days': max_consecutive_down_days,
             'equity_curve': equity_df,
             'trades': trades_df
         }
@@ -794,9 +798,7 @@ def _stitch_oos_equity(window_curves, initial_cash=100000):
         curve['daily_return'] / 100, periods_per_year=252, rf=0.03)
 
     if pnls:
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
-        win_rate = len(wins) / len(pnls) * 100
+        win_rate = _core_metrics.win_rate(pnls)
         profit_factor = _core_metrics.profit_factor(pnls)
     else:
         win_rate = 0.0
@@ -1064,10 +1066,12 @@ class PerformanceReport:
         report.append(f"  Signal Exits:        {results.get('signal_exit_count', 0)}")
         report.append("")
 
-        # 序列分析
+        # 序列分析 (交易序列口径, 审计 B48/M1)
         report.append("[Streak Analysis]")
-        report.append(f"  Max Consecutive Wins:    {results.get('max_consecutive_wins', 0)}")
-        report.append(f"  Max Consecutive Losses:  {results.get('max_consecutive_losses', 0)}")
+        report.append(f"  Max Consecutive Wins:    {results.get('max_consecutive_wins', 0)}  (trades)")
+        report.append(f"  Max Consecutive Losses:  {results.get('max_consecutive_losses', 0)}  (trades)")
+        report.append(f"  Max Consecutive Up Days:   {results.get('max_consecutive_up_days', 0)}  (daily equity)")
+        report.append(f"  Max Consecutive Down Days: {results.get('max_consecutive_down_days', 0)}  (daily equity)")
         report.append("")
 
         # 最近交易记录

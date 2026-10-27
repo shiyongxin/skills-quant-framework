@@ -45,7 +45,8 @@ class BacktestMetrics:
     num_trades: int = 0             # 交易次数
     avg_holding_days: float = 0.0   # 平均持有天数
     avg_return_per_trade: float = 0.0  # 平均每笔收益(%)
-    max_consecutive_losses: int = 0 # 最大连续亏损次数
+    max_consecutive_losses: int = 0 # 最大连续亏损笔数 (交易序列口径, 审计 B48/M1)
+    max_consecutive_wins: int = 0   # 最大连续盈利笔数 (交易序列口径, 审计 B48/M1)
 
 
 @dataclass
@@ -96,10 +97,8 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
 
     n = len(close)
 
-    # 胜率
-    wins = pnl_arr[pnl_arr > 0]
-    losses = pnl_arr[pnl_arr <= 0]
-    win_rate = (len(wins) / len(pnl_arr)) * 100
+    # 胜率 (core 统一口径: 盈亏为 0 计入分母但不算赢, 审计 M1)
+    win_rate = _core_metrics.win_rate(pnl_arr)
 
     # 盈亏比（core 求和式口径，统一 A/B/优化器）
     profit_factor = _core_metrics.profit_factor(pnl_arr)
@@ -146,13 +145,9 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     sharpe = _core_metrics.sharpe_ratio(daily_ret * held,
                                         periods_per_year=252, rf=0.03)
 
-    # 最大连续亏损
-    is_loss = pnl_arr <= 0
-    if np.any(is_loss):
-        loss_streaks = np.diff(np.where(np.concatenate([[False], is_loss, [False]]))[0])
-        max_consec = int(loss_streaks.max()) if len(loss_streaks) > 0 else 0
-    else:
-        max_consec = 0
+    # 最大连胜/连亏 (core 统一口径: **交易序列**, breakeven 不算赢也不算亏,
+    # 旧实现用 pnl<=0 把 breakeven 当亏损 → 与引擎 A 分歧, 审计 B48/M1)
+    max_consec_wins, max_consec = _core_metrics.consecutive_streaks(pnl_arr)
 
     return BacktestMetrics(
         total_return=float(total_return),
@@ -164,7 +159,8 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
         num_trades=int(pnl_arr.size),
         avg_holding_days=float(np.mean(holding_arr)) if holding_arr.size else 0.0,
         avg_return_per_trade=float(np.mean(pnl_arr)),
-        max_consecutive_losses=max_consec
+        max_consecutive_losses=max_consec,
+        max_consecutive_wins=max_consec_wins
     )
 
 
