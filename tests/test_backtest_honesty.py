@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest_framework import BacktestEngine
+from backtest_framework import BacktestEngine, StrategyFactory
 from execution_model import CostModel
 from historical_backtest_validator import HistoricalBacktestValidator
 from optimization_engine import FitnessEvaluator
@@ -415,6 +415,166 @@ class TestH8StructuralBiases:
         # 窗口长度不变, 每窗都带 60 根历史 (序列开头之后的窗口都有)
         assert seen == [(150, 60)] * 3
         assert all(np.isfinite(m.total_return) for m in res)
+
+
+# ---------------------------------------------------------------------------
+# H9 (审计 B25): 引擎 A walk-forward 无预热 + OOS 未拼净值曲线
+# ---------------------------------------------------------------------------
+
+class TestH9WalkForwardOS:
+    """H9: ① 测试窗口无预热数据 ② 各窗口结果未拼成 OOS 净值曲线。
+
+    审计 B25: `test_data = data.iloc[train_end:test_end]` 是裸切片, 策略在
+    A 内实时算 MA, 63 根窗口配 slow=20 只剩 43 根可用 bar; 且各窗口结果
+    未拼接成 OOS 净值曲线 → 拿不到真正的 OOS 绩效 (OOS 被结构性削弱)。
+    """
+
+    @staticmethod
+    def _data(n=750, seed=3):
+        rng = np.random.default_rng(seed)
+        close = 10 * np.cumprod(1 + rng.normal(0, 0.012, n))
+        return pd.DataFrame({
+            '日期': pd.date_range('2022-01-03', periods=n, freq='B'),
+            '开盘': close * (1 + rng.normal(0, 0.003, n)),
+            '最高': close * 1.02, '最低': close * 0.98, '收盘': close,
+            '成交量': rng.integers(1e6, 5e6, n).astype(float),
+        })
+
+    @staticmethod
+    def _recording_strategy(record, fast=5, slow=20):
+        """记录每次调用时策略可见的历史长度 (裸切片 vs 带预热)"""
+        def strat(d):
+            record.append(len(d))
+            if len(d) < slow + 1:
+                return 0
+            ma_fast = d['收盘'].rolling(fast).mean()
+            ma_slow = d['收盘'].rolling(slow).mean()
+            i = len(d) - 1
+            if (ma_fast.iloc[i] > ma_slow.iloc[i]
+                    and ma_fast.iloc[i - 1] <= ma_slow.iloc[i - 1]):
+                return 1
+            if (ma_fast.iloc[i] < ma_slow.iloc[i]
+                    and ma_fast.iloc[i - 1] >= ma_slow.iloc[i - 1]):
+                return -1
+            return 0
+        return strat
+
+    # ---------- ① 测试窗口预热 ----------
+
+    def test_strategy_sees_warmup_history(self):
+        """带预热段 → 策略从窗口第一根起就有完整历史 (不再冷启动)。"""
+        df = self._data(n=200)
+        window = df.iloc[100:160]
+        warm = df.iloc[40:100]
+
+        seen = []
+        BacktestEngine().run(window, self._recording_strategy(seen),
+                             warmup_data=warm)
+        # 首次策略调用发生在窗口第 2 根 (i=1) → 可见 预热60 + 窗口前2根
+        assert seen[0] == len(warm) + 2
+        assert seen[-1] == len(warm) + len(window)
+        # 关键: 带预热时第一根就够算 MA20 (slow=20) → 无冷启动
+        assert seen[0] >= 21
+
+        seen_plain = []
+        BacktestEngine().run(window, self._recording_strategy(seen_plain))
+        # 裸切片: 第一根只有 2 行 → slow=20 之前算不出指标 (冷启动)
+        assert seen_plain[0] == 2
+        assert seen_plain[0] < 21
+
+    def test_warmup_period_is_not_traded(self):
+        """预热段只供策略看指标, 账户从窗口第一根空仓起步 (不交易预热段)。"""
+        df = self._data(n=200)
+        window = df.iloc[100:160]
+        warm = df.iloc[40:100]
+        res = BacktestEngine().run(window, self._recording_strategy([]),
+                                   warmup_data=warm)
+        trades = res['trades']
+        if len(trades) > 0:
+            assert trades['date'].min() >= window['日期'].iloc[0]
+        # 账户初始资金未被预热期改动
+        assert res['initial_cash'] == 100000
+
+    def test_walk_forward_warms_oos_windows(self):
+        """walk_forward 的 OOS 窗口带预热 → 冷启动不再压掉窗口交易。"""
+        from backtest_framework import ParameterOptimizer
+        df = self._data(n=750)
+
+        with_warm = ParameterOptimizer.walk_forward(
+            df, StrategyFactory.ma_cross, {'fast': [5], 'slow': [20]},
+            train_period=252, test_period=63, warmup_period=60)
+        without = ParameterOptimizer.walk_forward(
+            df, StrategyFactory.ma_cross, {'fast': [5], 'slow': [20]},
+            train_period=252, test_period=63, warmup_period=0)
+
+        # 裸切片窗口: 63 根配 slow=20 → 多个窗口零交易; 带预热后窗口可交易
+        assert without['oos']['trade_count'] < with_warm['oos']['trade_count']
+        # 首个窗口之前没有历史 → 仍无交易 (如实降级, 不假装有预热)
+        assert with_warm['windows'][0]['result']['trade_count'] == 0
+
+    # ---------- ② OOS 净值曲线拼接 ----------
+
+    def test_walk_forward_returns_oos_aggregate_and_curve(self):
+        """walk_forward 现在给出真正的 OOS 整体绩效 + 拼接曲线。"""
+        from backtest_framework import ParameterOptimizer
+        df = self._data(n=750)
+        res = ParameterOptimizer.walk_forward(
+            df, StrategyFactory.ma_cross, {'fast': [5], 'slow': [20]},
+            train_period=252, test_period=63)
+
+        assert set(res.keys()) == {'windows', 'oos', 'oos_equity_curve'}
+        assert len(res['windows']) == res['oos']['num_windows'] > 0
+        curve = res['oos_equity_curve']
+        assert len(curve) > 0
+        assert list(curve['date']) == sorted(curve['date'])   # 日期单调
+        assert curve['value'].iloc[0] == 100000.0              # 起点 = 初始资金
+        for key in ('total_return', 'annualized_return', 'sharpe_ratio',
+                    'max_drawdown', 'trade_count', 'win_rate',
+                    'profit_factor', 'oos_bars', 'period_start', 'period_end'):
+            assert key in res['oos']
+
+    def test_oos_total_return_equals_compounded_windows(self):
+        """拼接口径: OOS 总收益 = 各窗收益逐段复利 (不是各窗收益平均)。"""
+        from backtest_framework import ParameterOptimizer
+        df = self._data(n=750)
+        res = ParameterOptimizer.walk_forward(
+            df, StrategyFactory.ma_cross, {'fast': [5], 'slow': [20]},
+            train_period=252, test_period=63)
+
+        compounded = 1.0
+        for w in res['windows']:
+            compounded *= (1 + w['result']['total_return'] / 100)
+        expected = (compounded - 1) * 100
+        assert res['oos']['total_return'] == pytest.approx(expected, rel=1e-9)
+        # 曲线末值与总收益自洽
+        final = res['oos_equity_curve']['value'].iloc[-1]
+        assert final == pytest.approx(100000 * compounded, rel=1e-9)
+
+    def test_oos_curve_covers_all_window_bars(self):
+        """拼接曲线覆盖各窗口全部 OOS bar (窗口边界不丢段)。"""
+        from backtest_framework import ParameterOptimizer
+        df = self._data(n=750)
+        res = ParameterOptimizer.walk_forward(
+            df, StrategyFactory.ma_cross, {'fast': [5], 'slow': [20]},
+            train_period=252, test_period=63)
+
+        curve = res['oos_equity_curve']
+        window_bars = sum(len(w['result']['equity_curve']) for w in res['windows'])
+        # 每窗额外补 1 个起点 (窗口首根 bar 空仓值) → 起点数 = 窗口数
+        assert len(curve) == window_bars + len(res['windows'])
+        assert res['oos']['oos_bars'] == len(curve) - 1
+
+    def test_run_without_warmup_is_unchanged(self):
+        """无预热时 run() 与旧版逐位一致 (黄金快照不受影响)。"""
+        df = self._data(n=300)
+        res = BacktestEngine().run(df, StrategyFactory.ma_cross(fast=5, slow=20))
+        assert res['trade_count'] >= 0
+        assert res['final_value'] > 0
+        # 显式传空预热 = 不传
+        res2 = BacktestEngine().run(df, StrategyFactory.ma_cross(fast=5, slow=20),
+                                    warmup_data=pd.DataFrame())
+        assert res2['final_value'] == res['final_value']
+        assert res2['trade_count'] == res['trade_count']
 
 
 # ---------------------------------------------------------------------------

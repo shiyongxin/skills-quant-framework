@@ -129,7 +129,8 @@ class BacktestEngine:
         self.pending_order = None
 
     def run(self, data: pd.DataFrame, strategy: Callable,
-            symbol: str = "STOCK") -> Dict:
+            symbol: str = "STOCK",
+            warmup_data: pd.DataFrame = None) -> Dict:
         """
         运行回测
 
@@ -137,22 +138,36 @@ class BacktestEngine:
             data: DataFrame, 包含OHLCV及技术指标
             strategy: 策略函数, 返回买入/卖出信号
             symbol: 股票代码
+            warmup_data: 可选的窗口前历史 (审计 B25/H9①)
+                策略可见这段历史 (指标预热, 不再冷启动), 但**账户从窗口第一根
+                bar 开始交易** (空仓起步, 不带入预热期盈亏)
 
         Returns:
             回测结果字典
         """
         self.reset()
 
-        # 确保有ATR数据 (用于ATR止损)
-        if 'ATR' not in data.columns:
-            data = self._calculate_atr(data)
+        # ---- 预热段 + 交易窗口 (策略可见预热, 交易只在窗口内) ----
+        warm = warmup_data
+        if warm is not None and len(warm) > 0:
+            warm = warm.reset_index(drop=True)
+            combined = pd.concat([warm, data], ignore_index=True)
+        else:
+            warm = None
+            combined = data
+        w = len(warm) if warm is not None else 0
+
+        # 确保有ATR数据 (用于ATR止损) —— 预热段参与 ATR 计算
+        if 'ATR' not in combined.columns:
+            combined = self._calculate_atr(combined)
+        window = combined.iloc[w:].reset_index(drop=True) if w else combined
 
         pending = None
 
-        for i in range(1, len(data)):
-            current_bar = data.iloc[i]
+        for i in range(1, len(window)):
+            current_bar = window.iloc[i]
             current_date = current_bar['日期']
-            prev_close = data['收盘'].iloc[i - 1]
+            prev_close = window['收盘'].iloc[i - 1]
 
             # 1) t+1 撮合: 上一根收盘产生的信号在本根开盘成交（含涨跌停拦截）
             if pending is not None:
@@ -162,12 +177,14 @@ class BacktestEngine:
             self._check_stop_loss_take_profit(symbol, current_bar, prev_close, code=symbol)
 
             # 3) 策略信号（本根收盘判定 → 排队至下一根开盘）
-            signal = strategy(data.iloc[:i + 1])
+            #    策略可见预热段 + 窗口内至当根 (无预热时与旧版逐位一致)
+            view = combined.iloc[:w + i + 1] if w else window.iloc[:i + 1]
+            signal = strategy(view)
             if signal in (1, -1):
                 pending = {
                     'side': int(signal),
                     'ttl': 3,  # 涨跌停拦截后最多顺延3根，超时作废
-                    'atr': data['ATR'].iloc[i] if 'ATR' in data.columns else None,
+                    'atr': window['ATR'].iloc[i] if 'ATR' in window.columns else None,
                 }
 
             # 4) 记录权益
@@ -184,7 +201,7 @@ class BacktestEngine:
                 'value': current_value
             })
 
-        return self._get_results(data, symbol)
+        return self._get_results(window, symbol)
 
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         """计算ATR指标"""
@@ -698,11 +715,95 @@ class StrategyFactory:
         return strategy
 
 
+def _stitch_oos_equity(window_curves, initial_cash=100000):
+    """把各 OOS 窗口的日频净值曲线拼成一条连续曲线 (审计 B25/H9②)
+
+    各窗口独立回测 (每窗账户从 initial_cash 起步), 拼接时按资金连续性缩放:
+    第 w 窗的净值整体乘以"累计资金 / initial_cash", 于是拼接曲线的收益率
+    等于各窗收益逐段复利 —— 这才是真正的 OOS 绩效 (旧版只给每窗 dict,
+    拿不到整体 OOS)。
+
+    Args:
+        window_curves: [(窗口起始日, result_dict), ...]
+        initial_cash: 每窗起始资金
+
+    Returns:
+        (DataFrame 拼接曲线, dict 聚合 OOS 指标)
+    """
+    frames = []
+    pnls = []
+    capital = float(initial_cash)
+
+    for start_date, result in window_curves:
+        eq = result.get('equity_curve')
+        if eq is None or len(eq) == 0:
+            continue
+        # 窗口第一根 bar 之前账户是空仓 (值 = initial_cash), 补上该起点,
+        # 否则窗口边界处会丢一段收益
+        window = pd.DataFrame({
+            'date': [start_date] + list(eq['date']),
+            'value': [float(initial_cash)] + list(eq['value'].astype(float)),
+        })
+        factor = capital / float(initial_cash)
+        window['value'] = window['value'] * factor
+        frames.append(window)
+        capital = float(window['value'].iloc[-1])
+
+        trades = result.get('trades')
+        if trades is not None and len(trades) > 0:
+            sells = trades[trades['action'] == 'sell']
+            if len(sells) > 0:
+                pnls.extend([float(x) for x in sells['pnl_pct'].tolist()])
+
+    if not frames:
+        return pd.DataFrame(), {}
+
+    curve = pd.concat(frames, ignore_index=True)
+    curve['daily_return'] = curve['value'].pct_change() * 100
+    curve['cummax'] = curve['value'].cummax()
+    curve['drawdown'] = (curve['value'] / curve['cummax'] - 1) * 100
+
+    final_value = float(curve['value'].iloc[-1])
+    total_return = (final_value / float(initial_cash) - 1) * 100
+    days = max(1, len(curve) - 1)
+    annualized_return = ((1 + total_return / 100) ** (252 / days) - 1) * 100
+    max_drawdown = _core_metrics.max_drawdown_pct(curve['value'])
+    sharpe_ratio = _core_metrics.sharpe_ratio(
+        curve['daily_return'] / 100, periods_per_year=252, rf=0.03)
+
+    if pnls:
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        win_rate = len(wins) / len(pnls) * 100
+        profit_factor = _core_metrics.profit_factor(pnls)
+    else:
+        win_rate = 0.0
+        profit_factor = 0.0
+
+    summary = {
+        'num_windows': len(frames),
+        'oos_bars': days,
+        'period_start': curve['date'].iloc[0],
+        'period_end': curve['date'].iloc[-1],
+        'initial_cash': float(initial_cash),
+        'final_value': final_value,
+        'total_return': total_return,
+        'annualized_return': annualized_return,
+        'max_drawdown': max_drawdown,
+        'sharpe_ratio': sharpe_ratio,
+        'trade_count': len(pnls),
+        'win_rate': win_rate,
+        'profit_factor': profit_factor,
+    }
+    return curve, summary
+
+
 class ParameterOptimizer:
     """参数优化器"""
 
     @staticmethod
-    def grid_search(data, strategy_template, param_grid, metric='sharpe_ratio'):
+    def grid_search(data, strategy_template, param_grid, metric='sharpe_ratio',
+                    warmup_data=None):
         """
         网格搜索优化
 
@@ -711,6 +812,7 @@ class ParameterOptimizer:
             strategy_template: 策略模板函数
             param_grid: 参数网格
             metric: 优化目标指标
+            warmup_data: 可选的窗口前历史 (审计 B25/H9①), 策略可见但不参与交易
 
         Returns:
             最佳参数和结果
@@ -733,7 +835,7 @@ class ParameterOptimizer:
 
             # 回测
             engine = BacktestEngine()
-            result = engine.run(data, strategy)
+            result = engine.run(data, strategy, warmup_data=warmup_data)
 
             # 评估
             if best_result is None or result[metric] > best_result[metric]:
@@ -745,9 +847,19 @@ class ParameterOptimizer:
         return best_params, best_result
 
     @staticmethod
-    def walk_forward(data, strategy_template, param_range, train_period=252, test_period=63):
+    def walk_forward(data, strategy_template, param_range, train_period=252,
+                     test_period=63, warmup_period=60):
         """
-        滚动窗口优化
+        滚动窗口优化 (审计 B25/H9)
+
+        两处结构性修复:
+        - **测试窗口带预热** (warmup_period 根窗口前历史): 旧版测试窗是裸
+          切片, 策略内实时算 MA 时 63 根窗口配 slow=20 只剩 43 根可用 bar
+          → OOS 被结构性削弱 (审计标 ↓悲观)。预热段只给策略看指标, 账户
+          仍从窗口第一根 bar 空仓起步。
+        - **OOS 净值曲线拼接**: 旧版只返回每窗 dict 列表, 拿不到真正的 OOS
+          整体绩效; 现把各窗口日频净值曲线按资金连续性拼成一条曲线, 并给出
+          聚合 OOS 指标 (总收益/夏普/回撤/年化/交易统计)。
 
         Args:
             data: 历史数据
@@ -755,36 +867,59 @@ class ParameterOptimizer:
             param_range: 参数范围
             train_period: 训练周期
             test_period: 测试周期
-        """
-        results = []
+            warmup_period: 窗口前预热长度 (0 = 关闭, 退回旧版裸切片)
 
-        for start in range(0, len(data) - train_period - test_period, test_period):
+        Returns:
+            dict:
+              - 'windows': 各窗口明细 (train_start/test_start/test_end/params/result)
+              - 'oos': 拼接后的 OOS 聚合绩效
+              - 'oos_equity_curve': 拼接后的日频 OOS 净值曲线 (DataFrame)
+        """
+        windows = []
+        oos_curves = []
+
+        for start in range(0, max(0, len(data) - train_period - test_period + 1),
+                           test_period):
             train_end = start + train_period
             test_end = train_end + test_period
 
             train_data = data.iloc[start:train_end]
             test_data = data.iloc[train_end:test_end]
 
+            # 预热段: 各自窗口前的历史 (训练窗用训练窗前的, 测试窗用训练窗
+            # 末尾那段 —— 即"测试窗之前最近的历史")
+            train_warm = data.iloc[max(0, start - warmup_period):start]
+            test_warm = data.iloc[max(0, train_end - warmup_period):train_end]
+
             # 在训练集上优化参数
             optimizer = ParameterOptimizer()
             best_params, _ = optimizer.grid_search(
-                train_data, strategy_template, param_range
-            )
+                train_data, strategy_template, param_range,
+                warmup_data=train_warm if len(train_warm) else None)
 
-            # 在测试集上验证
+            # 在测试集上验证 (带预热 → 策略指标不冷启动)
             strategy = strategy_template(**best_params)
             engine = BacktestEngine()
-            result = engine.run(test_data, strategy)
+            result = engine.run(
+                test_data, strategy,
+                warmup_data=test_warm if len(test_warm) else None)
 
-            results.append({
+            windows.append({
                 'train_start': data.iloc[start]['日期'],
                 'test_start': data.iloc[train_end]['日期'],
                 'test_end': data.iloc[test_end]['日期'],
                 'params': best_params,
                 'result': result
             })
+            oos_curves.append((data.iloc[train_end]['日期'], result))
 
-        return results
+        oos_curve, oos_summary = _stitch_oos_equity(oos_curves)
+
+        return {
+            'windows': windows,
+            'oos': oos_summary,
+            'oos_equity_curve': oos_curve,
+        }
 
 
 class PerformanceReport:
