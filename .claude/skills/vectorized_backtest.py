@@ -20,6 +20,15 @@ from execution_model import CostModel, buy_open_ok, sell_open_ok, sell_intraday_
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
 
+# 信号 warmup 上限 (审计 B23/H8③): _generate_signals 的 warmup 恒 ≤ 此值,
+# walk_forward 用它作为窗口前历史段长度, 保证 warmup 只落在历史段
+WARMUP_MAX_BARS = 60
+
+
+def warmup_bars(n: int) -> int:
+    """信号 warmup 长度 (短窗口自适应, 上限 60) — 原内联公式唯一来源"""
+    return min(WARMUP_MAX_BARS, max(10, n // 3))
+
 
 @dataclass
 class BacktestMetrics:
@@ -220,7 +229,8 @@ class VectorizedBacktester:
         self.slippage = slippage
         self.cost_model = CostModel.from_engine(commission, slippage)
 
-    def backtest(self, data: pd.DataFrame, params: dict) -> BacktestMetrics:
+    def backtest(self, data: pd.DataFrame, params: dict,
+                 history: pd.DataFrame = None) -> BacktestMetrics:
         """
         对单只股票运行回测
 
@@ -230,6 +240,10 @@ class VectorizedBacktester:
             历史数据，必须包含: 日期, 开盘, 最高, 最低, 收盘, 成交量
         params : dict
             参数字典，来自ParameterSpace
+        history : pd.DataFrame, optional (审计 B23/H8③)
+            窗口前历史段。给定时与 data 拼接后计算指标与信号 —— 每窗重置的
+            warmup 只落在历史段 (段长 ≥ warmup 上限 60 时窗口内信号不被清零),
+            再切回 data 段模拟交易。None 时行为与旧版逐位一致。
 
         Returns:
         --------
@@ -238,11 +252,19 @@ class VectorizedBacktester:
         if len(data) < 15:
             return BacktestMetrics()
 
-        # Step 1: 计算指标
-        df = self._compute_indicators(data, params)
+        if history is not None and len(history) > 0:
+            ext = pd.concat([history, data]).reset_index(drop=True)
+            df = self._compute_indicators(ext, params)
+            signals = self._generate_signals(df, params)
+            h = len(history)
+            df = df.iloc[h:]
+            signals = signals.iloc[h:]
+        else:
+            # Step 1: 计算指标
+            df = self._compute_indicators(data, params)
 
-        # Step 2: 生成信号
-        signals = self._generate_signals(df, params)
+            # Step 2: 生成信号
+            signals = self._generate_signals(df, params)
 
         # Step 3: 模拟交易
         return self._simulate_trades(df, signals, params)
@@ -365,8 +387,7 @@ class VectorizedBacktester:
                         & (w_sell >= score_sell_threshold))
             signals[conflict] = -1
 
-            warmup = min(60, max(10, len(df) // 3))
-            signals.iloc[:warmup] = 0
+            signals.iloc[:warmup_bars(len(df))] = 0
             return signals
 
         buy_threshold = float(params.get('buy_threshold', 2.0))
@@ -445,9 +466,8 @@ class VectorizedBacktester:
         conflict = (buy_score >= buy_threshold) & (sell_score >= sell_threshold)
         signals[conflict] = -1
 
-        # 跳过warmup期(短窗口自适应，最少10天)
-        warmup = min(60, max(10, len(df) // 3))
-        signals.iloc[:warmup] = 0
+        # 跳过warmup期(短窗口自适应，最多60根; 公式见 warmup_bars)
+        signals.iloc[:warmup_bars(len(df))] = 0
 
         return signals
 
@@ -475,6 +495,8 @@ class VectorizedBacktester:
 
         撮合规则:
         - 信号在 bar t 收盘 → 持仓在 bar t+1 开盘成交; 开盘涨停不买入
+        - 持仓状态机 (审计 B21/H8①): 持仓期间的新买讯**忽略** (不再把上一笔
+          切成 0 持仓日伪交易); 持仓期只由出场规则结束
         - 硬止损: 日内触发, 跌停封板不可卖出(顺延), 跳空按开盘成交
         - 追踪止损: 仅用截至前一根的最高价(无同根高低点未来函数)
         - 止盈: 最小持有期后日内触发, 跳空按开盘成交
@@ -489,7 +511,10 @@ class VectorizedBacktester:
         max_position_pct = float(params.get('max_position_pct', 1.0))
         position_size_pct = min(position_size_pct, max_position_pct)
         trailing_stop_pct = float(params.get('trailing_stop_pct', 0.05))
-        min_holding = int(params.get('min_holding_days', 20))
+        # 最小持有期默认 0 = 不锁 (审计 B22/H8②): 旧默认 20 让锁定期内只有
+        # 硬止损生效 (追踪/止盈/卖讯全部失效), 且 A 引擎无此概念 → 三引擎
+        # 口径不一致; 显式配置时仍作为锁定期语义生效
+        min_holding = int(params.get('min_holding_days', 0))
         is_st = bool(params.get('is_st', False))
         code = params.get('symbol') or params.get('code')
 
@@ -512,29 +537,34 @@ class VectorizedBacktester:
         cm = self.cost_model
         prev_close_all = np.r_[np.nan, close[:-1]]
 
-        # 找出所有买入信号索引
-        buy_indices = np.where(signals_arr == 1)[0]
-
-        if len(buy_indices) == 0:
-            return _empty()
-
-        # 向量化处理所有交易
+        # ---- 持仓状态机 (审计 B21/H8①) ----
+        # 旧实现: 用"下一次买入信号"切分持仓期 → 密集买讯会把上一笔切成
+        # 0 根 bar (0 持仓日伪交易), 交易数/胜率/Sharpe 全部失真。
+        # 新实现: 空仓时遇买讯 → 次根开盘入场; 持仓期间的新买讯**忽略**;
+        # 持仓期只由出场规则 (硬止损/追踪止损/止盈/卖讯/期末) 结束。
+        # 与 A 引擎口径一致 (A: 买入仅当无持仓)。
         trades_pnl = []
         trades_holding = []
         trades_reason = []
         trade_spans = []
         trade_details = [] if return_details else None
 
-        for idx in range(len(buy_indices)):
-            signal_idx = int(buy_indices[idx])
+        i = 0
+        while i < n:
+            if signals_arr[i] != 1:
+                i += 1
+                continue
+
+            signal_idx = i
             entry_bar = signal_idx + 1
             if entry_bar >= n:
-                continue  # 信号在最后一根, 无 t+1 可成交
+                break  # 信号在最后一根, 无 t+1 可成交
 
             # t+1 开盘涨停(含一字板) → 买不进, 单次尝试失败即放弃
             if not bool(buy_open_ok(open_arr[entry_bar:entry_bar + 1],
                                     close[signal_idx:signal_idx + 1],
                                     code, is_st)[0]):
+                i += 1
                 continue
 
             # 入场价: 下一根开盘 + 滑点 + 买入成本(佣金+过户)
@@ -544,84 +574,67 @@ class VectorizedBacktester:
             take_profit_price = entry_price * (1 + take_profit_pct)
             stop_price = entry_price * (1 - stop_loss_pct)
 
-            # 确定本次持仓的结束位置(下次买入信号前或数据末尾)
-            if idx + 1 < len(buy_indices):
-                end_idx = int(buy_indices[idx + 1])
+            # 出场扫描: 从入场根到数据末尾 (首次触发者成交)
+            g = np.arange(entry_bar, n)
+            l = g - entry_bar
+            prev_c = prev_close_all[g]
+            intraday_ok = sell_intraday_ok(open_arr[g], high_arr[g], low_arr[g],
+                                           close[g], prev_c, code, is_st)
+
+            # 1) 硬止损(全程含入场日; 入场在开盘, 日内低点在其后)
+            hard_hit = (low_arr[g] <= stop_price) & intraday_ok
+
+            # 2) 追踪止损(最高价仅截至前一根, 避免同根高低点未来函数;
+            #    仅最小持有期后生效)
+            cummax_prev = np.maximum.accumulate(np.r_[-np.inf, high_arr[g][:-1]])
+            trail = cummax_prev * (1 - trailing_stop_pct)
+            trail_hit = ((l >= min_holding) & (low_arr[g] <= trail) &
+                         intraday_ok & np.isfinite(trail))
+
+            # 3) 止盈(最小持有期后; 上行行情无跌停约束)
+            tp_hit = (l >= min_holding) & (high_arr[g] >= take_profit_price)
+
+            cands = []  # (成交bar, 优先级, 原因, 裸出场价)
+
+            if hard_hit.any():
+                off = int(g[np.flatnonzero(hard_hit)[0]])
+                cands.append((off, 0, 'stop_loss',
+                              min(stop_price, float(open_arr[off]))))
+
+            if trail_hit.any():
+                off = int(g[np.flatnonzero(trail_hit)[0]])
+                cands.append((off, 1, 'trailing_stop',
+                              min(float(trail[off - entry_bar]),
+                                  float(open_arr[off]))))
+
+            if tp_hit.any():
+                off = int(g[np.flatnonzero(tp_hit)[0]])
+                cands.append((off, 2, 'take_profit',
+                              max(take_profit_price, float(open_arr[off]))))
+
+            # 4) 卖讯 → 下一根开盘; 开盘跌停则跳过该卖讯, 顺延下一个
+            sig_bars = g[(signals_arr[g] == -1) & (l >= min_holding)]
+            for s in sig_bars:
+                fill = int(s) + 1
+                if fill >= n:
+                    break
+                if not bool(sell_open_ok(open_arr[fill:fill + 1],
+                                         close[int(s):int(s) + 1],
+                                         code, is_st)[0]):
+                    continue
+                cands.append((fill, 3, 'signal', float(open_arr[fill])))
+                break  # 取第一个可成交的卖讯
+
+            if cands:
+                # 时间优先; 同根bar按 止损>追踪>止盈>卖讯
+                cands.sort(key=lambda x: (x[0], x[1]))
+                exit_offset, _, exit_reason, gross_exit = cands[0]
             else:
-                end_idx = n
-            if end_idx < entry_bar:
-                end_idx = entry_bar
-
-            g = np.arange(entry_bar, end_idx)
-            exit_offset = None
-            exit_reason = None
-            gross_exit = None
-
-            if len(g) == 0:
-                # 连续买讯导致持仓区间为空: 持有一根, 收盘出场
-                exit_offset = entry_bar
+                # 持有到期末(或封板至期末): 按最后收盘出场
+                last_g = int(g[-1])
+                exit_offset = last_g
                 exit_reason = 'end'
-                gross_exit = float(close[entry_bar])
-            else:
-                l = g - entry_bar
-                prev_c = prev_close_all[g]
-                intraday_ok = sell_intraday_ok(open_arr[g], high_arr[g], low_arr[g],
-                                               close[g], prev_c, code, is_st)
-
-                # 1) 硬止损(全程含入场日; 入场在开盘, 日内低点在其后)
-                hard_hit = (low_arr[g] <= stop_price) & intraday_ok
-
-                # 2) 追踪止损(最高价仅截至前一根, 避免同根高低点未来函数;
-                #    仅最小持有期后生效)
-                cummax_prev = np.maximum.accumulate(np.r_[-np.inf, high_arr[g][:-1]])
-                trail = cummax_prev * (1 - trailing_stop_pct)
-                trail_hit = ((l >= min_holding) & (low_arr[g] <= trail) &
-                             intraday_ok & np.isfinite(trail))
-
-                # 3) 止盈(最小持有期后; 上行行情无跌停约束)
-                tp_hit = (l >= min_holding) & (high_arr[g] >= take_profit_price)
-
-                cands = []  # (成交bar, 优先级, 原因, 裸出场价)
-
-                if hard_hit.any():
-                    off = int(g[np.flatnonzero(hard_hit)[0]])
-                    cands.append((off, 0, 'stop_loss',
-                                  min(stop_price, float(open_arr[off]))))
-
-                if trail_hit.any():
-                    off = int(g[np.flatnonzero(trail_hit)[0]])
-                    cands.append((off, 1, 'trailing_stop',
-                                  min(float(trail[off - entry_bar]),
-                                      float(open_arr[off]))))
-
-                if tp_hit.any():
-                    off = int(g[np.flatnonzero(tp_hit)[0]])
-                    cands.append((off, 2, 'take_profit',
-                                  max(take_profit_price, float(open_arr[off]))))
-
-                # 4) 卖讯 → 下一根开盘; 开盘跌停则跳过该卖讯, 顺延下一个
-                sig_bars = g[(signals_arr[g] == -1) & (l >= min_holding)]
-                for s in sig_bars:
-                    fill = int(s) + 1
-                    if fill >= n:
-                        break
-                    if not bool(sell_open_ok(open_arr[fill:fill + 1],
-                                             close[int(s):int(s) + 1],
-                                             code, is_st)[0]):
-                        continue
-                    cands.append((fill, 3, 'signal', float(open_arr[fill])))
-                    break  # 取第一个可成交的卖讯
-
-                if cands:
-                    # 时间优先; 同根bar按 止损>追踪>止盈>卖讯
-                    cands.sort(key=lambda x: (x[0], x[1]))
-                    exit_offset, _, exit_reason, gross_exit = cands[0]
-                else:
-                    # 持有到期末(或封板至期末): 按最后收盘出场
-                    last_g = int(g[-1])
-                    exit_offset = last_g
-                    exit_reason = 'end'
-                    gross_exit = float(close[last_g])
+                gross_exit = float(close[last_g])
 
             # 出场价: 滑点 + 卖出成本(佣金+过户+印花税)
             exit_price = cm.sell_price_incl(gross_exit)
@@ -653,6 +666,10 @@ class VectorizedBacktester:
                     exit_reason=str(exit_reason) if exit_reason else "end",
                 ))
 
+            # 扫描续点: 持仓期内(入场根~出场根)的买讯已被忽略;
+            # 出场根当天的买讯仍有效 (收盘出信号, 次根开盘再入场)
+            i = exit_offset
+
         if len(trades_pnl) == 0:
             return _empty()
 
@@ -676,6 +693,12 @@ class VectorizedBacktester:
         网格搜索（最大化 Sharpe）拟合参数，再在测试窗用拟合参数评估，
         保证测试窗参数不含未来信息；为 None 时退化为固定参数滚动评估。
 
+        warmup 跨窗口继承 (审计 B23/H8③): 每个窗口回测时把窗口**之前**的
+        历史段 (最多 60 根 = warmup 上限) 作为 history 传入, 指标与信号在
+        [历史+窗口] 上计算后再切回窗口段 —— 每窗重置的 warmup 不再吃掉
+        OOS 窗口的前 1/3 (旧版: 180 根测试窗前 60 根信号被强制清零,
+        同参数全样本 12 笔 vs OOS 切片 6 笔, Sharpe -1.452 vs -6.972)。
+
         Returns:
         --------
         list[BacktestMetrics] : 每个测试窗口的指标
@@ -683,12 +706,16 @@ class VectorizedBacktester:
         if len(data) < train_days + test_days:
             return []
 
-        def _fit_params(train_data: pd.DataFrame) -> dict:
+        def _history(start: int) -> pd.DataFrame:
+            """窗口前历史段 (warmup 落点), 不足则取全部可用"""
+            return data.iloc[max(0, start - WARMUP_MAX_BARS):start]
+
+        def _fit_params(train_data: pd.DataFrame, history) -> dict:
             best_params, best_sharpe = params, -np.inf
             names = list(param_space.keys())
             for combo in itertools.product(*param_space.values()):
                 candidate = {**params, **dict(zip(names, combo))}
-                m = self.backtest(train_data, candidate)
+                m = self.backtest(train_data, candidate, history=history)
                 if m.sharpe_ratio > best_sharpe:
                     best_params, best_sharpe = candidate, m.sharpe_ratio
             return best_params
@@ -699,11 +726,12 @@ class VectorizedBacktester:
         while idx + test_days <= len(data):
             test_data = data.iloc[idx:idx + test_days]
             if param_space:
-                train_data = data.iloc[idx - train_days:idx]
-                fitted = _fit_params(train_data)
+                train_start = idx - train_days
+                train_data = data.iloc[train_start:idx]
+                fitted = _fit_params(train_data, _history(train_start))
             else:
                 fitted = params
-            metrics = self.backtest(test_data, fitted)
+            metrics = self.backtest(test_data, fitted, history=_history(idx))
             results.append(metrics)
             idx += step_days
 

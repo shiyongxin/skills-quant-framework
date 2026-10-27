@@ -255,6 +255,169 @@ class TestEngineB:
 
 
 # ---------------------------------------------------------------------------
+# H8 (审计 B21/B22/B23): 引擎 B 三处结构性偏差
+# ---------------------------------------------------------------------------
+
+class TestH8StructuralBiases:
+    """H8: ① 重叠买讯伪交易 ② 最小持有期屏蔽退出 ③ warmup 吃 OOS 窗口。
+
+    三项都是"结构性偏差"而非风格问题: 修前引擎记的交易数/胜率/Sharpe 与
+    策略实际行为不符 (审计 D-backtest.md B21/B22/B23)。
+    """
+
+    # ---------- ① 重叠买入信号 → 0 持仓日伪交易 (B21) ----------
+
+    def test_overlapping_buys_do_not_create_pseudo_trades(self):
+        """密集买讯只开一仓, 不再切出 0 持仓日伪交易。
+
+        旧实现: 持仓期终点取"下一次买入信号" → 连续买讯把上一笔切成 0 根
+        bar (当日开当日平), 审计复现 63 笔 avg_holding=0.27、Sharpe 恒 0。
+        """
+        df = mk_flat(n=60)
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = sig.iloc[11] = sig.iloc[12] = 1   # 三个连续买讯
+        sig.iloc[30] = -1                                  # 之后一个卖讯
+        vb = VectorizedBacktester()
+        m, det = vb._simulate_trades(df, sig, {'min_holding_days': 0},
+                                     return_details=True)
+        assert len(det) == 1, f"重叠买讯应只开一仓, 实际 {len(det)} 笔"
+        t = det[0]
+        assert t.entry_idx == 11 and t.exit_idx == 31
+        assert t.exit_reason == 'signal'
+        # 关键: 没有任何 0 持仓日伪交易 (入场根 == 出场根)
+        assert all(d.exit_idx > d.entry_idx for d in det)
+
+    def test_buy_signal_while_holding_is_ignored(self):
+        """持仓期间的新买讯被忽略 (与 A 引擎"买入仅当无持仓"口径一致)。"""
+        df = mk_flat(n=60)
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        sig.iloc[20] = 1     # 持仓中的买讯 → 忽略
+        sig.iloc[30] = -1
+        vb = VectorizedBacktester()
+        m, det = vb._simulate_trades(df, sig, {'min_holding_days': 0},
+                                     return_details=True)
+        assert len(det) == 1
+        assert det[0].entry_idx == 11      # 不是 21
+        assert det[0].exit_idx == 31
+
+    def test_exit_bar_buy_signal_can_reenter(self):
+        """出场当根的买讯仍有效 (收盘出信号, 次根开盘再入场)。"""
+        df = mk_flat(n=60)
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        sig.iloc[20] = -1   # 卖讯 → 21 出场
+        sig.iloc[21] = 1    # 出场当根买讯 → 22 再入场
+        vb = VectorizedBacktester()
+        m, det = vb._simulate_trades(df, sig, {'min_holding_days': 0},
+                                     return_details=True)
+        assert [d.entry_idx for d in det] == [11, 22]
+        assert det[0].exit_idx == 21
+
+    # ---------- ② 最小持有期屏蔽退出条件 (B22) ----------
+
+    def test_default_has_no_min_holding_lock(self):
+        """默认参数不再隐式锁 20 日: 早期卖讯可立即执行。
+
+        旧默认 20 → 锁定期内只有硬止损生效 (追踪/止盈/卖讯全废), 且 A 引擎
+        无此概念 → 三引擎口径不一致 (审计 B22)。
+        """
+        df = mk_flat(n=60)
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        sig.iloc[15] = -1    # 入场后第 4 根就出卖点
+        vb = VectorizedBacktester()
+        m, det = vb._simulate_trades(df, sig, {}, return_details=True)
+        assert det[0].exit_reason == 'signal'
+        assert det[0].exit_idx == 16
+
+    def test_explicit_min_holding_still_locks(self):
+        """显式 min_holding_days=20 → 锁定期语义保留 (策略显式选择)。"""
+        df = mk_flat(n=60)
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        sig.iloc[15] = -1
+        vb = VectorizedBacktester()
+        m, det = vb._simulate_trades(df, sig, {'min_holding_days': 20},
+                                     return_details=True)
+        assert det[0].exit_reason == 'end'      # 卖讯被锁 → 持有到期末
+        assert det[0].exit_idx == 59
+
+    def test_trailing_stop_not_blocked_by_default(self):
+        """默认参数下追踪止损可生效 (旧默认被锁 → 小亏拖成大亏)。"""
+        df = mk_flat(n=60, base=100.0)
+        df.loc[20, '最高'] = 200.0
+        df.loc[20, '最低'] = 170.0
+        df.loc[20, '开盘'] = 100.0
+        df.loc[20, '收盘'] = 200.0
+        df.loc[21, '最高'] = 195.0
+        df.loc[21, '最低'] = 180.0
+        df.loc[21, '开盘'] = 190.0
+        df.loc[21, '收盘'] = 185.0
+        sig = pd.Series(0, index=df.index)
+        sig.iloc[10] = 1
+        vb = VectorizedBacktester()
+        # 不传 min_holding_days (默认 0 = 不锁); 止盈设高以隔离追踪止损
+        m, det = vb._simulate_trades(df, sig, {'take_profit_pct': 5.0},
+                                     return_details=True)
+        assert det[0].exit_reason == 'trailing_stop'
+        assert det[0].exit_idx == 21
+
+    # ---------- ③ warmup 吃掉 OOS 窗口 (B23) ----------
+
+    @staticmethod
+    def _step_frame(n, close):
+        return pd.DataFrame({
+            '日期': pd.date_range('2024-01-01', periods=n, freq='B'),
+            '开盘': close * 1.001, '最高': close * 1.02,
+            '最低': close * 0.98, '收盘': close,
+            '成交量': np.full(n, 1e6),
+        })
+
+    def test_history_segment_keeps_window_signals_alive(self):
+        """带 history 段 → warmup 落在历史段, 窗口内信号不再被清零。
+
+        旧实现: 每个 OOS 窗口自己重置 warmup, 180 根测试窗前 60 根信号
+        被强制置 0 (审计实测: 全样本 12 笔 vs OOS 切片 6 笔, Sharpe
+        -1.452 vs -6.972)。
+        """
+        hist = self._step_frame(60, np.full(60, 10.0))
+        win = self._step_frame(150, np.concatenate([np.full(5, 10.0),
+                                                    np.full(145, 12.0)]))
+        p = {'buy_threshold': 1.0, 'sell_threshold': 99.0,
+             'stop_loss_pct': 0.5, 'take_profit_pct': 5.0}
+        vb = VectorizedBacktester()
+        # 无 history: 窗口前段被 warmup 清零 → 无交易
+        assert vb.backtest(win, p).num_trades == 0
+        # 带 history: 买讯落在窗口第 5 根 (历史段之后) → 正常成交
+        m = vb.backtest(win, p, history=hist)
+        assert m.num_trades == 1
+
+    def test_walk_forward_passes_window_history(self):
+        """walk_forward 每个窗口都带上窗口前的历史段 (warmup 跨窗口继承)。"""
+        rng = np.random.default_rng(7)
+        n = 750
+        close = 10 * np.cumprod(1 + rng.normal(0, 0.015, n))
+        data = self._step_frame(n, close)
+        vb = VectorizedBacktester()
+        seen = []
+        orig = vb.backtest
+
+        def spy(data_, params_, **kw):
+            hist = kw.get('history')
+            seen.append((len(data_), 0 if hist is None else len(hist)))
+            return orig(data_, params_, **kw)
+
+        vb.backtest = spy
+        res = vb.walk_forward(data, {'min_holding_days': 5},
+                              train_days=300, test_days=150, step_days=150)
+        assert len(res) == 3
+        # 窗口长度不变, 每窗都带 60 根历史 (序列开头之后的窗口都有)
+        assert seen == [(150, 60)] * 3
+        assert all(np.isfinite(m.total_return) for m in res)
+
+
+# ---------------------------------------------------------------------------
 # D 引擎: reversal_backtest
 # ---------------------------------------------------------------------------
 
@@ -380,8 +543,30 @@ class TestGoldenMetrics:
 
     def test_engine_b_vectorized_golden(self):
         m = VectorizedBacktester().backtest(self._big(), {})
-        assert m.total_return == pytest.approx(8.24347173537372, rel=1e-6)
+        # 审计 B22/H8② 后更新 (2026-10-26): 旧默认 min_holding_days=20 让
+        # 锁定期内只有硬止损生效 (追踪止损被屏蔽) —— 同一笔持仓 (bar143 入场)
+        # 因此从"追踪止损 bar145 止损 -3.05%" 变成 "扛到硬止损 bar158 -8.17%",
+        # 回撤 6.52%→2.76%, 夏普 0.707→1.431, 盈亏比 2.42→6.49。
+        # 数值中性证明: 显式传 min_holding_days=20 时新实现与旧实现逐位一致
+        # (见 test_engine_b_golden_with_explicit_min_holding_lock) → 漂移
+        # 只来自默认值诚实化, 持仓状态机 (B21) 在本数据集上无数值影响。
+        assert m.total_return == pytest.approx(12.99316444226517, rel=1e-6)
         # 口径统一后(core): 日频盯市Sharpe(ddof=1) + 日频MDD + 求和式profit_factor
+        assert m.sharpe_ratio == pytest.approx(1.4310959922744992, rel=1e-6)
+        assert m.max_drawdown == pytest.approx(2.761219205849939, rel=1e-6)
+        assert m.num_trades == 2
+        assert m.win_rate == pytest.approx(50.0)
+        assert m.profit_factor == pytest.approx(6.485939463249691, rel=1e-6)
+
+    def test_engine_b_golden_with_explicit_min_holding_lock(self):
+        """显式 min_holding_days=20 → 与修复前逐位一致 (锁定期语义保留)。
+
+        同时锁定"持仓状态机 (B21) 不改变本数据集数值"这一事实:
+        旧实现(买讯切分持仓)与新实现(持仓状态机)在此数据上给出同一笔交易。
+        """
+        m = VectorizedBacktester().backtest(
+            self._big(), {'min_holding_days': 20})
+        assert m.total_return == pytest.approx(8.24347173537372, rel=1e-6)
         assert m.sharpe_ratio == pytest.approx(0.7067662022777503, rel=1e-6)
         assert m.max_drawdown == pytest.approx(6.516848434608427, rel=1e-6)
         assert m.num_trades == 2

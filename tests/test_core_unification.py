@@ -125,9 +125,10 @@ class TestWalkForwardISOS:
         calls = []
         orig = vb.backtest
 
-        def spy(data_, params_):
+        # history= 是 B23/H8③ 新增的窗口前历史段 (warmup 跨窗口继承)
+        def spy(data_, params_, **kw):
             calls.append(len(data_))
-            return orig(data_, params_)
+            return orig(data_, params_, **kw)
 
         vb.backtest = spy
         base = {'min_holding_days': 5}
