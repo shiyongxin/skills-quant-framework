@@ -49,6 +49,15 @@ class IndicatorSystem:
     median_holding_days: float = 0.0
     num_trades: float = 0.0
 
+    # 样本外 (OOS) 指标 —— 审计 H1: 参数选择只用 IS 窗口, 这些数字
+    # 来自**从未参与选择**的留出窗口, 是"这套参数能否外推"的唯一证据
+    oos_available: bool = False
+    oos_windows: int = 0
+    oos_fitness: float = 0.0
+    oos_median_return: float = 0.0
+    oos_median_sharpe: float = 0.0
+    oos_median_max_drawdown: float = 0.0
+
 
 @dataclass
 class Individual:
@@ -71,6 +80,48 @@ class OptimizationResult:
 
 
 # ==================== 适应度评估 ====================
+
+def split_is_oos(windows: list, oos_ratio: float) -> tuple:
+    """按时间顺序把回测窗口切成 (IS 选择用, OOS 仅报告)。
+
+    审计 H1 (E-optimization-portfolio §3.1 第 1/2 条): 旧实现里
+    walk_forward 的 train_days 只用于"跳过前 N 行", 训练段从未用于拟合,
+    且 GA 在**全部**测试窗口上既评估又取最大 → "样本外"窗口实为样本内,
+    选择偏差直接来自这里。
+
+    现在: 末尾 oos_ratio 比例的窗口留作 **OOS**, 从不参与参数选择;
+    OOS 指标只用于最终报告 (分列 IS/OOS 两套指标)。
+
+    - 窗口数 < 2 或 oos_ratio <= 0 → 无 OOS (返回空列表; 调用方如实标记
+      available=False, 不静默假装有样本外证据)
+    - 至少保留 1 个 IS 窗口与 1 个 OOS 窗口
+    """
+    n = len(windows)
+    if n < 2 or oos_ratio <= 0:
+        return list(windows), []
+    n_oos = int(round(n * oos_ratio))
+    n_oos = max(1, min(n - 1, n_oos))
+    return list(windows[:n - n_oos]), list(windows[n - n_oos:])
+
+
+def oos_fields(fitness_details: dict) -> dict:
+    """从 fitness_details 提取样本外指标字段 (构造 IndicatorSystem 用)。
+
+    审计 H1: IS 指标是"选择口径", OOS 指标是"验证口径" —— 两者必须分列,
+    不能只报前者 (那正是旧实现的误导之处)。
+    """
+    oos = (fitness_details or {}).get('oos') or {}
+    if not oos.get('available'):
+        return {'oos_available': False, 'oos_windows': 0}
+    return {
+        'oos_available': True,
+        'oos_windows': oos.get('windows', 0),
+        'oos_fitness': oos.get('fitness', 0.0),
+        'oos_median_return': oos.get('median_return', 0.0),
+        'oos_median_sharpe': oos.get('median_sharpe', 0.0),
+        'oos_median_max_drawdown': oos.get('median_max_drawdown', 0.0),
+    }
+
 
 class FitnessEvaluator:
     """
@@ -132,8 +183,16 @@ class FitnessEvaluator:
         Returns:
         --------
         (fitness: float, details: dict)
+
+        Notes:
+        -----
+        审计 H1: **适应度只由 IS (样本内选择) 窗口计算**; 末尾 oos_ratio 比例
+        的窗口留作 OOS (样本外), 其指标只进 details['oos'] 用于最终报告,
+        **从不参与参数选择** —— 旧实现 GA 在全部窗口上既评估又取最大,
+        "样本外"窗口实为样本内 (选择偏差)。
         """
-        all_metrics = []
+        is_metrics = []
+        oos_metrics = []
 
         for symbol, data in stock_data.items():
             try:
@@ -144,25 +203,82 @@ class FitnessEvaluator:
                     if mask.sum() < 60:
                         continue
                     # 使用连续的体制时段进行回测
-                    metrics_list = self._backtest_regime_windows(
+                    windows = self._backtest_regime_windows(
                         data, params, labels, target_regime
                     )
-                    all_metrics.extend(metrics_list)
                 else:
                     # Walk-Forward回测 (窗口来自 walk_forward_config, 审计 E-P1 接线)
                     wf = self.walk_forward_config
-                    metrics_list = self.backtester.walk_forward(
+                    windows = self.backtester.walk_forward(
                         data, params, train_days=wf.train_days,
                         test_days=wf.test_days, step_days=wf.step_days
                     )
-                    all_metrics.extend(metrics_list)
+                # 按时间顺序切分: 前段 IS (选择用) / 末尾 OOS (仅报告)
+                is_windows, oos_windows = split_is_oos(
+                    windows, self.walk_forward_config.oos_ratio)
+                is_metrics.extend(is_windows)
+                oos_metrics.extend(oos_windows)
             except Exception:
                 continue
 
-        if not all_metrics:
+        if not is_metrics:
             return 0.0, {}
 
-        return self._compute_fitness(all_metrics)
+        fitness, details = self._compute_fitness(is_metrics)
+        details['is_windows'] = len(is_metrics)
+        details['oos'] = self._summarize_oos(oos_metrics)
+        return fitness, details
+
+    def _aggregate_oos(self, oos_blocks: list) -> dict:
+        """跨体制汇总样本外证据 (稳健模式用)。
+
+        各体制的 OOS 块按窗口数汇总, 指标取跨体制中位数 —— 与 IS 侧
+        "跨窗口中位数" 的聚合方式保持一致口径。
+        """
+        usable = [b for b in (oos_blocks or [])
+                  if b and b.get('available')]
+        if not usable:
+            return {
+                'available': False,
+                'windows': 0,
+                'reason': '各体制均无法划分样本外段 (窗口数不足)',
+            }
+        return {
+            'available': True,
+            'windows': int(sum(b.get('windows', 0) for b in usable)),
+            'regimes': len(usable),
+            'fitness': float(np.median([b.get('fitness', 0.0) for b in usable])),
+            'median_return': float(np.median(
+                [b.get('median_return', 0.0) for b in usable])),
+            'median_sharpe': float(np.median(
+                [b.get('median_sharpe', 0.0) for b in usable])),
+            'median_max_drawdown': float(np.median(
+                [b.get('median_max_drawdown', 0.0) for b in usable])),
+        }
+
+    def _summarize_oos(self, oos_metrics: list) -> dict:
+        """汇总 OOS (样本外) 窗口指标 —— 只用于报告, 从不参与选择。
+
+        窗口数不足 2 时无法划分样本外段 (如返回 (0, 0)), 此时如实标记
+        available=False 并给出原因, 不静默假装有样本外证据。
+        """
+        if not oos_metrics:
+            return {
+                'available': False,
+                'windows': 0,
+                'reason': '窗口数不足, 无法划分样本外段 (需要至少 2 个窗口)',
+            }
+        fitness, details = self._compute_fitness(oos_metrics)
+        return {
+            'available': True,
+            'windows': len(oos_metrics),
+            'fitness': fitness,
+            'median_return': details['median_return'],
+            'median_sharpe': details['median_sharpe'],
+            'median_max_drawdown': details['median_drawdown'],
+            'target_rate': details['target_rate'],
+            'avg_trades': details['avg_trades'],
+        }
 
     def _backtest_regime_windows(self, data, params, labels, target_regime):
         """
@@ -819,6 +935,7 @@ class OptimizationEngine:
             median_max_drawdown=best.fitness_details.get('median_drawdown', 0),
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
+            **oos_fields(best.fitness_details),
         )
 
         result = OptimizationResult(
@@ -928,6 +1045,7 @@ class OptimizationEngine:
                 median_max_drawdown=best.fitness_details.get('median_drawdown', 0),
                 median_holding_days=best.fitness_details.get('avg_holding_days', 0),
                 num_trades=best.fitness_details.get('avg_trades', 0),
+                **oos_fields(best.fitness_details),
             )
 
             result = OptimizationResult(
@@ -995,6 +1113,7 @@ class OptimizationEngine:
                 return self.evaluator.evaluate(params, sample_data)
 
             regime_fitnesses = {}
+            regime_oos = {}
             for regime in all_regimes:
                 fitness, details = self.evaluator.evaluate(
                     params, sample_data, self.regime_labels, regime
@@ -1002,6 +1121,10 @@ class OptimizationEngine:
                 # 仅记录有样本的体制
                 if details.get('sample_count', 0) > 0:
                     regime_fitnesses[regime] = fitness
+                    # 审计 H1: 各体制的样本外证据一并保留 (只报告, 不参与选择)
+                    oos_block = details.get('oos')
+                    if oos_block:
+                        regime_oos[regime] = oos_block
 
             if not regime_fitnesses:
                 return 0.0, {}
@@ -1019,7 +1142,10 @@ class OptimizationEngine:
                 'avg_fitness': avg_fitness,
                 'regimes_used': list(regime_fitnesses.keys()),
                 'regimes_skipped': [r for r in all_regimes if r not in regime_fitnesses],
+                # 审计 H1: 跨体制汇总的样本外证据 (IS/OOS 分列)
+                'regime_oos': regime_oos,
             }
+            details['oos'] = self._aggregate_oos(list(regime_oos.values()))
             return robust_fitness, details
 
         ga = GeneticAlgorithm(**ga_cfg)
@@ -1055,6 +1181,7 @@ class OptimizationEngine:
             median_max_drawdown=best.fitness_details.get('median_drawdown', 0),
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
+            **oos_fields(best.fitness_details),
         )
 
         result = OptimizationResult(
@@ -1167,6 +1294,7 @@ class OptimizationEngine:
                 median_max_drawdown=final['best_details'].get('median_drawdown', 0),
                 median_holding_days=final['best_details'].get('avg_holding_days', 0),
                 num_trades=final['best_details'].get('avg_trades', 0),
+                **oos_fields(final['best_details']),
             )
 
             result = OptimizationResult(
@@ -1271,6 +1399,15 @@ class OptimizationEngine:
         print(f"  中位夏普: {system.median_sharpe:.2f}")
         print(f"  中位最大回撤: {system.median_max_drawdown:.1f}%")
         print(f"  平均持有天数: {system.median_holding_days:.0f}")
+        # 审计 H1: IS (选择口径) 与 OOS (验证口径) 分列 —— 只报 IS 等于误导
+        if system.oos_available:
+            print(f"  [样本外 OOS] {system.oos_windows} 窗 | "
+                  f"适应度 {system.oos_fitness:.4f} | "
+                  f"中位收益 {system.oos_median_return:.1f}% | "
+                  f"中位夏普 {system.oos_median_sharpe:.2f} | "
+                  f"中位回撤 {system.oos_median_max_drawdown:.1f}%")
+        else:
+            print("  [样本外 OOS] 不可用 (窗口数不足, 无法划分留出段)")
         print(f"  收敛代数: {result.convergence_gen}")
         print(f"  实际运行代数: {result.generations_run}")
         print(f"  耗时: {result.total_time_sec:.1f}s")
@@ -1308,6 +1445,12 @@ class OptimizationEngine:
             'fitness_weights': dict(self.evaluator.weights),
             'param_space': self._param_space_signature(),
             'ga_runs': list(self._ga_runs),
+            # 审计 H1: 落盘记录样本外隔离策略 (末尾窗口留出, 选择不参与)
+            'oos_policy': {
+                'ratio': self.evaluator.walk_forward_config.oos_ratio,
+                'note': ('末尾比例的 walk-forward 窗口留作样本外 (OOS), '
+                         '参数选择只用 IS 窗口; OOS 指标见 systems[].oos'),
+            },
             'systems': []
         }
 
@@ -1327,6 +1470,15 @@ class OptimizationEngine:
                 'median_holding_days': system.median_holding_days,
                 'num_trades': system.num_trades,
                 'sample_count': system.sample_count,
+                # 审计 H1: IS (选择口径) 与 OOS (验证口径) 分列落盘
+                'oos': {
+                    'available': system.oos_available,
+                    'windows': system.oos_windows,
+                    'fitness': system.oos_fitness,
+                    'median_return': system.oos_median_return,
+                    'median_sharpe': system.oos_median_sharpe,
+                    'median_max_drawdown': system.oos_median_max_drawdown,
+                },
                 'regime': result.regime,
                 'generations_run': result.generations_run,
                 'convergence_gen': result.convergence_gen,
@@ -1357,6 +1509,7 @@ class OptimizationEngine:
                 median_max_drawdown=sys_data.get('median_max_drawdown', 0),
                 median_holding_days=sys_data.get('median_holding_days', 0),
                 num_trades=sys_data.get('num_trades', 0),
+                **(oos_fields({'oos': sys_data.get('oos') or {}})),
             )
 
             regime = sys_data.get('regime', 'UNKNOWN')

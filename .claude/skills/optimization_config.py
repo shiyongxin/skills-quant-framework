@@ -44,6 +44,10 @@ class WalkForwardConfig:
     train_days: int = 504       # 约2年
     test_days: int = 180        # 约6个月
     step_days: int = 63         # 约3个月
+    # 审计 H1 (真样本外隔离): 末尾 oos_ratio 比例的回测窗口留作**样本外 (OOS)**,
+    # **从不参与参数选择** —— 旧实现 GA 在全部窗口上既评估又取最大,
+    # "样本外"窗口实为样本内。0 = 关闭隔离 (退回旧行为, 仅供对照)。
+    oos_ratio: float = 0.3
 
 
 @dataclass

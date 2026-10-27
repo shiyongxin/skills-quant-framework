@@ -749,9 +749,21 @@ class VectorizedBacktester:
         """
         单只股票的Walk-Forward验证（IS 拟合 / OOS 评估，审计项 17）。
 
+        参数:
+        --------
+        train_days: 窗口**前置丢弃期**长度 —— 首个评估窗之前的 bar 数
+            (指标预热用)。默认不传 param_space 时它**不用于拟合任何东西**,
+            只是丢弃期; 真正的样本外隔离由调用方
+            (`optimization_engine.split_is_oos`, 审计 H1) 负责: 末尾
+            oos_ratio 比例的窗口留作 OOS, 从不参与参数选择。
         param_space: {参数名: [候选值, ...]}。给定时每个窗口先在训练窗
-        网格搜索（最大化 Sharpe）拟合参数，再在测试窗用拟合参数评估，
-        保证测试窗参数不含未来信息；为 None 时退化为固定参数滚动评估。
+            网格搜索（最大化 Sharpe）拟合参数，再在测试窗用拟合参数评估，
+            保证测试窗参数不含未来信息；为 None 时退化为固定参数滚动评估。
+
+            注: 该分支属于**自适应策略**（逐窗重估参数）的研究工具 ——
+            拟合值会**覆盖**传入的 params, 因此**不能**直接接到优化器的
+            参数选择路径 (那样被评估的参数 ≠ 最终部署的参数, 报告的样本外
+            指标无法代表部署参数的表现)。生产端部署的是固定参数。
 
         warmup 跨窗口继承 (审计 B23/H8③): 每个窗口回测时把窗口**之前**的
         历史段 (最多 60 根 = warmup 上限) 作为 history 传入, 指标与信号在
@@ -761,7 +773,7 @@ class VectorizedBacktester:
 
         Returns:
         --------
-        list[BacktestMetrics] : 每个测试窗口的指标
+        list[BacktestMetrics] : 每个测试窗口的指标 (按时间顺序)
         """
         if len(data) < train_days + test_days:
             return []
