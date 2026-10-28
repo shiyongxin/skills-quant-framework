@@ -359,7 +359,11 @@ class DailySignalGenerator:
                 if regime not in self.systems:
                     self.systems[regime] = sys_data
                 else:
-                    # 保留置信度更高的
+                    # 审计 H2: 同体制多系统按 confidence 挑选 —— 新 manifest
+                    # 中 confidence = clamp01(适应度) (证据派生, 见
+                    # optimization_engine.confidence_from_fitness); 旧 manifest
+                    # 的硬编码值按原样读取 (历史数据不改写)。局限: 不同系统
+                    # 的适应度来自各自选择窗口, 横向比较是近似裁决而非严格排序
                     if sys_data.get('confidence', 0) > self.systems[regime].get('confidence', 0):
                         self.systems[regime] = sys_data
 

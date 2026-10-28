@@ -103,7 +103,7 @@
 ## 4. 批次 3 —— 研究有效性（高影响，**需先拍板再动手**）
 
 > 这一批不是"写错了"，是"**这套系统的回测结论目前不能当真**"。改完之后历史结论与现有产出**不可比**。
-> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；**H10 已落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
+> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；**H10 已落地**（2026-10-26，见下方明细）；**H2 已落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
 
 | # | 问题 | 证据 | 性质 |
 |---|---|---|---|
@@ -111,11 +111,11 @@
 | **H3** ✅ | `historical_backtest_validator` 的回测引擎是**死属性**（全文仅 `:86` 一处）；验证参数来自"全历史优化出的"产物 → IS/OOS 隔离仍破；样本按评估结果过滤（`:449-453` `forward_returns[hd] != 0`）；报告区间硬编码（`:504`） | `historical_backtest_validator.py` | 需重做验证链 |
 | **H4** ✅ | 幸存者偏差：`get_universe()` **无 `as_of` 参数**，用 `datetime.now()` 回溯到 1996；`stock_selector.get_hot_stocks` 硬编码热门股字典 | `historical_data_manager.py:433-434` `get_universe(min_history_days=5000, min_rows=2000)` —— **无 as_of 参数** | 与 C-P0-7 的 point-in-time 止血契约同源，但因子层没跟上 |
 | **H6** ✅ | 多因子权重拟合仍**样本内 + 前瞻收益**（`shift(-1)`），且与 `shift(1)` 的打分口径**互相矛盾** | `multi_factor_selection.py:176`/`:239` `shift(-1)` vs `:411` `shift(1)` —— 口径自相矛盾 | 因子层是选股入口，影响面大 |
-| **H2** ✅ | `confidence` 是**硬编码常数**（`0.7`/`min(0.9, fitness*1.2)`/`0.6`/`0.75`），却被 `daily_signal_generator` 当作**生产参数体系的唯一挑选依据** | `optimization_engine.py:810` `confidence=0.7` / `:919` `min(0.9, best.fitness*1.2)` / `:1045` `0.6` / `:1156` `0.75` | 编造的数参与决策 |
+| ~~**H2**~~ | ~~`confidence` 是**硬编码常数**（`0.7`/`min(0.9, fitness*1.2)`/`0.6`/`0.75`），却被 `daily_signal_generator` 当作**生产参数体系的唯一挑选依据**~~ → **✅ 已修（证据派生）** | 复验确认属实：4 个构造点的 confidence 与任何证据无关（全局/稳健/迭代是纯常数，体制路径是无出处的 `×1.2` 放大），`daily_signal_generator.load_systems:363` 用它裁决同体制多系统的取舍 | 已修 + `tests/test_h2_confidence.py` 16 用例；明细见下方说明 |
 | ~~**H10**~~ | ~~优化结果无**多重检验校正 / 稳健性证据**：`save_results` 落盘无试验次数、最优 fitness 在随机基线上的分位数、Top-10 参数离散度、bootstrap 置信区间。而 `optimize_global` 3200 次 / `iterative` ~7000 次回测量级~~ → **✅ 已修（稳健性证据落盘）** | 复验确认属实：落盘仅 `seed`/`n_stocks`/`fitness_weights`/`param_space`/`ga_runs` —— 无试验次数/分位数/bootstrap | 已修 + `tests/test_h10_robustness.py` 32 用例；明细见下方说明 |
 | **H5** | 停牌建模**只落在信号层**（`trade_constraints` + `core/trading_calendar.py`），4 套回测引擎侧**完全没接** —— "停牌期间持仓无法平仓"未建模 | `rg 停牌\|suspend` 在 `backtest_framework`/`vectorized_backtest`/`reversal_backtest`/`historical_backtest_validator` → **0 命中**；`execution_model.py:13-14` docstring 自述"停牌: 数据侧无停牌标记" | ✅ 已复验 |
 
-**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H10（只改落盘）~~ **✅ 已做（2026-10-26，见下方明细）**；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计。
+**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H10（只改落盘）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H2（编造常数参与生产裁决）~~ **✅ 已做（2026-10-26，见下方明细）**；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计；H5 停牌建模需先定引擎侧方案。
 
 **H1 修复明细（2026-10-26，真样本外隔离）**：
 
@@ -146,6 +146,19 @@
 关键设计约束：**证据只在选择之后组装**（`_finalize_robustness` 在 `ga.run` 返回后调用，恰好 1 次/阶段，有源码级门禁）——基线/bootstrap 的评估**不进选择计数、不进 top-k、不参与取最大**，因此不改变搜索结果（核心门禁：同 seed 基线 on/off `best.params` 逐位一致）。不落任何"校正后 p 值"（无多次检验原始统计量，编一个比不给更糟）——只落**可解释的证据**。
 
 端到端实测：global 阶段 `n_selection_evaluations=4`（= GA pop×gen）+ 基线 3 次 = 评估器总调用 7 次（分账正确）；manifest `n_evaluations_total` = `sum(ga_runs n_evals)`；稳健模式 1000 行 × 双体制全链路跑通（GA + 基线 + 分层 bootstrap + 落盘/读回）。
+
+**H2 修复明细（2026-10-26，confidence 证据派生）**：
+
+| 环节 | 做法 |
+|---|---|
+| ① 单一真相源 | 新增 `optimization_engine.confidence_from_fitness(fitness)` —— `confidence = clamp01(适应度)`：GA **实际最大化的目标值本身**（`FitnessConfig` 加权和，权重和为 1，来自真实回测窗口指标：达标率/中位收益分/中位夏普分/回撤分）。刻度：<0 → 0，[0,1] → 原值，>1 → 1（防御性夹取） |
+| ② 四个构造点 | global / by_regime / robust / iterative 全部改调该函数（`optimization_engine.py` 4 处 `confidence=`）；旧值 `0.7` / `min(0.9, f*1.2)` / `0.6` / `0.75` 全部废止 —— 其中 3 个是纯常数（与任何证据无关），体制路径的 `×1.2` 是无出处放大 |
+| ③ 语义声明 | `IndicatorSystem.confidence` 字段注释 + 函数 docstring 均如实写明：**不是统计校准的置信概率**，而是适应度的 [0,1] 夹取值（避免换个名字继续骗人）；manifest 顶层加 `confidence_policy`（`formula: clamp01(fitness)` + 说明），与 `oos_policy` / `robustness_policy` 同款自证 |
+| ④ 消费端 | `daily_signal_generator.load_systems` 的同体制裁决改由证据驱动（新 manifest：confidence 随适应度；旧 manifest：原值读入不改写）。局限已在代码注释写明：**不同系统的适应度来自各自选择窗口**（全局系 = 全窗口，体制系 = 该体制窗口），横向比较是近似裁决而非严格排序 |
+| ⑤ 历史兼容 | `load_results` 对旧 manifest 的硬编码 confidence **原样读取**（历史数据不改写、不"纠正"成 clamp01(fitness)）—— 否则等于篡改历史实验记录 |
+| ⑥ 门禁 | `tests/test_h2_confidence.py` 16 用例：夹取语义 / 四阶段构造值 == clamp01(适应度)（桩评估器定值断言）/ 高适应度饱和到 1 / DSG 裁决三态（高者胜、平局先到先得、**低适应度专用系统不再凭"专用型"身份压过高适应度全局系统**）/ 旧 manifest 原样读回 / save→load 往返 / 源码级 AST 门禁（`confidence=` 只允许 `confidence_from_fitness(...)` 或 `sys_data['confidence']` 两种形态 + 4 个旧硬编码字面量不得复现） |
+
+效果：生产裁决依据从"编造的常数"变为"GA 实际最大化的适应度"——同一份 manifest 下，旧实现里**专用型系统几乎恒胜**（`min(0.9, f*1.2)` 常 ≥ 全局常数 0.7），现按证据裁决（适应度低的专用系统不再顶掉适应度高的全局系统）。
 
 ---
 

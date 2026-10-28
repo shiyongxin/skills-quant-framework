@@ -38,7 +38,7 @@ class IndicatorSystem:
     applicable_regimes: list        # 适用体制: ['BULL', 'EARLY_BULL']
     params: dict                    # 完整参数集
     fitness_scores: dict            # 各体制下的fitness {regime: fitness}
-    confidence: float               # 置信度 (0-1)
+    confidence: float               # clamp01(适应度), 见 confidence_from_fitness (审计 H2, 非统计校准概率)
     sample_count: int               # 支撑该结论的样本数
 
     # 性能统计
@@ -125,6 +125,25 @@ def oos_fields(fitness_details: dict) -> dict:
         'oos_median_sharpe': oos.get('median_sharpe', 0.0),
         'oos_median_max_drawdown': oos.get('median_max_drawdown', 0.0),
     }
+
+
+def confidence_from_fitness(fitness: float) -> float:
+    """适应度 → confidence (审计 H2)。
+
+    confidence **不是**统计校准的置信概率, 而是**适应度的 [0,1] 夹取值**
+    —— 即 GA 实际最大化的目标值本身 (FitnessConfig 加权和, 来自真实
+    回测窗口指标: 达标率/中位收益分/中位夏普分/回撤分, 权重和为 1)。
+
+    审计 H2: 旧实现是 4 处互不一致的硬编码常数 (0.7 / min(0.9, f*1.2) /
+    0.6 / 0.75), 其中全局/稳健/迭代路径的值与任何证据无关, 却被
+    daily_signal_generator 当作同体制多系统的唯一挑选依据 = 编造的数
+    参与决策。现统一为证据派生, 单一真相源, 四个阶段同口径。
+
+    刻度: fitness < 0 → 0; fitness ∈ [0,1] → 原值; fitness > 1 → 1
+    (FitnessConfig 权重和为 1, 现实适应度基本落在 [0,1], 夹取仅防御
+    极端项)。旧 manifest 中的硬编码值按原样读取 (历史数据不改写)。
+    """
+    return float(min(max(float(fitness), 0.0), 1.0))
 
 
 class FitnessEvaluator:
@@ -968,7 +987,8 @@ class OptimizationEngine:
             applicable_regimes=['BULL', 'BEAR', 'SIDEWAYS', 'CRASH', 'RECOVERY'],
             params=best.params,
             fitness_scores={'GLOBAL': best.fitness},
-            confidence=0.7,
+            # 审计 H2: 旧值硬编码 0.7 (与证据无关) → 适应度夹取
+            confidence=confidence_from_fitness(best.fitness),
             sample_count=best.fitness_details.get('sample_count', 0),
             median_return=best.fitness_details.get('median_return', 0),
             win_rate_above_10pct=best.fitness_details.get('target_rate', 0),
@@ -1093,7 +1113,8 @@ class OptimizationEngine:
                 applicable_regimes=[regime],
                 params=best.params,
                 fitness_scores={regime: best.fitness},
-                confidence=min(0.9, best.fitness * 1.2),
+                # 审计 H2: 旧值 min(0.9, f*1.2) 是对适应度的任意放大 → 原值夹取
+                confidence=confidence_from_fitness(best.fitness),
                 sample_count=best.fitness_details.get('sample_count', 0),
                 median_return=best.fitness_details.get('median_return', 0),
                 win_rate_above_10pct=best.fitness_details.get('target_rate', 0),
@@ -1259,7 +1280,9 @@ class OptimizationEngine:
             applicable_regimes=regimes_used if regimes_used else all_regimes,
             params=best.params,
             fitness_scores=regime_scores,
-            confidence=0.6,
+            # 审计 H2: 旧值硬编码 0.6 (与证据无关) → 适应度夹取 (各体制
+            # fitness 的稳健组合, 见 evaluate_robust)
+            confidence=confidence_from_fitness(best.fitness),
             sample_count=best.fitness_details.get('sample_count', 0),
             median_return=best.fitness_details.get('median_return', 0),
             win_rate_above_10pct=best.fitness_details.get('target_rate', 0),
@@ -1396,7 +1419,8 @@ class OptimizationEngine:
                 applicable_regimes=['BULL', 'BEAR', 'SIDEWAYS', 'CRASH', 'RECOVERY'],
                 params=final['best_params'],
                 fitness_scores={'GLOBAL': final['best_fitness']},
-                confidence=0.75,
+                # 审计 H2: 旧值硬编码 0.75 (与证据无关) → 适应度夹取
+                confidence=confidence_from_fitness(final['best_fitness']),
                 sample_count=final['best_details'].get('sample_count', 0),
                 median_return=final['best_details'].get('median_return', 0),
                 win_rate_above_10pct=final['best_details'].get('target_rate', 0),
@@ -1770,6 +1794,14 @@ class OptimizationEngine:
                          '参数选择 (以 track=False 调用, 独立 RNG 子流); '
                          '试验次数 = 参与取最大的评估次数; bootstrap 回答'
                          '"窗口抽样噪声", 不能替代 OOS 外推证据'),
+            },
+            # 审计 H2: confidence 口径 (证据派生, 非统计校准概率)
+            'confidence_policy': {
+                'formula': 'clamp01(fitness)',
+                'note': ('confidence = 适应度的 [0,1] 夹取值 (GA 实际最大化的'
+                         '目标值本身), 不是统计校准的置信概率; 供同体制'
+                         '多系统裁决使用; 旧 manifest 的硬编码值按原样'
+                         '读取, 不改写历史实验记录'),
             },
             'systems': []
         }
