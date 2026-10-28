@@ -55,6 +55,23 @@ def filter_point_in_time(financial_df: pd.DataFrame, as_of) -> pd.DataFrame:
     return financial_df.loc[mask]
 
 
+def forward_returns(close: pd.Series) -> pd.Series:
+    """构造**前瞻收益**标签 (t → t+1) —— 因子拟合的标签口径唯一真相源。
+
+    审计 H6: 因子权重拟合的标签语义必须是"因子在 t 观测到 → t+1 的收益"。
+    旧实现把 `returns` 的语义搞混: `ic_weights` 按前瞻同期配对 ✓, 而
+    `max_sharpe_weights` / `risk_parity_weights` 用
+    `factor_data[col].shift(-1) * aligned_returns` → 那是沿 **index**
+    错行一格 (把"下一**只股票**的收益"当成了"下一**期**收益"), 权重
+    结果依赖行序; `test_all_factors` 的 `.shift(1)` 同样是错行配对。
+
+    用本函数构造标签, 避免 `pct_change()`(后向收益) 被误当标签 ——
+    后向收益会让 IC 变成"因子解释已发生的收益", 看起来很好但没有预测力。
+    """
+    close = pd.Series(close).astype(float)
+    return close.shift(-1) / close - 1.0
+
+
 @dataclass
 class FactorTestResult:
     """因子测试结果"""
@@ -67,6 +84,9 @@ class FactorTestResult:
     t_stat: float            # t统计量
     p_value: float           # p值
     is_significant: bool     # 是否显著 (5%水平)
+    # 审计 H6: 口径自证 —— 'cross_section' (同期配对, 单截面, 无时序统计)
+    # / 'time_series' (滚动 IC, 需时间索引)
+    mode: str = 'cross_section'
 
 
 class FactorWeightingMethod:
@@ -77,6 +97,27 @@ class FactorWeightingMethod:
         """可用因子列：*_Score 且非全 NaN（全 NaN 列会毒化综合分）"""
         return [col for col in factors_df.columns
                 if col.endswith('_Score') and factors_df[col].notna().any()]
+
+    @staticmethod
+    def _align(factors_df: pd.DataFrame,
+               returns: pd.Series) -> tuple:
+        """因子与收益的**同期配对** (同一行 = 同一只股票/同一期)。
+
+        审计 H6: 旧实现用 `factor_data[col].shift(-1) * aligned_returns`
+        —— 那是沿 **index** 错行一格, 把"下一只股票的收益"当成了
+        "下一期的收益" → 权重结果**依赖行序**, 且含未来信息 (前瞻)。
+        本方法是全仓唯一的配对入口: 同期配对, 无 shift。
+
+        Returns:
+            (factor_data, aligned_returns) —— 双方按同一 index 对齐且无 NaN
+        """
+        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
+        if not factor_cols:
+            return factors_df.iloc[0:0], pd.Series(dtype=float)
+        factor_data = factors_df[factor_cols].dropna()
+        aligned_returns = pd.Series(returns).reindex(factor_data.index)
+        keep = aligned_returns.notna()
+        return factor_data[keep], aligned_returns[keep]
 
     @staticmethod
     def equal_weights(factors_df: pd.DataFrame) -> Dict[str, float]:
@@ -95,14 +136,22 @@ class FactorWeightingMethod:
 
     @staticmethod
     def ic_weights(factors_df: pd.DataFrame, returns: pd.Series) -> Dict[str, float]:
-        """IC 加权权重（|IC| 归一化；样本不足或总 IC 为 0 → 等权）"""
+        """IC 加权权重（|IC| 归一化；样本不足或总 IC 为 0 → 等权）
+
+        审计 H6: 同期配对 (因子[t] 对前瞻收益[t]) —— 口径由
+        `_align` 统一, 不再各写各的 shift。
+        """
         factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
 
         ics = {}
+        factor_data, aligned_returns = FactorWeightingMethod._align(
+            factors_df, returns)
         for col in factor_cols:
-            valid_idx = factors_df[col].notna() & returns.notna()
-            if valid_idx.sum() > 10:
-                ic = factors_df.loc[valid_idx, col].corr(returns.loc[valid_idx])
+            if col not in factor_data.columns:
+                ics[col] = 0.0
+                continue
+            if len(factor_data) > 10:
+                ic = factor_data[col].corr(aligned_returns)
                 ics[col] = abs(ic) if not np.isnan(ic) else 0
             else:
                 ics[col] = 0
@@ -155,24 +204,28 @@ class FactorWeightingMethod:
         """
         最大夏普比率优化权重
         优化权重使因子组合夏普比率最大（样本不足 → 等权）
-        """
-        factor_cols = FactorWeightingMethod._valid_score_cols(factors_df)
-        n_factors = len(factor_cols)
 
+        审计 H6: 因子收益 = 因子值 × **同期**前瞻收益 (同一行 = 同一只
+        股票); 旧实现沿 index 错行 shift → 结果依赖行序且含未来信息。
+        """
+        # 提取因子数据 (审计 H6: 同期配对, 无 shift)
+        factor_data, aligned_returns = FactorWeightingMethod._align(
+            factors_df, returns)
+        factor_cols = list(factor_data.columns)
+        n_factors = len(factor_cols)
         if n_factors == 0:
             return {}
-
-        # 提取因子数据
-        factor_data = factors_df[factor_cols].dropna()
         if len(factor_data) < 10:
             return FactorWeightingMethod.equal_weights(factors_df)
 
         # 计算因子收益协方差矩阵
-        aligned_returns = returns.loc[factor_data.index]
         factor_returns = pd.DataFrame()
-        for col in factor_cols:
-            # 使用因子值与下一期收益的回归系数作为因子收益
-            factor_returns[col] = factor_data[col].shift(-1) * aligned_returns
+        for col in factor_data.columns:
+            # 因子收益 = 该因子值 × 该股**前瞻收益** (同期配对: 同一行
+            # = 同一只股票/同一期)。旧实现是 `factor_data[col].shift(-1)
+            # * aligned_returns` —— 沿 index 错行一格, 把"下一只股票的
+            # 收益"当成"下一期收益" (审计 H6: 结果依赖行序 + 含未来信息)
+            factor_returns[col] = factor_data[col] * aligned_returns
 
         factor_returns = factor_returns.dropna()
         if len(factor_returns) < 10:
@@ -228,14 +281,20 @@ class FactorWeightingMethod:
         if n_factors == 0:
             return {}
 
-        # 提取因子数据
-        factor_data = factors_df[factor_cols].dropna()
+        # 提取因子数据 (审计 H6: 同期配对, 无 shift)
+        factor_data, aligned_returns = FactorWeightingMethod._align(
+            factors_df, returns)
+        factor_cols = list(factor_data.columns)
+        n_factors = len(factor_cols)
+        if n_factors == 0:
+            return {}
 
         # 计算因子收益协方差矩阵
-        aligned_returns = returns.loc[factor_data.index]
         factor_returns = pd.DataFrame()
         for col in factor_cols:
-            factor_returns[col] = factor_data[col].shift(-1) * aligned_returns
+            # 因子收益 = 因子值 × 同期前瞻收益 (审计 H6: 旧实现
+            # `.shift(-1)` 沿 index 错行 → 结果依赖行序 + 含未来信息)
+            factor_returns[col] = factor_data[col] * aligned_returns
 
         factor_returns = factor_returns.dropna()
         if len(factor_returns) < 10:
@@ -357,7 +416,8 @@ class FactorEffectivenessTester:
                 factor_name='unknown',
                 ic_mean=0, ic_std=0, ir=0,
                 ic_positive_ratio=0, rank_ic=0,
-                t_stat=0, p_value=1, is_significant=False
+                t_stat=0, p_value=1, is_significant=False,
+                mode='time_series'
             )
 
         ic_array = np.array(ic_series)
@@ -384,40 +444,110 @@ class FactorEffectivenessTester:
             rank_ic=rank_ic,
             t_stat=t_stat,
             p_value=p_value,
-            is_significant=is_significant
+            is_significant=is_significant,
+            mode='time_series'
         )
 
     @staticmethod
+    def test_factor_cross_section(factor_values: pd.Series,
+                                  returns: pd.Series,
+                                  method: str = 'pearson') -> FactorTestResult:
+        """横截面口径的因子检验 (同期配对, 单一截面)。
+
+        审计 H6: 旧 `test_all_factors` 用 `factors_df[col].shift(1)` ——
+        那是沿 **index** 错行一格 (股票轴!), 把"上一只股票的因子"当成
+        "上一期因子" → IC 完全无意义 (且随行序变化)。横截面下正确的
+        配对是**同期**: 因子[i] 对该股前瞻收益[i]。
+
+        单截面只有 1 个 IC 观测 → 时序统计量 (ic_std/ir/正值比例/t 检验)
+        **不可得**, 如实记 NaN 且 `is_significant=False` (不拿一个截面
+        假装有统计显著性)。
+        """
+        aligned = factor_values.notna() & returns.notna()
+        fv = factor_values[aligned]
+        rv = returns[aligned]
+        if len(fv) < 5:
+            return FactorTestResult(
+                factor_name='unknown', ic_mean=float('nan'),
+                ic_std=float('nan'), ir=float('nan'),
+                ic_positive_ratio=float('nan'), rank_ic=float('nan'),
+                t_stat=float('nan'), p_value=float('nan'),
+                is_significant=False, mode='cross_section')
+
+        ic = FactorEffectivenessTester.calculate_ic(fv, rv, method)
+        rank_ic = fv.rank().corr(rv.rank())
+        return FactorTestResult(
+            factor_name='factor',
+            ic_mean=ic,
+            ic_std=float('nan'),
+            ir=float('nan'),
+            ic_positive_ratio=float('nan'),
+            rank_ic=float(rank_ic) if not np.isnan(rank_ic) else float('nan'),
+            t_stat=float('nan'),
+            p_value=float('nan'),
+            is_significant=False,
+            mode='cross_section')
+
+    @staticmethod
     def test_all_factors(factors_df: pd.DataFrame, returns: pd.Series,
-                        method: str = 'pearson') -> Dict[str, FactorTestResult]:
+                         method: str = 'pearson',
+                         window: int = None) -> Dict[str, FactorTestResult]:
         """
         测试所有因子的有效性
 
+        审计 H6: 口径显式化 —— 旧实现对**同一份** `returns` 用三种配对
+        (`ic_weights` 同期 / `test_all_factors` `.shift(1)` 错行 /
+        `max_sharpe_weights` `.shift(-1)` 错行+前瞻), 互相矛盾。
+
         Args:
             factors_df: 因子DataFrame
-            returns: 收益率Series
+            returns: 收益率Series (**前瞻收益**标签, 同期配对)
             method: 相关性计算方法
+            window: None → **横截面口径** (同期配对, 单一截面, 时序统计
+                不可得 → 如实记 NaN); 给定窗口长度 → **时序口径**
+                (滚动 IC, 要求 index 为时间索引, 否则 ValueError ——
+                绝不用股票代码轴做滚动窗口)
 
         Returns:
             因子名到测试结果的字典
         """
         results = {}
 
-        factor_cols = [col for col in factors_df.columns if col.endswith('_Score') or col.endswith('_Factor')]
+        factor_cols = [col for col in factors_df.columns
+                       if col.endswith('_Score') or col.endswith('_Factor')]
+
+        time_series = window is not None
+        if time_series:
+            if not isinstance(factors_df.index, pd.DatetimeIndex):
+                raise ValueError(
+                    '时序口径 (window 指定) 要求 factors_df 的 index 为时间索引; '
+                    f'当前 index 类型={type(factors_df.index).__name__} — '
+                    '横截面请用 window=None (默认)')
 
         for col in factor_cols:
-            # 对齐数据
-            factor_values = factors_df[col].shift(1)  # 使用t-1期因子预测t期收益
+            # 同期配对 (审计 H6: 不再沿 index 错行 shift)
+            factor_values = factors_df[col]
             aligned_idx = factor_values.notna() & returns.notna()
 
-            if aligned_idx.sum() > 30:  # 至少30个有效样本
-                result = FactorEffectivenessTester.test_factor(
-                    factor_values[aligned_idx],
-                    returns[aligned_idx],
-                    method
-                )
-                result.factor_name = col
-                results[col] = result
+            if time_series:
+                if aligned_idx.sum() > 30:
+                    result = FactorEffectivenessTester.test_factor(
+                        factor_values[aligned_idx],
+                        returns[aligned_idx],
+                        method
+                    )
+                    result.factor_name = col
+                    result.mode = 'time_series'
+                    results[col] = result
+            else:
+                if aligned_idx.sum() > 5:
+                    result = FactorEffectivenessTester.test_factor_cross_section(
+                        factor_values[aligned_idx],
+                        returns[aligned_idx],
+                        method
+                    )
+                    result.factor_name = col
+                    results[col] = result
 
         return results
 
@@ -708,6 +838,9 @@ class MultiFactorSelector:
         # 存储历史IC用于IR加权
         self.ic_history: Dict[str, List[float]] = {}
 
+        # 审计 H6: 最近一次权重拟合的口径自证 (in_sample / n_fit_rows)
+        self.last_weight_fit: Dict[str, object] = {}
+
     def calculate_factors(self, financial_df: pd.DataFrame,
                          price_df: pd.DataFrame = None) -> pd.DataFrame:
         """
@@ -764,37 +897,90 @@ class MultiFactorSelector:
         return all_factors
 
     def get_composite_score(self, factors_df: pd.DataFrame,
-                           returns: pd.Series = None) -> pd.Series:
+                           returns: pd.Series = None,
+                           fitted_weights: Dict[str, float] = None,
+                           fit_returns: pd.Series = None) -> pd.Series:
         """
         计算综合得分
 
+        审计 H6 (样本内 vs 样本外): 动态加权方法的权重是用**标签**拟合的,
+        若用被评分截面自己的标签去拟合 → **样本内** (权重天然被高估,
+        选出的"最优"截面是拟合产物而非预测)。旧实现对此**完全沉默**。
+
         Args:
-            factors_df: 因子DataFrame
-            returns: 收益率数据 (用于动态加权方法)
+            factors_df: 因子DataFrame (index = 股票代码)
+            returns: 前瞻收益标签 (与 factors_df 同期配对)
+            fitted_weights: 已拟合好的权重 (来自**历史**样本) → 直接套用,
+                天然样本外, 不再就地拟合
+            fit_returns: 用于拟合的标签 (与 returns 不同期时 → 样本外拟合;
+                None → 用 returns 拟合 → **样本内**, 如实标记 + 告警)
 
         Returns:
             综合得分Series
         """
+        self.last_weight_fit = {}
+
+        # ① 外部已拟合权重 → 直接套用 (样本外)
+        if fitted_weights:
+            self.last_weight_fit = {
+                'method': 'fitted_weights',
+                'in_sample': False,
+                'n_fit_rows': 0,
+            }
+            return self.weighting_class._apply_weights(factors_df,
+                                                      fitted_weights)
+
         if self.weighting_method == 'equal':
+            self.last_weight_fit = {'method': 'equal', 'in_sample': False,
+                                     'n_fit_rows': 0}
             return self.weighting_class.equal_weight(factors_df)
 
         elif self.weighting_method == 'custom':
+            self.last_weight_fit = {'method': 'custom', 'in_sample': False,
+                                     'n_fit_rows': 0}
             return self._apply_custom_weights(factors_df)
 
-        elif self.weighting_method == 'ic' and returns is not None:
-            return self.weighting_class.ic_weighted(factors_df, returns)
-
-        elif self.weighting_method == 'ir' and returns is not None:
+        elif self.weighting_method == 'ir':
+            # IR 用历史 IC 序列 (本就是历史信息) → 样本外
+            self.last_weight_fit = {'method': 'ir', 'in_sample': False,
+                                     'n_fit_rows': len(self.ic_history)}
             return self.weighting_class.ir_weighted(factors_df, self.ic_history)
 
-        elif self.weighting_method == 'max_sharpe' and returns is not None:
-            return self.weighting_class.max_sharpe(factors_df, returns)
+        # 需要拟合标签的方法 ('ic' / 'max_sharpe' / 'risk_parity')
+        fit_src = fit_returns if fit_returns is not None else returns
+        if fit_src is None:
+            # 无标签 → 回退配置权重 (不静默用等权冒充"拟合结果")
+            self.last_weight_fit = {'method': self.weighting_method,
+                                     'in_sample': False, 'n_fit_rows': 0,
+                                     'note': '缺少拟合标签 → 回退配置权重'}
+            return self._apply_custom_weights(factors_df)
 
-        elif self.weighting_method == 'risk_parity' and returns is not None:
-            return self.weighting_class.risk_parity(factors_df, returns)
+        in_sample = fit_returns is None
+        factor_data, _ = FactorWeightingMethod._align(factors_df, fit_src)
+        self.last_weight_fit = {
+            'method': self.weighting_method,
+            'in_sample': in_sample,
+            'n_fit_rows': int(len(factor_data)),
+        }
+        if in_sample:
+            print("[WARN] 因子权重为**样本内拟合** (in-sample): 权重用被评分"
+                  "截面自己的前瞻收益拟合 → 权重天然偏乐观, 选股结果含拟合"
+                  "产物。要样本外请传 fit_returns (历史期标签) 或 "
+                  "fitted_weights (已拟合权重)")
+
+        if self.weighting_method == 'ic':
+            return self.weighting_class.ic_weighted(factors_df, fit_src)
+
+        elif self.weighting_method == 'max_sharpe':
+            return self.weighting_class.max_sharpe(factors_df, fit_src)
+
+        elif self.weighting_method == 'risk_parity':
+            return self.weighting_class.risk_parity(factors_df, fit_src)
 
         else:
-            # 未识别方法或缺少所需数据 → 使用配置权重
+            # 未识别方法 → 使用配置权重
+            self.last_weight_fit = {'method': 'fallback', 'in_sample': False,
+                                     'n_fit_rows': 0}
             return self._apply_custom_weights(factors_df)
 
     def _apply_custom_weights(self, factors_df: pd.DataFrame) -> pd.Series:
@@ -828,7 +1014,9 @@ class MultiFactorSelector:
 
     def select_stocks(self, financial_df: pd.DataFrame, price_df: pd.DataFrame = None,
                       top_n: int = 20, min_score: float = None,
-                      returns: pd.Series = None, as_of=None) -> pd.DataFrame:
+                      returns: pd.Series = None, as_of=None,
+                      fit_returns: pd.Series = None,
+                      fitted_weights: Dict[str, float] = None) -> pd.DataFrame:
         """
         选股
 
@@ -837,11 +1025,13 @@ class MultiFactorSelector:
             price_df: 价格数据 (可选)
             top_n: 返回前N只股票
             min_score: 最低得分要求 (None表示不限制)
-            returns: 收益率数据 (用于动态加权)
+            returns: 前瞻收益标签 (用于动态加权; **样本内** → 见审计 H6)
             as_of: 截止日 (必填: 只使用公告日 ≤ as_of 的财报)
+            fit_returns: 用于拟合权重的标签 (历史期 → 样本外拟合)
+            fitted_weights: 已拟合好的权重 (来自历史样本 → 直接套用)
 
         Returns:
-            选股结果DataFrame
+            选股结果DataFrame (attrs['weight_fit'] 记录权重拟合口径)
 
         Raises:
             ValueError: 缺『公告日』列或未提供 as_of (拒绝静默泄露)
@@ -855,8 +1045,10 @@ class MultiFactorSelector:
         if len(factors_df.columns) == 0:
             return pd.DataFrame()
 
-        # 计算综合得分
-        composite_score = self.get_composite_score(factors_df, returns)
+        # 计算综合得分 (审计 H6: 样本内/样本外口径显式化)
+        composite_score = self.get_composite_score(
+            factors_df, returns,
+            fitted_weights=fitted_weights, fit_returns=fit_returns)
         factors_df['Composite_Score'] = composite_score
 
         # 审计 C-P1-12: 收盘面板前置过滤 (min_price + 最新交易日缺数据;
@@ -879,6 +1071,9 @@ class MultiFactorSelector:
             selected = factors_df[factors_df['Composite_Score'] >= min_score].head(top_n)
         else:
             selected = factors_df.head(top_n)
+
+        # 审计 H6: 权重拟合口径随结果一起返回 (in_sample / n_fit_rows)
+        selected.attrs['weight_fit'] = dict(self.last_weight_fit)
 
         return selected
 
@@ -947,9 +1142,14 @@ class MultiFactorSelector:
         """
         优化因子权重
 
+        审计 H6: 权重是在**给定样本**上拟合的 —— 调用方必须保证"拟合样本"
+        与"应用样本"不重叠 (否则是样本内, 权重偏乐观)。返回的权重**不含**
+        口径信息, 应用侧请用 `get_composite_score(..., fit_returns=...)` 或
+        `fitted_weights=...` 显式声明样本外, 或接受 in_sample 标记。
+
         Args:
-            factors_df: 因子DataFrame
-            returns: 收益率数据
+            factors_df: 因子DataFrame (index = 股票代码)
+            returns: **前瞻收益**标签 (与 factors_df 同期配对)
             method: 优化方法 ('max_sharpe', 'risk_parity', 'ic', 'equal', 'custom')
 
         Returns:
@@ -1264,19 +1464,25 @@ class SmartBetaStrategy:
 
 # 便捷函数
 def multi_factor_select(financial_df, price_df=None, top_n=20, weighting_method='custom',
-                        as_of=None):
+                        as_of=None, returns=None, fit_returns=None,
+                        fitted_weights=None):
     """多因子选股（默认 'custom'：使用构造器默认 factor_weights）
 
     as_of 必填 (C-P0-7): 只使用公告日 ≤ as_of 的财报。
+    审计 H6: 动态加权方法 (ic/max_sharpe/risk_parity) 需要收益标签 ——
+    用 `returns` 拟合即**样本内** (如实标记 + 告警); 要样本外请传
+    `fit_returns` (历史期标签) 或 `fitted_weights` (已拟合权重)。
     """
     selector = MultiFactorSelector(weighting_method=weighting_method)
-    return selector.select_stocks(financial_df, price_df, top_n, as_of=as_of)
+    return selector.select_stocks(financial_df, price_df, top_n, as_of=as_of,
+                                  returns=returns, fit_returns=fit_returns,
+                                  fitted_weights=fitted_weights)
 
 
-def test_factor_effectiveness(factors_df, returns):
-    """测试因子有效性"""
+def test_factor_effectiveness(factors_df, returns, window=None):
+    """测试因子有效性 (window=None → 横截面口径; 给定窗口 → 时序口径)"""
     tester = FactorEffectivenessTester()
-    results = tester.test_all_factors(factors_df, returns)
+    results = tester.test_all_factors(factors_df, returns, window=window)
     return tester.generate_test_report(results)
 
 
