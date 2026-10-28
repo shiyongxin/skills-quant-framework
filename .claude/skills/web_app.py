@@ -183,7 +183,8 @@ def render_sidebar():
         st.subheader("导航")
         page = st.radio(
             "选择页面",
-            ["🏠 首页", "📊 数据分析", "🔙 策略回测", "💼 组合管理", "⚠️ 实时监控"],
+            ["🏠 首页", "📊 数据分析", "🔙 策略回测", "💼 组合管理",
+             "🧪 历史验证", "⚠️ 实时监控"],
             label_visibility="collapsed"
         )
 
@@ -990,6 +991,136 @@ def render_portfolio():
 
 
 # =============================================================================
+# 历史验证页面 (审计 H3: 验证链结论的 web 出口)
+# =============================================================================
+
+def _load_validation_report(path: str) -> Optional[dict]:
+    """读历史验证结果 JSON (缺失/损坏 → None, 页面如实提示)。"""
+    import json
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def render_validation():
+    """渲染历史验证页面 (审计 H3)
+
+    展示验证链的**口径自证**与结论 —— 结论必须带着"它成立的条件"一起
+    呈现: 样本外与否 (参数拟合区间 vs 验证区间)、股票池口径与幸存者
+    偏差、停牌顺延、有效样本覆盖度。
+    """
+    st.markdown('<h1 class="main-header">🧪 历史验证</h1>', unsafe_allow_html=True)
+
+    path = st.text_input(
+        "验证结果文件",
+        value="stock_data/historical_validation.json",
+        key="validation_file",
+    )
+
+    data = _load_validation_report(path)
+    if data is None:
+        st.info("尚无历史验证结果。运行 `python .claude/skills/historical_backtest_validator.py` "
+                "生成 (默认输出 stock_data/historical_validation.json)。")
+        return
+
+    st.caption(f"生成时间: {data.get('timestamp', '—')} · "
+               f"验证日期数: {data.get('n_dates', 0)}")
+
+    # ---- 口径自证 (结论的成立条件) ----
+    oos = data.get('oos') or {}
+    um = data.get('universe_meta') or {}
+    sus = data.get('suspension') or {}
+    coverage = data.get('coverage') or {}
+
+    st.subheader("口径自证")
+    c1, c2 = st.columns(2)
+    with c1:
+        if oos.get('available'):
+            st.success(f"✅ 样本外验证: {oos.get('reason', '')}")
+        elif oos.get('in_sample'):
+            st.warning(f"⚠️ 样本内验证 (非样本外): {oos.get('reason', '')}")
+        else:
+            st.error(f"❌ 无法判定样本外: {oos.get('reason', '—')}")
+        fit_s, fit_e = oos.get('param_fit_start'), oos.get('param_fit_end')
+        if fit_s and fit_e:
+            st.caption(f"参数拟合区间: {fit_s} ~ {fit_e} (优化产物落盘)")
+        pr = oos.get('pick_range') or [None, None]
+        if pr and pr[0]:
+            st.caption(f"验证区间: {pr[0]} ~ {pr[1]}")
+    with c2:
+        bias = um.get('survivorship_bias')
+        bias_txt = '是' if bias else ('否' if bias is False else '未核查')
+        st.caption(f"股票池口径: {um.get('mode') or um.get('source') or '—'} · "
+                   f"幸存者偏差: {bias_txt}")
+        st.caption(f"停牌建模: {'是' if sus.get('modeled') else '否'} · "
+                   f"顺延出场: {sus.get('deferred_picks', 0)} 次 "
+                   f"(累计 {sus.get('deferred_trading_days_total', 0)} 交易日)")
+        if coverage:
+            cov_txt = " · ".join(
+                f"{hd}天 {c.get('n_valid_picks', 0)}/{c.get('n_picks', 0)}"
+                for hd, c in coverage.items())
+            st.caption(f"有效样本覆盖: {cov_txt}")
+
+    st.divider()
+
+    # ---- 结论 ----
+    aggregate = data.get('aggregate') or {}
+    if not aggregate:
+        st.warning("本次**无验证结论** — "
+                   f"{oos.get('reason', '无可用样本外验证区间')}")
+        return
+
+    st.subheader("按持有期统计")
+    rows = []
+    for hd, s in aggregate.items():
+        rows.append({
+            '持有天数': hd,
+            '中位收益%': round(s.get('median_return', 0), 2),
+            '平均收益%': round(s.get('mean_return', 0), 2),
+            '正收益%': round(s.get('positive_rate', 0) * 100, 1),
+            '>10%概率%': round(s.get('hit_10pct_rate', 0) * 100, 1),
+            '最大%': round(s.get('best', 0), 2),
+            '最小%': round(s.get('worst', 0), 2),
+            '有效样本': f"{s.get('n_valid_picks', 0)}/{s.get('n_picks_total', 0)}",
+        })
+    st.dataframe(pd.DataFrame(rows), **st_fill_width(st.dataframe))
+
+    beat = data.get('beat_benchmark') or {}
+    if beat:
+        st.subheader("vs 沪深300买入持有")
+        for hd, pct in beat.items():
+            st.write(f"· 持有 {hd} 天: **{pct*100:.1f}%** 的推荐跑赢沪深300")
+
+    phd = data.get('primary_holding_days')
+    if phd and str(phd) in aggregate:
+        s = aggregate[str(phd)]
+        st.subheader(f"关键结论 ({phd} 天)")
+        st.write(f"· 中位收益 **{s.get('median_return', 0):+.1f}%** · "
+                 f"达标率(>10%) **{s.get('hit_10pct_rate', 0)*100:.1f}%**")
+        st.caption(f"结论基于 {s.get('n_valid_picks', 0)}/"
+                   f"{s.get('n_picks_total', 0)} 个有效样本")
+
+    picks = data.get('picks') or []
+    if picks:
+        st.subheader("历史推荐明细")
+        rows = []
+        for p in picks[:50]:
+            row = {'日期': p.get('pick_date'), '体制': p.get('regime_cn'),
+                   '体系': p.get('system_name')}
+            for hd, v in (p.get('forward_returns') or {}).items():
+                row[f"{hd}天收益%"] = round(v, 2)
+            row['有效样本'] = "/".join(
+                str(p.get('n_evaluated', {}).get(hd, 0))
+                for hd in (p.get('n_evaluated') or {}))
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), **st_fill_width(st.dataframe))
+
+
+# =============================================================================
 # 实时监控页面
 # =============================================================================
 
@@ -1229,6 +1360,8 @@ def main():
         render_backtest()
     elif page == "💼 组合管理":
         render_portfolio()
+    elif page == "🧪 历史验证":
+        render_validation()
     elif page == "⚠️ 实时监控":
         render_monitor()
 

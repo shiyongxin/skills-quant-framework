@@ -285,6 +285,10 @@ class TestValidatorUniverseMeta:
         v._universe_meta = {}
         v.systems = {}
         v.data_manager = None
+        # 审计 H3: 样本外闸门需要参数拟合区间 (否则默认严格 → 提前返回
+        # 空报告, 到不了股票池分支)
+        v._param_fit_range = {'known': True, 'data_start': '2023-01-01',
+                              'data_end': '2024-01-01', 'note': ''}
         # 只测股票池分支: 拦截 select_pick_dates 以避免真实取数
         v.select_pick_dates = lambda **kw: ['2024-03-01']
         v.detect_regime = lambda d: 'BULL'
