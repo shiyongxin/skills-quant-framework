@@ -600,43 +600,149 @@ class HistoricalDataManager:
         df = df.sort_values('symbol').reset_index(drop=True)
         return df
 
-    def get_universe(self, min_history_days: int = 5000,
-                     min_rows: int = 2000) -> list:
+    def _reference_date(self, as_of=None):
+        """股票池的**参考日** (审计 H4)。
+
+        旧实现用 `datetime.now()` → ① 同一份代码在不同时间跑出不同股票池
+        (不可复现); ② 用"今天"当基准去描述"历史" → 前视。
+
+        现改为**数据驱动**: 显式 `as_of` 优先, 否则取**缓存最新日**
+        (本地数据实际覆盖到的最新日期) —— 与 wall clock 无关, 可复现。
         """
-        获取有足够历史数据的股票池
+        if as_of is not None:
+            try:
+                return pd.Timestamp(as_of).date()
+            except (ValueError, TypeError):
+                raise ValueError(f'as_of 解析失败: {as_of!r}')
+
+        latest = None
+        for info in self.metadata.get("stocks", {}).values():
+            raw = info.get("last_date")
+            if not raw:
+                continue
+            try:
+                d = pd.Timestamp(raw).date()
+            except (ValueError, TypeError):
+                continue
+            if latest is None or d > latest:
+                latest = d
+        return latest
+
+    def _universe_meta(self, as_of=None) -> dict:
+        """股票池口径元数据 (幸存者偏差如实标记) —— 审计 H4。"""
+        stocks = self.metadata.get("stocks", {})
+        firsts, lasts = [], []
+        for info in stocks.values():
+            for key, bucket in (("first_date", firsts), ("last_date", lasts)):
+                raw = info.get(key)
+                if not raw:
+                    continue
+                try:
+                    bucket.append(pd.Timestamp(raw).date())
+                except (ValueError, TypeError):
+                    continue
+        ref = self._reference_date(as_of)
+        return {
+            'as_of': str(ref) if ref else None,
+            'n_cached_stocks': len(stocks),
+            'data_range': [str(min(firsts)) if firsts else None,
+                           str(max(lasts)) if lasts else None],
+            # 幸存者偏差: 本地缓存只含**当前在市**的股票 → 任何 as_of 口径
+            # 的股票池都缺"当时已退市"的股票 → 历史回测的收益被系统性高估。
+            # 不可消除 (需退市股历史行情), 只能**如实标记**。
+            'survivorship_bias': True,
+            'survivorship_note': ('本地缓存仅含当前在市股票; 当时已退市的'
+                                   '股票不在池内 → 股票池仍带幸存者偏差'
+                                   ' (无法用本地数据消除, 只能标记)'),
+        }
+
+    def get_universe(self, min_history_days: int = 5000,
+                     min_rows: int = 2000, as_of=None) -> list:
+        """
+        获取有足够历史数据的股票池 (审计 H4: 支持 point-in-time)
 
         Parameters:
         -----------
         min_history_days : int
-            最少历史天数(自然日)
+            最少历史天数(自然日) —— 相对 **参考日** (as_of 或缓存最新日)
         min_rows : int
             最少数据行数(交易日)
+        as_of : date or None
+            截止日。None = 当前视角 (参考日 = 缓存最新日)。
+            给出时按 **point-in-time** 判定: 该股须在 as_of 之前已上市
+            (first_date ≤ as_of − min_history_days) 且**数据覆盖到 as_of**
+            (last_date ≥ as_of) → 不含"as_of 之后才上市/才有数据"的股票
+            (前视)。缓存不覆盖 as_of → 直接报错 (部分覆盖的股票池 =
+            静默有偏的股票池)。
 
         Returns:
         --------
         list : 符合条件的股票代码列表
+
+        Raises:
+            ValueError: as_of 超出缓存覆盖范围 (拒绝静默给出偏池)
         """
         universe = []
-        cutoff_date = datetime.now() - timedelta(days=min_history_days)
+
+        ref_date = self._reference_date(as_of)
+        if ref_date is None:
+            return []
+
+        if as_of is not None:
+            # 缓存必须覆盖 as_of, 否则池子会静默缺数据 → 拒绝
+            latest = max((pd.Timestamp(i.get("last_date")).date()
+                           for i in self.metadata.get("stocks", {}).values()
+                           if i.get("last_date")), default=None)
+            if latest is None or latest < ref_date:
+                raise ValueError(
+                    f'缓存数据不覆盖 as_of={ref_date} (缓存最新 {latest}) — '
+                    '拒绝返回部分覆盖的股票池 (会静默引入偏差)')
+
+        cutoff_date = ref_date - timedelta(days=min_history_days)
 
         for sym, info in self.metadata.get("stocks", {}).items():
             row_count = info.get("row_count", 0)
             last_date_str = info.get("last_date", "")
+            first_date_str = info.get("first_date", "")
 
             if row_count < min_rows:
                 continue
 
             try:
-                last_date = datetime.strptime(last_date_str, "%Y-%m-%d")
-                if last_date < cutoff_date:
-                    continue
+                last_date = datetime.strptime(last_date_str, "%Y-%m-%d").date()
+                first_date = datetime.strptime(first_date_str, "%Y-%m-%d").date()
             except (TypeError, ValueError):
                 # 日期缺失/格式坏 → 视为数据不足, 跳过 (非意外错误)
+                continue
+
+            # 数据必须覆盖到参考日 (否则该股在参考日"不存在" —— 已退市
+            # 或数据未取到)
+            if last_date < ref_date:
+                continue
+
+            # 历史长度相对**参考日**判定 (旧实现相对 now → 前视)
+            if first_date > cutoff_date:
                 continue
 
             universe.append(sym)
 
         return sorted(universe)
+
+    def get_universe_meta(self, min_history_days: int = 5000,
+                          min_rows: int = 2000, as_of=None) -> dict:
+        """股票池 + 口径元数据 (含幸存者偏差标记) —— 审计 H4。
+
+        Returns:
+            dict: {universe, as_of, n_stocks, survivorship_bias, ...}
+        """
+        meta = self._universe_meta(as_of)
+        meta.update({
+            'min_history_days': min_history_days,
+            'min_rows': min_rows,
+        })
+        meta['universe'] = self.get_universe(min_history_days, min_rows, as_of)
+        meta['n_stocks'] = len(meta['universe'])
+        return meta
 
     def validate_integrity(self, symbol: str) -> dict:
         """
@@ -761,6 +867,8 @@ def main():
     # universe: 获取股票池
     p_universe = subparsers.add_parser('universe', help='获取有足够历史的股票池')
     p_universe.add_argument('--min-days', type=int, default=5000, help='最少历史天数')
+    p_universe.add_argument('--as-of', dest='as_of', default=None,
+                            help='point-in-time 截止日 (审计 H4: 缺省=缓存最新日)')
 
     # validate: 验证数据
     p_validate = subparsers.add_parser('validate', help='验证数据完整性')
@@ -816,8 +924,12 @@ def main():
             print("暂无缓存数据")
 
     elif args.command == 'universe':
-        universe = manager.get_universe(min_history_days=args.min_days)
-        print(f"\n符合条件的股票: {len(universe)} 只")
+        meta = manager.get_universe_meta(min_history_days=args.min_days,
+                                         as_of=args.as_of)
+        universe = meta['universe']
+        print(f"\n符合条件的股票: {len(universe)} 只 (参考日 {meta['as_of']})")
+        if meta.get('survivorship_bias'):
+            print(f"[WARN] {meta['survivorship_note']}")
         for s in universe[:20]:
             name = manager.get_stock_name(s)
             info = manager.metadata["stocks"][s]

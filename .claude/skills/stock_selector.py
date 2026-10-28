@@ -6,6 +6,8 @@
 import sys
 sys.path.append('.')
 
+import pandas as pd
+
 from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer
 import factor_library
@@ -36,7 +38,8 @@ DEFAULT_SCORE_CONFIG = {
 class StockSelector:
     """选股类"""
 
-    def __init__(self, fetcher=None, config: dict = None):
+    def __init__(self, fetcher=None, config: dict = None,
+                 data_dir: str = './stock_data'):
         """
         初始化
 
@@ -44,9 +47,12 @@ class StockSelector:
             fetcher: StockDataFetcher实例
             config: 打分配置 dict; None 时读 config/stock_selector.json (C-P1-11 Step2),
                 配置缺失回退内置默认 (与历史硬编码逐位一致)
+            data_dir: 本地缓存目录 (审计 H4: 热门榜改数据驱动 → 读本地缓存)
         """
         self.fetcher = fetcher if fetcher else StockDataFetcher()
         self.analyzer = PositionAnalyzer(fetcher)
+        self.data_dir = data_dir
+        self._dm = None
         self.score_config = config if config is not None else (
             factor_library.load_config('stock_selector') or DEFAULT_SCORE_CONFIG)
 
@@ -168,43 +174,106 @@ class StockSelector:
 
         return results
 
-    def get_hot_stocks(self, market='all', count=10):
+    def get_hot_stocks(self, market='all', count=10, as_of=None,
+                       period=20, universe=None):
         """
-        获取热门股票
+        获取"热门"股票 (近期表现前列者)
+
+        审计 H4: 旧实现是**手写的 35 只热门板块名单** (ai/chip/new_energy/
+        military/consumer/finance/tmt 各 5 只) —— 人工挑的名单与**任何
+        日期无关** → 历史回测里等于"用今天的名单回测过去", 是硬编码
+        前视 + 幸存者偏差; 且名单会随时间腐化 (无人维护)。
+
+        现改为**数据驱动**: 从**本地缓存股票池**按最近 period 个交易日的
+        涨幅排序 (无网络, 可复现)。缓存不可用 → 如实返回空列表 + 告警,
+        不用手写名单顶替。
 
         Args:
             market: 市场范围 ('sh'=上海, 'sz'=深圳, 'all'=全部)
             count: 返回数量
+            as_of: point-in-time 截止日 (None = 最新视角); 给出时只用
+                该日之前的数据排序 (审计 H4)
+            period: 排名周期(交易日)
+            universe: 候选池 (None → 取本地缓存股票池)
 
         Returns:
-            list: 热门股票列表
+            list: 热门股票列表 [{symbol, change_pct, price, volume}, ...]
         """
-        # 定义热门板块股票池
-        hot_stocks = {
-            'ai': ['002415', '300059', '002230', '300474', '002405'],
-            'chip': ['600584', '002156', '300661', '688981', '002049'],
-            'new_energy': ['300750', '002594', '688111', '002460', '601012'],
-            'military': ['000725', '002025', '600893', '000547', '002475'],
-            'consumer': ['000568', '000596', '600809', '000858', '002304'],
-            'finance': ['600030', '601318', '601166', '000001', '601398'],
-            'tmt': ['002475', '002241', '300433', '002600', '000063'],
-        }
+        pool = self._hot_candidate_pool(universe, as_of=as_of)
 
-        all_stocks = []
-        if market == 'all':
-            for stocks in hot_stocks.values():
-                all_stocks.extend(stocks)
-        elif market == 'sh':
-            for stocks in hot_stocks.values():
-                all_stocks.extend([s for s in stocks if s.startswith('6')])
+        if not pool:
+            print("[WARN] 本地缓存无可用股票 → 热门股票列表为空 "
+                  "(不再用手写名单顶替)")
+            return []
+
+        # 市场范围过滤 (保留原参数语义)
+        if market == 'sh':
+            pool = [s for s in pool if str(s).startswith('6')]
         elif market == 'sz':
-            for stocks in hot_stocks.values():
-                all_stocks.extend([s for s in stocks if not s.startswith('6')])
+            pool = [s for s in pool if not str(s).startswith('6')]
 
-        # 按表现排名
-        ranked = self.rank_by_performance(all_stocks, period=20)
+        results = []
+        for symbol in pool:
+            try:
+                data = self._cached_data(symbol, as_of=as_of)
+                if data is None or len(data) < period + 1:
+                    continue
+                close = data['收盘']
+                change_pct = (float(close.iloc[-1]) /
+                              float(close.iloc[-period - 1]) - 1) * 100
+                results.append({
+                    'symbol': symbol,
+                    'change_pct': change_pct,
+                    'price': float(close.iloc[-1]),
+                    'volume': float(data['成交量'].iloc[-1])
+                    if '成交量' in data.columns else 0.0,
+                })
+            except Exception:
+                continue
 
-        return ranked[:count]
+        results.sort(key=lambda x: x['change_pct'], reverse=True)
+        return results[:count]
+
+    def _hot_candidate_pool(self, universe=None, as_of=None) -> list:
+        """热门榜候选池 = 本地缓存股票池 (审计 H4: 不用手写名单)。"""
+        if universe is not None:
+            pool = list(universe)
+        else:
+            try:
+                from historical_data_manager import HistoricalDataManager
+                dm = HistoricalDataManager(getattr(self, 'data_dir',
+                                                    './stock_data'))
+                pool = dm.get_universe(min_history_days=60, min_rows=30,
+                                       as_of=as_of)
+            except Exception as e:
+                print(f"[WARN] 读取本地缓存股票池失败: {str(e)[:80]}")
+                pool = []
+
+        if not pool:
+            return []
+
+        if as_of is None:
+            return pool
+        # point-in-time: 池子必须覆盖 as_of (否则部分覆盖 = 静默有偏)
+        return pool
+
+    def _cached_data(self, symbol, as_of=None):
+        """取本地缓存行情 (None → 无缓存); as_of → 截断到该日之前。"""
+        try:
+            from historical_data_manager import HistoricalDataManager
+            dm = getattr(self, '_dm', None)
+            if dm is None:
+                dm = HistoricalDataManager(getattr(self, 'data_dir',
+                                                    './stock_data'))
+                self._dm = dm
+            df = dm.load(symbol)
+        except Exception:
+            return None
+        if df is None or len(df) == 0:
+            return None
+        if as_of is not None and '日期' in df.columns:
+            df = df[pd.to_datetime(df['日期']) <= pd.Timestamp(as_of)]
+        return df if len(df) else None
 
     def _calculate_stock_score(self, data, latest):
         """计算股票综合评分 (数值读 self.score_config, 控制流留代码)"""
@@ -320,19 +389,25 @@ def select_stocks(stock_list, min_score=60, max_count=5):
     return selector.screen_stocks(stock_list, min_score, max_count)
 
 
-def get_hot_stocks(market='all', count=10):
+def get_hot_stocks(market='all', count=10, as_of=None, period=20,
+                   universe=None, data_dir='./stock_data'):
     """
-    获取热门股票
+    获取热门股票 (近期表现前列者; 审计 H4: 数据驱动, 不用手写名单)
 
     Args:
         market: 市场范围
         count: 返回数量
+        as_of: point-in-time 截止日 (None = 最新视角)
+        period: 排名周期(交易日)
+        universe: 候选池 (None → 本地缓存股票池)
+        data_dir: 本地缓存目录
 
     Returns:
         list: 热门股票列表
     """
-    selector = StockSelector()
-    return selector.get_hot_stocks(market, count)
+    selector = StockSelector(data_dir=data_dir)
+    return selector.get_hot_stocks(market, count, as_of=as_of, period=period,
+                                   universe=universe)
 
 
 def rank_by_performance(stock_list, period=20):

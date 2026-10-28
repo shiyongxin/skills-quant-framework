@@ -65,6 +65,8 @@ class ValidationReport:
     beat_benchmark: dict          # {holding_days: pct_stocks_beat_csi300}
     # 停牌建模口径 (审计 H5): 持有期按交易日计 → 停牌顺延如实记录
     suspension: dict = field(default_factory=dict)
+    # 股票池口径 (审计 H4): point-in-time 参考日 + 幸存者偏差标记
+    universe_meta: dict = field(default_factory=dict)
 
 
 class HistoricalBacktestValidator:
@@ -89,6 +91,7 @@ class HistoricalBacktestValidator:
         self.cost_model = CostModel()  # 前向收益统一扣减A股往返成本
         self.systems = {}  # {regime: IndicatorSystem}
         self._calendar = None  # 审计 H5: 交易日历 (由指数行情反推, 懒加载)
+        self._universe_meta = {}   # 审计 H4: 股票池口径 (幸存者偏差标记)
         self._suspension_stats = {
             'modeled': False,
             'deferred_picks': 0,       # 因停牌顺延出场的选股次数
@@ -449,7 +452,8 @@ class HistoricalBacktestValidator:
 
     def validate(self, n_dates=30, top_n=10,
                  holding_days_list=None,
-                 universe=None) -> ValidationReport:
+                 universe=None,
+                 universe_as_of=None) -> ValidationReport:
         """
         运行历史回测验证
 
@@ -463,6 +467,9 @@ class HistoricalBacktestValidator:
             持有天数列表, 默认 [90, 180, 270, 365, 540]
         universe : list or None
             股票池, None则用全部可用股票
+        universe_as_of : date or None
+            股票池的 point-in-time 截止日 (审计 H4: 缺省=缓存最新日;
+            历史验证应给历史日期 → 池子不含"当时还没上市"的股票)
         """
         if holding_days_list is None:
             holding_days_list = [90, 180, 270, 365, 540]
@@ -475,8 +482,22 @@ class HistoricalBacktestValidator:
 
         # 股票池
         if universe is None:
-            universe = self.data_manager.get_universe(min_rows=2000)
+            # 审计 H4: point-in-time 股票池 + 幸存者偏差如实标记
+            try:
+                meta = self.data_manager.get_universe_meta(min_rows=2000,
+                                                            as_of=universe_as_of)
+            except (AttributeError, TypeError):
+                meta = None
+            if meta:
+                universe = meta['universe']
+                self._universe_meta = meta
+            else:
+                universe = self.data_manager.get_universe(min_rows=2000)
         print(f"[INFO] 股票池: {len(universe)} 只")
+        if getattr(self, '_universe_meta', None):
+            m = self._universe_meta
+            print(f"[INFO] 股票池参考日: {m.get('as_of')} "
+                  f"| 幸存者偏差: {'是' if m.get('survivorship_bias') else '否'}")
 
         picks = []
 
@@ -586,6 +607,8 @@ class HistoricalBacktestValidator:
             beat_benchmark=beat_benchmark,
             # 审计 H5: 停牌建模口径 (持有期按交易日计 + 顺延记录)
             suspension=dict(self._stats()),
+            # 审计 H4: 股票池口径 (point-in-time 参考日 + 幸存者偏差标记)
+            universe_meta=dict(getattr(self, '_universe_meta', {}) or {}),
         )
 
     def format_report(self, report: ValidationReport) -> str:
@@ -708,6 +731,8 @@ def main():
         'beat_benchmark': report.beat_benchmark,
         # 审计 H5: 停牌建模口径 (持有期按交易日计 + 顺延记录)
         'suspension': report.suspension,
+        # 审计 H4: 股票池口径 (point-in-time 参考日 + 幸存者偏差标记)
+        'universe_meta': report.universe_meta,
         'system_breakdown': report.system_breakdown,
         'picks': [
             {
