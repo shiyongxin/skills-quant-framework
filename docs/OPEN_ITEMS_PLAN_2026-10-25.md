@@ -103,7 +103,7 @@
 ## 4. 批次 3 —— 研究有效性（高影响，**需先拍板再动手**）
 
 > 这一批不是"写错了"，是"**这套系统的回测结论目前不能当真**"。改完之后历史结论与现有产出**不可比**。
-> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；**H10 已落地**（2026-10-26，见下方明细）；**H2 已落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
+> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；**H10 已落地**（2026-10-26，见下方明细）；**H2 已落地**（2026-10-26，见下方明细）；**H5 已落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
 
 | # | 问题 | 证据 | 性质 |
 |---|---|---|---|
@@ -113,9 +113,9 @@
 | **H6** ✅ | 多因子权重拟合仍**样本内 + 前瞻收益**（`shift(-1)`），且与 `shift(1)` 的打分口径**互相矛盾** | `multi_factor_selection.py:176`/`:239` `shift(-1)` vs `:411` `shift(1)` —— 口径自相矛盾 | 因子层是选股入口，影响面大 |
 | ~~**H2**~~ | ~~`confidence` 是**硬编码常数**（`0.7`/`min(0.9, fitness*1.2)`/`0.6`/`0.75`），却被 `daily_signal_generator` 当作**生产参数体系的唯一挑选依据**~~ → **✅ 已修（证据派生）** | 复验确认属实：4 个构造点的 confidence 与任何证据无关（全局/稳健/迭代是纯常数，体制路径是无出处的 `×1.2` 放大），`daily_signal_generator.load_systems:363` 用它裁决同体制多系统的取舍 | 已修 + `tests/test_h2_confidence.py` 16 用例；明细见下方说明 |
 | ~~**H10**~~ | ~~优化结果无**多重检验校正 / 稳健性证据**：`save_results` 落盘无试验次数、最优 fitness 在随机基线上的分位数、Top-10 参数离散度、bootstrap 置信区间。而 `optimize_global` 3200 次 / `iterative` ~7000 次回测量级~~ → **✅ 已修（稳健性证据落盘）** | 复验确认属实：落盘仅 `seed`/`n_stocks`/`fitness_weights`/`param_space`/`ga_runs` —— 无试验次数/分位数/bootstrap | 已修 + `tests/test_h10_robustness.py` 32 用例；明细见下方说明 |
-| **H5** | 停牌建模**只落在信号层**（`trade_constraints` + `core/trading_calendar.py`），4 套回测引擎侧**完全没接** —— "停牌期间持仓无法平仓"未建模 | `rg 停牌\|suspend` 在 `backtest_framework`/`vectorized_backtest`/`reversal_backtest`/`historical_backtest_validator` → **0 命中**；`execution_model.py:13-14` docstring 自述"停牌: 数据侧无停牌标记" | ✅ 已复验 |
+| ~~**H5**~~ | ~~停牌建模**只落在信号层**（`trade_constraints` + `core/trading_calendar.py`），4 套回测引擎侧**完全没接** —— "停牌期间持仓无法平仓"未建模~~ → **✅ 已修（引擎侧停牌建模）** | 复验确认属实：`rg 停牌\|suspend` 在 `backtest_framework`/`vectorized_backtest`/`reversal_backtest`/`historical_backtest_validator` → **0 命中**；`execution_model.py` docstring 自述"停牌: 数据侧无停牌标记 …… 不虚构交易日历" | 已修 + `tests/test_h5_suspension.py` 29 用例；明细见下方说明 |
 
-**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H10（只改落盘）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H2（编造常数参与生产裁决）~~ **✅ 已做（2026-10-26，见下方明细）**；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计；H5 停牌建模需先定引擎侧方案。
+**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H10（只改落盘）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H2（编造常数参与生产裁决）~~ **✅ 已做（2026-10-26，见下方明细）**；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计；~~H5（引擎侧停牌建模）~~ **✅ 已做（2026-10-26，见下方明细）**。
 
 **H1 修复明细（2026-10-26，真样本外隔离）**：
 
@@ -160,6 +160,20 @@
 
 效果：生产裁决依据从"编造的常数"变为"GA 实际最大化的适应度"——同一份 manifest 下，旧实现里**专用型系统几乎恒胜**（`min(0.9, f*1.2)` 常 ≥ 全局常数 0.7），现按证据裁决（适应度低的专用系统不再顶掉适应度高的全局系统）。
 
+**H5 修复明细（2026-10-26，引擎侧停牌建模）**：
+
+| 环节 | 做法 |
+|---|---|
+| ① 单一真相源 | 新建 `core/suspension.py`：`SuspensionModel` 由**真实交易日历** + 个股行情行推导真停牌日（个股在日历中有、自身无行）→ 复用 `TradingCalendar.missing_trading_days`（日历经已排除节假日，不误伤）；`trading_day_index()` 给出交易日→bar 的**前向填充**映射（停牌日沿用上一根 bar，无价格即无 P&L，精确口径） |
+| ② 引擎 A | `BacktestEngine.run(..., trading_calendar=)`：停牌日不撮合（挂单顺延、止损止盈跳过）+ **净值曲线按交易日对齐**（停牌日市值持平）→ 年化分母用交易日数、夏普按每交易日口径 → 修正停牌导致的**年化/夏普虚高**；逐笔记录 `suspended_days`；结果增 `suspension_modeled`/`suspension_days`/`suspension_blocked_bars`/`equity_aligned_to_trading_days` |
+| ③ 引擎 B | `VectorizedBacktester.backtest(..., trading_calendar=)`：`metrics_from_trades` 增 `trading_day_index` 参数（可选）→ 年化分母用交易日数、日频收益按交易日对齐（停牌日 0 收益）；`TradeDetail.suspended_days` + `BacktestMetrics.suspension_days`/`suspension_trading_days` |
+| ④ 引擎 D | `ReversalBacktester.backtest_single(..., trading_calendar=)`：停牌日不撮合；**期末停牌 → 不可平仓 → 按盯市计入收益**（不虚构成交、不计卖出费用）；结果增 `suspension_modeled`/`suspension_days`/`suspension_blocked_bars`/`suspension_holding_days` |
+| ⑤ 引擎 E | `HistoricalBacktestValidator.calculate_forward_return(..., trading_calendar=)`：持有期由**个股 bar 数**改为**交易日**（旧实现 `actual_days = min(holding_days, len(stock_data)-1)` → 停牌把窗口静默拉长，60 根 bar 可能横跨 75 个交易日 → 不同个股实际持有期不可比、"持有 N 天"名不副实）；到期日停牌 → 顺延到下一个可交易日（现实：卖不掉只能继续持有），顺延交易日数如实记录进 `ValidationReport.suspension`；无指数数据 → 无日历 → **如实回退旧口径**（不臆造日历） |
+| ⑥ 诚实边界 | **无日历 = 不建模**（`suspension_modeled=False`），默认路径与旧版**逐位一致**（黄金快照未变）；日历**显式传入**（不隐式取全局日历 —— 否则回测结果依赖环境文件，破坏 E-P0-3 可复现性）；停牌日**不补成平盘行再算指标**（那会让 MA/RSI 窗口被假 bar 污染，指标仍在真实 bar 上算，只把**时间轴**换成交易日轴） |
+| ⑦ 门禁 | `tests/test_h5_suspension.py` 29 用例：core 语义（真停牌日推导/节假日不误伤/前向填充映射）+ 引擎 A/B/D/E 行为（建模开关、总收益与回撤不变、年化按交易日修正、逐笔敞口、期末不可平仓、顺延记录）+ 源码级门禁（4 引擎签名均含 `trading_calendar`、默认 None 不隐式取日历、`execution_model` docstring 的旧自述必须更新、4 引擎统一走 `core/suspension.py`） |
+
+关键修复（此前被静默压扁的口径）：**年化收益/夏普的分母**。旧实现按 **bar 数**计（`252/days`、`years = n/252`）→ 停牌 10 天真实时间流逝了，引擎却当没发生 → 年化与夏普**虚高**。现按**交易日**计（停牌日市值持平、收益率 0），实测同一份数据：引擎 A 年化 −10.08% → **−8.66%**，引擎 B 年化 −4.86% → **−4.59%**（总收益与最大回撤逐位不变 —— 停牌不产生价格）。
+
 ---
 
 ## 5. 批次 4 —— 工程基座与副本治理（需先定方向）
@@ -198,7 +212,7 @@ historical_data_mgr    189 行分歧      backtest_framework      70 行
 
 | AGENTS.md 记载 | 本文档对应 | 状态 |
 |---|---|---|
-| 停牌建模根本限制（无指数数据即无日历） | §2 H5 | 仍开（信号层已落地，撮合层未落地） |
+| 停牌建模根本限制（无指数数据即无日历） | §2 H5 | **部分收口**（2026-10-26）：引擎侧已落地（`core/suspension.py` + 4 引擎接线），但**无日历 = 不建模**（`suspension_modeled=False`，如实标记）—— 根本限制仍在：日历来源仍依赖指数数据/本地缓存 |
 | 线上历史数据批量重取（除权跳空只标记不改写） | — | 仍开。依赖网络与磁盘；`data_cleaner.py` 已就位 |
 | 3-way stock-selection unification | §4 H4/H6 | 部分落地（打分引擎按用户决策保持分立）；残留 = 因子层 point-in-time + 权重拟合口径 |
 | `technical_analyzer` signals 缺 shift(1) | ⚠️ B L3/L4（`position_analyzer` 连声明都没有） | 仍开（advisory-only，已文档化） |

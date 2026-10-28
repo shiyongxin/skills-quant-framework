@@ -21,6 +21,7 @@ import numpy as np
 from typing import List, Dict, Callable, Optional
 
 from core import metrics as _core_metrics
+from core import suspension as _suspension
 from core.indicators import (rsi as _core_rsi, atr as _core_atr,
                               true_range as _core_true_range, sma as _core_sma,
                               macd as _core_macd, bollinger as _core_bollinger)
@@ -134,10 +135,15 @@ class BacktestEngine:
         self.equity = []
         self.daily_values = []
         self.pending_order = None
+        # 审计 H5: 停牌建模状态 (无日历 → None = 不建模)
+        self.suspension = None
+        self.suspension_blocked_bars = 0
+        self.suspension_blocked_liquidations = 0
 
     def run(self, data: pd.DataFrame, strategy: Callable,
             symbol: str = "STOCK",
-            warmup_data: pd.DataFrame = None) -> Dict:
+            warmup_data: pd.DataFrame = None,
+            trading_calendar=None) -> Dict:
         """
         运行回测
 
@@ -148,6 +154,12 @@ class BacktestEngine:
             warmup_data: 可选的窗口前历史 (审计 B25/H9①)
                 策略可见这段历史 (指标预热, 不再冷启动), 但**账户从窗口第一根
                 bar 开始交易** (空仓起步, 不带入预热期盈亏)
+            trading_calendar: 可选的交易日历 (审计 H5)
+                提供后启用停牌建模: 停牌日不撮合 + 净值曲线按**交易日**
+                对齐 (停牌日沿用上一市值) → 年化/Sharpe 分母不再被停牌
+                压扁 (旧实现按 bar 数算 → 停牌期被当作没发生, 年化虚高)。
+                **不提供 = 不建模** (如实记 suspension_modeled=False),
+                行为与旧版逐位一致。
 
         Returns:
             回测结果字典
@@ -174,6 +186,13 @@ class BacktestEngine:
         self.capacity_checked = bool(
             ('成交额' in window.columns) or ('成交量' in window.columns))
 
+        # 停牌建模 (审计 H5): 由**真实交易日历** + 个股行情行推导真停牌日。
+        # 无日历 → 不建模 (如实记 suspension_modeled=False), 行为与旧版一致。
+        self.suspension = _suspension.SuspensionModel.build(
+            trading_calendar, window['日期'].tolist())
+        self.suspension_blocked_bars = 0
+        self.suspension_blocked_liquidations = 0
+
         pending = None
 
         for i in range(1, len(window)):
@@ -181,12 +200,25 @@ class BacktestEngine:
             current_date = current_bar['日期']
             prev_close = window['收盘'].iloc[i - 1]
 
+            # 0) 停牌日不撮合 (审计 H5): 数据里若出现"日历判定为停牌"的行
+            #    (陈旧/脏数据), 该 bar 不可成交 —— 挂单顺延, 止损止盈跳过
+            tradable = True
+            if self.suspension is not None:
+                tradable = self.suspension.is_tradable(current_date)
+                if not tradable:
+                    self.suspension_blocked_bars += 1
+
             # 1) t+1 撮合: 上一根收盘产生的信号在本根开盘成交（含涨跌停拦截）
             if pending is not None:
-                pending = self._fill_pending(symbol, current_bar, prev_close, pending)
+                if tradable:
+                    pending = self._fill_pending(symbol, current_bar,
+                                                prev_close, pending)
+                # 停牌 → 挂单顺延 (ttl 按 bar 递减, 复牌后仍有效)
 
             # 2) 日内止损止盈（本根开盘刚成交的持仓同样有效；涨跌停封板不可卖出）
-            self._check_stop_loss_take_profit(symbol, current_bar, prev_close, code=symbol)
+            if tradable:
+                self._check_stop_loss_take_profit(symbol, current_bar,
+                                                  prev_close, code=symbol)
 
             # 3) 策略信号（本根收盘判定 → 排队至下一根开盘）
             #    策略可见预热段 + 窗口内至当根 (无预热时与旧版逐位一致)
@@ -364,7 +396,9 @@ class BacktestEngine:
                 'shares': shares,
                 'cost': cost,
                 'fee': fee,
-                'stop_loss': stop_loss_price
+                'stop_loss': stop_loss_price,
+                # 审计 H5: 持仓跨停牌的交易日数 (卖出时回填, 买入时为 0)
+                'suspended_days': 0
             })
             return None
 
@@ -424,6 +458,12 @@ class BacktestEngine:
         fee = self.cost_model.sell_cost(sell_price, position.shares)
         proceeds = position.shares * sell_price - fee
 
+        # 审计 H5: 持仓期间跨越的停牌交易日数 (跳空敞口的可见化)
+        suspended_days = 0
+        if getattr(self, 'suspension', None) is not None:
+            suspended_days = self.suspension.suspended_days_between(
+                position.entry_date, date)
+
         self.trades.append({
             'date': date,
             'symbol': symbol,
@@ -434,11 +474,48 @@ class BacktestEngine:
             'fee': fee,
             'entry_price': position.entry_price,
             'pnl_pct': (sell_price / position.entry_price - 1) * 100,
-            'reason': reason
+            'reason': reason,
+            'suspended_days': suspended_days
         })
 
         self.cash += proceeds
         del self.positions[symbol]
+
+    def _align_equity_to_trading_days(self, equity_df: pd.DataFrame):
+        """把净值曲线对齐到交易日历 (停牌日沿用上一市值) —— 审计 H5。
+
+        停牌日个股无价格 → 市值不变 (无 P&L)。旧实现只按**bar 数**做
+        时间轴 (年化分母 252/days、夏普按 bar 收益年化) → 停牌期被
+        当作"没发生", 年化收益与夏普被虚高。对齐后:
+        - 时间轴 = 交易日数 (停牌日计入分母, 市值持平);
+        - 日收益率 = 每**交易日**口径 → 夏普不再被停牌稀释/虚高;
+        - 最大回撤不变 (停牌日无新价格, 不产生回撤)。
+
+        Returns:
+            (aligned_df, aligned_flag) —— 无日历/无模型时原样返回
+        """
+        model = getattr(self, 'suspension', None)
+        if model is None or len(equity_df) == 0:
+            return equity_df, False
+        try:
+            dates = pd.to_datetime(equity_df['date']).dt.date
+        except (ValueError, TypeError):
+            return equity_df, False
+        trading_days = model.calendar.trading_days_between(
+            dates.iloc[0], dates.iloc[-1])
+        if not trading_days:
+            return equity_df, False
+        have = np.array(pd.to_datetime(list(dates)).values)
+        want = np.array(pd.to_datetime(list(trading_days)).values)
+        # 每个交易日取"当日或之前最近一根 bar"的市值 (停牌日 → 沿用上一根)
+        idx = np.clip(np.searchsorted(have, want, side='right') - 1,
+                      0, len(equity_df) - 1)
+        aligned = pd.DataFrame({
+            'date': [pd.Timestamp(d) for d in trading_days],
+            'cash': equity_df['cash'].values[idx],
+            'value': equity_df['value'].values[idx],
+        })
+        return aligned, True
 
     def _get_results(self, data: pd.DataFrame, symbol: str) -> Dict:
         """计算回测结果"""
@@ -447,6 +524,10 @@ class BacktestEngine:
 
         if len(equity_df) == 0:
             return {}
+
+        # 审计 H5: 净值曲线按**交易日**对齐 (停牌日市值持平) → 年化/夏普
+        # 分母不再被停牌压扁; 无日历 → 不对齐 (与旧版逐位一致)
+        equity_df, equity_aligned = self._align_equity_to_trading_days(equity_df)
 
         final_value = equity_df['value'].iloc[-1]
         total_return = (final_value / self.initial_cash - 1) * 100
@@ -549,6 +630,15 @@ class BacktestEngine:
             'symbol': symbol,
             'initial_cash': self.initial_cash,
             'capacity_checked': bool(getattr(self, 'capacity_checked', True)),
+            # 审计 H5: 停牌建模口径 (无日历 → modeled=False, 如实)
+            'suspension_modeled': bool(self.suspension is not None),
+            'suspension_days': (len(self.suspension.suspended_days)
+                                if self.suspension is not None else 0),
+            'suspension_blocked_bars': int(
+                getattr(self, 'suspension_blocked_bars', 0)),
+            'suspension_blocked_liquidations': int(
+                getattr(self, 'suspension_blocked_liquidations', 0)),
+            'equity_aligned_to_trading_days': bool(equity_aligned),
             'final_value': final_value,
             'total_return': total_return,
             'annualized_return': annualized_return * 100,
@@ -1238,7 +1328,8 @@ def get_kelly_config() -> PositionConfig:
 def run_backtest(data: pd.DataFrame, strategy: Callable,
                  symbol: str = "STOCK", initial_cash: float = 100000,
                  position_config: PositionConfig = None,
-                 report_type: str = 'standard') -> Dict:
+                 report_type: str = 'standard',
+                 trading_calendar=None) -> Dict:
     """
     运行回测的便捷函数
 
@@ -1249,13 +1340,14 @@ def run_backtest(data: pd.DataFrame, strategy: Callable,
         initial_cash: 初始资金
         position_config: 持仓配置
         report_type: 报告类型
+        trading_calendar: 可选的交易日历 (审计 H5) → 启用停牌建模
 
     Returns:
         回测结果
     """
     config = position_config or get_balanced_config()
     engine = BacktestEngine(initial_cash=initial_cash, position_config=config)
-    results = engine.run(data, strategy, symbol)
+    results = engine.run(data, strategy, symbol, trading_calendar=trading_calendar)
     PerformanceReport.generate_report(results, report_type)
     return results
 

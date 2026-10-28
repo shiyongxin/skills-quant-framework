@@ -22,6 +22,7 @@ from execution_model import (CostModel, buy_open_ok, sell_open_ok, sell_intraday
                             DEFAULT_MAX_VOLUME_PARTICIPATION, capacity_limit_notional)
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
+from core import suspension as _core_suspension
 
 # 信号 warmup 上限 (审计 B23/H8③): _generate_signals 的 warmup 恒 ≤ 此值,
 # walk_forward 用它作为窗口前历史段长度, 保证 warmup 只落在历史段
@@ -47,6 +48,9 @@ class BacktestMetrics:
     avg_return_per_trade: float = 0.0  # 平均每笔收益(%)
     max_consecutive_losses: int = 0 # 最大连续亏损笔数 (交易序列口径, 审计 B48/M1)
     max_consecutive_wins: int = 0   # 最大连续盈利笔数 (交易序列口径, 审计 B48/M1)
+    # 审计 H5: 停牌建模口径 (0 = 未建模/无停牌; 交易日数口径)
+    suspension_days: int = 0        # 区间内真停牌交易日数
+    suspension_trading_days: int = 0  # 交易日轴长度 (0 = 按 bar 口径)
 
 
 @dataclass
@@ -60,10 +64,12 @@ class TradeDetail:
     holding_days: int
     exit_reason: str        # "stop_loss" / "take_profit" / "signal" / "end"
     position_pct: float = 0.0  # 本笔实际仓位比例 (成交容量约束可能小于配置值)
+    suspended_days: int = 0   # 本笔持仓跨越的停牌交易日数 (审计 H5)
 
 
 def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
-                        position_size_pct) -> BacktestMetrics:
+                        position_size_pct,
+                        trading_day_index=None) -> BacktestMetrics:
     """从交易序列构建 BacktestMetrics（指标口径统一真相源, 审计 E-P1）。
 
     - 盈亏比: core 求和式; 最大回撤: core 正值% (日频盯市净值, 非逐笔序列)
@@ -76,6 +82,10 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     - position_size_pct: 标量(统一仓位比例) 或**逐笔数组** (成交容量约束
       导致部分成交时每笔比例不同, 审计 B14/H7)。全部相等时走标量路径,
       数值与旧版逐位一致。
+    - trading_day_index (审计 H5, 可选): 交易日 → bar 下标的前向填充映射。
+      给定时时间轴换成**交易日轴**: 年化分母用交易日数, 夏普/回撤的
+      日频序列按交易日对齐 (停牌日市值持平, 不再被当作"没发生") →
+      修正停牌导致的年化/夏普虚高。None → 旧口径 (bar 数), 逐位不变。
     """
     pnl_arr = np.asarray(pnl_arr, dtype=np.float64)
     holding_arr = np.asarray(holding_arr, dtype=np.float64)
@@ -108,7 +118,12 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     total_return = (cumulative[-1] - 1) * 100 if len(cumulative) > 0 else 0
 
     # 年化收益
-    years = n / 252
+    # 审计 H5: 给定交易日映射 → 年化分母用**交易日数** (停牌期计入分母);
+    # 未给 → 旧口径 (bar 数), 与旧版逐位一致
+    n_periods = n
+    if trading_day_index is not None and len(trading_day_index) > 0:
+        n_periods = int(len(trading_day_index))
+    years = n_periods / 252
     if years > 0 and cumulative[-1] > 0:
         annualized_return = (cumulative[-1] ** (1 / years) - 1) * 100
     else:
@@ -144,6 +159,32 @@ def metrics_from_trades(pnl_arr, holding_arr, trade_spans, close, open_arr,
     # 夏普(core口径: 日频盯市收益, 年化252, rf=3%, ddof=1)
     sharpe = _core_metrics.sharpe_ratio(daily_ret * held,
                                         periods_per_year=252, rf=0.03)
+
+    # 审计 H5: 时间轴换成**交易日轴** —— 停牌日个股无价格 → 市值持平,
+    # 收益率为 0 (精确口径: 前向填充)。旧实现按 bar 数计年化、bar 收益
+    # 年化夏普 → 停牌期被当作"没发生", 年化/夏普虚高。
+    if trading_day_index is not None and len(trading_day_index) > 0:
+        tdi = np.asarray(trading_day_index, dtype=np.int64)
+        tdi = np.clip(tdi, 0, n - 1)
+        # 每交易日的盯市净值 (停牌日 → 沿用上一根 bar)
+        aligned_mtm = mtm[tdi + 1]
+        # 每交易日的**价格**收益 (停牌日 → 0; 复牌日的跳空落在复牌日)
+        aligned_close = close[tdi]
+        aligned_ret = np.zeros(tdi.size, dtype=np.float64)
+        if tdi.size > 1:
+            aligned_ret[1:] = aligned_close[1:] / aligned_close[:-1] - 1
+        # 保留入场日/出场日的 bar 级调整 (开盘→收盘 / 隔夜跳空)
+        for e, x in trade_spans:
+            pos_e = int(np.searchsorted(tdi, e, side='left'))
+            pos_x = int(np.searchsorted(tdi, x, side='left'))
+            if 0 <= pos_e < tdi.size:
+                aligned_ret[pos_e] = daily_ret[e]
+            if 0 <= pos_x < tdi.size:
+                aligned_ret[pos_x] = daily_ret[x]
+        aligned_held = held[tdi]
+        max_drawdown = _core_metrics.max_drawdown_pct(aligned_mtm)
+        sharpe = _core_metrics.sharpe_ratio(aligned_ret * aligned_held,
+                                            periods_per_year=252, rf=0.03)
 
     # 最大连胜/连亏 (core 统一口径: **交易序列**, breakeven 不算赢也不算亏,
     # 旧实现用 pnl<=0 把 breakeven 当亏损 → 与引擎 A 分歧, 审计 B48/M1)
@@ -255,7 +296,8 @@ class VectorizedBacktester:
         self.cost_model = CostModel.from_engine(commission, slippage)
 
     def backtest(self, data: pd.DataFrame, params: dict,
-                 history: pd.DataFrame = None) -> BacktestMetrics:
+                 history: pd.DataFrame = None,
+                 trading_calendar=None) -> BacktestMetrics:
         """
         对单只股票运行回测
 
@@ -273,6 +315,11 @@ class VectorizedBacktester:
             窗口前历史段。给定时与 data 拼接后计算指标与信号 —— 每窗重置的
             warmup 只落在历史段 (段长 ≥ warmup 上限 60 时窗口内信号不被清零),
             再切回 data 段模拟交易。None 时行为与旧版逐位一致。
+        trading_calendar : optional (审计 H5)
+            交易日历。给定时启用停牌建模: 指标时间轴换成**交易日轴**
+            (年化分母用交易日数, 夏普按交易日对齐) → 修正停牌导致的
+            年化/夏普虚高; 逐笔记录持仓跨停牌的交易日数。
+            None → 不建模 (与旧版逐位一致)。
 
         Returns:
         --------
@@ -296,9 +343,11 @@ class VectorizedBacktester:
             signals = self._generate_signals(df, params)
 
         # Step 3: 模拟交易
-        return self._simulate_trades(df, signals, params)
+        return self._simulate_trades(df, signals, params,
+                                     trading_calendar=trading_calendar)
 
-    def backtest_batch(self, stock_data_dict: dict, params: dict) -> pd.DataFrame:
+    def backtest_batch(self, stock_data_dict: dict, params: dict,
+                       trading_calendar=None) -> pd.DataFrame:
         """
         同一参数回测多只股票
 
@@ -316,7 +365,8 @@ class VectorizedBacktester:
         results = []
         for symbol, data in stock_data_dict.items():
             try:
-                metrics = self.backtest(data, params)
+                metrics = self.backtest(data, params,
+                                        trading_calendar=trading_calendar)
                 result = {
                     'symbol': symbol,
                     'total_return': metrics.total_return,
@@ -328,6 +378,8 @@ class VectorizedBacktester:
                     'num_trades': metrics.num_trades,
                     'avg_holding_days': metrics.avg_holding_days,
                     'avg_return_per_trade': metrics.avg_return_per_trade,
+                    # 审计 H5: 停牌建模口径
+                    'suspension_days': metrics.suspension_days,
                 }
                 results.append(result)
             except Exception:
@@ -500,9 +552,12 @@ class VectorizedBacktester:
 
         return signals
 
-    def backtest_with_details(self, data: pd.DataFrame, params: dict) -> tuple:
+    def backtest_with_details(self, data: pd.DataFrame, params: dict,
+                              trading_calendar=None) -> tuple:
         """
         回测并返回交易详情 (用于按体制过滤)
+
+        trading_calendar: 可选交易日历 (审计 H5) → 启用停牌建模
 
         Returns:
         --------
@@ -513,10 +568,12 @@ class VectorizedBacktester:
 
         df = self._compute_indicators(data, params)
         signals = self._generate_signals(df, params)
-        return self._simulate_trades(df, signals, params, return_details=True)
+        return self._simulate_trades(df, signals, params, return_details=True,
+                                     trading_calendar=trading_calendar)
 
     def _simulate_trades(self, df: pd.DataFrame, signals: pd.Series,
-                         params: dict, return_details=False) -> BacktestMetrics:
+                         params: dict, return_details=False,
+                         trading_calendar=None) -> BacktestMetrics:
         """
         模拟交易并计算指标 (t+1 开盘撮合 + A股完整成本 + 涨跌停约束)
 
@@ -531,6 +588,9 @@ class VectorizedBacktester:
         - 止盈: 最小持有期后日内触发, 跳空按开盘成交
         - 卖讯: 下一根开盘成交, 开盘跌停则顺延至下一个可成交卖讯
         - 成本: 滑点+佣金+过户费(买) / 另加印花税(卖); 持有天数按自然日计
+        - 停牌建模 (审计 H5): 给定交易日历时, 指标时间轴换成交易日轴
+          (年化分母/夏普按交易日) + 逐笔记录持仓跨停牌的交易日数;
+          撮合本身不变 (停牌日个股无 bar → 天然无成交)
         """
         stop_loss_pct = float(params.get('stop_loss_pct', 0.08))
         take_profit_pct = float(params.get('take_profit_pct', 0.20))
@@ -567,6 +627,13 @@ class VectorizedBacktester:
             turnover_arr = df['成交量'].values.astype(np.float64) * close
 
         dates = pd.to_datetime(df['日期']).values if '日期' in df.columns else None
+
+        # 停牌建模 (审计 H5): 交易日 → bar 的前向填充映射 (停牌日沿用上一根)
+        tdi = _core_suspension.trading_day_index(trading_calendar, dates)
+        susp_model = _core_suspension.SuspensionModel.build(
+            trading_calendar,
+            pd.to_datetime(df['日期']).dt.date.tolist()
+            if '日期' in df.columns else [])
 
         def _empty():
             # return_details 时须始终返回 (metrics, details) 元组, 否则调用方解包崩溃
@@ -712,6 +779,13 @@ class VectorizedBacktester:
             trade_spans.append((int(entry_bar), int(exit_offset)))
             trades_frac.append(float(eff_fraction))
 
+            # 审计 H5: 本笔持仓跨越的停牌交易日数 (跳空敞口可见化)
+            trade_suspended = 0
+            if susp_model is not None and dates is not None:
+                trade_suspended = susp_model.suspended_days_between(
+                    pd.Timestamp(dates[entry_bar]).date(),
+                    pd.Timestamp(dates[exit_offset]).date())
+
             if return_details:
                 trade_details.append(TradeDetail(
                     entry_idx=int(entry_bar),
@@ -722,6 +796,7 @@ class VectorizedBacktester:
                     holding_days=int(holding_days),
                     exit_reason=str(exit_reason) if exit_reason else "end",
                     position_pct=float(eff_fraction),
+                    suspended_days=int(trade_suspended),
                 ))
 
             # 扫描续点: 持仓期内(入场根~出场根)的买讯已被忽略;
@@ -737,7 +812,13 @@ class VectorizedBacktester:
         # 逐笔仓位比例 (容量约束可能部分成交; 全部相等时 metrics 走标量路径)
         frac_arr = np.array(trades_frac, dtype=np.float64)
         metrics = metrics_from_trades(pnl_arr, holding_arr, trade_spans,
-                                      close, open_arr, frac_arr)
+                                      close, open_arr, frac_arr,
+                                      trading_day_index=tdi)
+        # 审计 H5: 停牌建模口径落到指标 (0 = 未建模/无停牌)
+        if susp_model is not None:
+            metrics.suspension_days = len(susp_model.suspended_days)
+        if tdi is not None:
+            metrics.suspension_trading_days = int(len(tdi))
 
         if return_details:
             return metrics, trade_details

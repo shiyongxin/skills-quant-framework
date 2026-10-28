@@ -25,7 +25,9 @@ import numpy as np
 import pandas as pd
 
 from core.indicators import sma as _core_sma
-from dataclasses import dataclass
+from core.suspension import SuspensionModel
+from core.trading_calendar import TradingCalendar
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -61,6 +63,8 @@ class ValidationReport:
     system_breakdown: dict        # {system_name: {metric: value}}
     # 基准对比
     beat_benchmark: dict          # {holding_days: pct_stocks_beat_csi300}
+    # 停牌建模口径 (审计 H5): 持有期按交易日计 → 停牌顺延如实记录
+    suspension: dict = field(default_factory=dict)
 
 
 class HistoricalBacktestValidator:
@@ -84,7 +88,45 @@ class HistoricalBacktestValidator:
         self.backtester = VectorizedBacktester()
         self.cost_model = CostModel()  # 前向收益统一扣减A股往返成本
         self.systems = {}  # {regime: IndicatorSystem}
+        self._calendar = None  # 审计 H5: 交易日历 (由指数行情反推, 懒加载)
+        self._suspension_stats = {
+            'modeled': False,
+            'deferred_picks': 0,       # 因停牌顺延出场的选股次数
+            'deferred_trading_days_total': 0,  # 顺延的累计**交易日**数
+            'suspended_days_total': 0,  # 区间内观测到的停牌交易日数
+        }
         self._load_systems(optimization_result_file)
+
+    def _get_calendar(self, injected=None):
+        """取交易日历 (审计 H5): 由**指数行情**反推 —— 指数每个交易日都有行,
+        个股缺行才是真停牌 (不会误伤节假日)。无指数数据 → None (不建模,
+        如实回退旧口径, 不臆造日历)。可显式注入 (优先)。"""
+        if injected is not None:
+            return injected
+        cached = getattr(self, '_calendar', None)
+        if cached is not None:
+            return cached
+        try:
+            index_df = self._load_index_data('000300')
+        except Exception:
+            index_df = pd.DataFrame()
+        if len(index_df) == 0:
+            return None
+        cal = TradingCalendar.from_index(index_df)
+        if cal is not None:
+            self._calendar = cal
+            self._stats()['modeled'] = True
+        return cal
+
+    def _stats(self) -> dict:
+        """停牌统计累加器 (对 __new__ 构造的实例也安全)。"""
+        stats = getattr(self, '_suspension_stats', None)
+        if stats is None:
+            stats = {'modeled': False, 'deferred_picks': 0,
+                     'deferred_trading_days_total': 0,
+                     'suspended_days_total': 0}
+            self._suspension_stats = stats
+        return stats
 
     def _load_systems(self, filepath):
         """加载指标体系"""
@@ -284,16 +326,32 @@ class HistoricalBacktestValidator:
         return picks[:top_n]
 
     def calculate_forward_return(self, symbol: str, pick_date: str,
-                                  holding_days: int) -> tuple:
+                                  holding_days: int,
+                                  trading_calendar=None) -> tuple:
         """
         计算从pick_date买入并持有holding_days天的实际收益
+
+        审计 H5 (停牌建模): 旧实现用**个股 bar 数**计持有窗口
+        (`actual_days = min(holding_days, len(stock_data) - 1)`) → 停牌把
+        窗口**静默拉长** (60 根 bar 可能横跨 75 个交易日) → 不同个股的
+        实际持有期不可比, 且"持有 N 天"的语义名不副实。现按**交易日**计:
+        到期日 = pick 日后第 N 个交易日; 个股在到期日停牌 → 顺延到下一个
+        可交易日 (现实: 卖不掉只能继续持有), 顺延的交易日数如实记录。
+        无交易日历 (无指数数据) → 如实回退旧口径, 不臆造日历。
+
+        trading_calendar: 可显式注入交易日历 (默认由指数行情反推)。
 
         Returns:
         --------
         (return_pct, csi300_return_pct) or (None, None) if no data
         """
         pick_dt = pd.to_datetime(pick_date)
-        end_dt = pick_dt + timedelta(days=int(holding_days * 1.5))
+        cal = self._get_calendar(trading_calendar)
+
+        # 交易日口径需要更宽的取数窗口 (停牌顺延会吃掉余量)
+        span_days = int(holding_days * 2.5) + 15 if cal is not None \
+            else int(holding_days * 1.5)
+        end_dt = pick_dt + timedelta(days=span_days)
 
         # 股票收益
         stock_data = self.data_manager.load(symbol)
@@ -307,18 +365,55 @@ class HistoricalBacktestValidator:
         if len(stock_data) < 2:
             return None, None
 
-        # 实际持有天数(取近似)
-        actual_days = min(holding_days, len(stock_data) - 1)
-        if actual_days < 1:
-            return None, None
-
         # 入场: pick日收盘出信号 → 次一交易日开盘成交(信号日已在数据中则取其后一根)
         entry_row = 1 if stock_data.iloc[0]['日期'] <= pick_dt else 0
-        if actual_days <= entry_row:
+
+        actual_days = None
+        exit_row = None
+        deferral_days = 0
+        if cal is not None:
+            # 交易日口径的到期日 (审计 H5)
+            tdays = cal.trading_days_between(
+                pick_dt, pick_dt + timedelta(days=span_days))
+            if len(tdays) > holding_days:
+                horizon = tdays[holding_days]
+                # 该股的停牌模型 (统一走 core/suspension.py)
+                model = SuspensionModel.build(
+                    cal, stock_data['日期'].dt.date.tolist())
+                exit_day = (model.next_tradable_after(horizon)
+                            if model is not None else horizon)
+                dates = stock_data['日期'].values
+                pos = int(np.searchsorted(
+                    dates, np.datetime64(pd.Timestamp(exit_day)), side='left'))
+                if pos < len(stock_data):
+                    exit_row = pos
+                    if model is not None:
+                        deferral_days = model.suspended_days_between(
+                            horizon, exit_day)
+            if exit_row is None:
+                # 日历覆盖不足 / 到期日无行情 → 如实回退旧口径 (bar 数)
+                actual_days = min(holding_days, len(stock_data) - 1)
+        else:
+            actual_days = min(holding_days, len(stock_data) - 1)
+
+        if actual_days is not None:
+            if actual_days < 1:
+                return None, None
+            if actual_days <= entry_row:
+                return None, None
+            exit_row = int(actual_days)
+
+        if exit_row is None or exit_row <= entry_row:
             return None, None
 
+        # 审计 H5: 停牌顺延的观测 (如实记录, 不静默)
+        if cal is not None and deferral_days > 0:
+            stats = self._stats()
+            stats['deferred_picks'] += 1
+            stats['deferred_trading_days_total'] += deferral_days
+
         raw_entry = stock_data.iloc[entry_row]['开盘']
-        raw_exit = stock_data.iloc[actual_days]['收盘']
+        raw_exit = stock_data.iloc[exit_row]['收盘']
         if raw_entry <= 0:
             return None, None
 
@@ -334,7 +429,7 @@ class HistoricalBacktestValidator:
 
         csi_data['日期'] = pd.to_datetime(csi_data['日期'])
         stock_entry_dt = stock_data.iloc[entry_row]['日期']
-        stock_exit_dt = stock_data.iloc[actual_days]['日期']
+        stock_exit_dt = stock_data.iloc[exit_row]['日期']
         csi_aligned = csi_data[
             (csi_data['日期'] >= stock_entry_dt) & (csi_data['日期'] <= stock_exit_dt)
         ].reset_index(drop=True)
@@ -489,6 +584,8 @@ class HistoricalBacktestValidator:
             aggregate=aggregate,
             system_breakdown=system_breakdown,
             beat_benchmark=beat_benchmark,
+            # 审计 H5: 停牌建模口径 (持有期按交易日计 + 顺延记录)
+            suspension=dict(self._stats()),
         )
 
     def format_report(self, report: ValidationReport) -> str:
@@ -609,6 +706,8 @@ def main():
         'holding_days_list': report.holding_days_list,
         'aggregate': report.aggregate,
         'beat_benchmark': report.beat_benchmark,
+        # 审计 H5: 停牌建模口径 (持有期按交易日计 + 顺延记录)
+        'suspension': report.suspension,
         'system_breakdown': report.system_breakdown,
         'picks': [
             {

@@ -21,6 +21,7 @@ from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_se
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
+from core import suspension as _core_suspension
 from sina_daily import fetch_daily, format_symbol
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
@@ -61,6 +62,12 @@ class BacktestResult:
 
     # 详细数据
     trade_details: List[Dict]
+
+    # 停牌建模 (审计 H5): 无日历 → modeled=False (如实), 行为与旧版一致
+    suspension_modeled: bool = False
+    suspension_days: int = 0        # 区间内真停牌交易日数
+    suspension_blocked_bars: int = 0  # 因停牌而未能撮合的 bar 数
+    suspension_holding_days: int = 0  # 持仓跨越的停牌交易日数 (累计)
 
 
 class ReversalBacktester:
@@ -198,8 +205,13 @@ class ReversalBacktester:
 
         return df
 
-    def backtest_single(self, code: str, name: str = '') -> Optional[BacktestResult]:
-        """回测单只股票"""
+    def backtest_single(self, code: str, name: str = '',
+                        trading_calendar=None) -> Optional[BacktestResult]:
+        """回测单只股票
+
+        trading_calendar: 可选交易日历 (审计 H5) → 启用停牌建模
+        (停牌日不撮合 + 持仓跨停牌敞口可见化)。不提供 = 不建模。
+        """
         df = self.get_stock_data(code, days=365)
         if df is None or len(df) < 60:
             return None
@@ -207,11 +219,18 @@ class ReversalBacktester:
         df = self.calculate_indicators(df)
         df = self.generate_signals(df)
 
+        # 停牌建模 (审计 H5): 无日历 → 不建模 (如实记 modeled=False)
+        susp_model = _core_suspension.SuspensionModel.build(
+            trading_calendar, pd.to_datetime(df['日期']).dt.date.tolist())
+        susp_blocked_bars = 0
+        susp_holding_days = 0
+
         # 回测变量
         cash = self.initial_capital
         shares = 0
         trades = []
         trade_details = []
+        entry_date = None  # 当前持仓的建仓日 (停牌敞口统计用)
 
         # 买入持有收益
         first_price = df['收盘'].iloc[0]
@@ -223,6 +242,12 @@ class ReversalBacktester:
 
         for i in range(len(df)):
             row = df.iloc[i]
+
+            # 0) 停牌日不撮合 (审计 H5): 数据里若出现"日历判定为停牌"的行
+            #    (陈旧/脏数据), 该 bar 不可成交 —— 挂单顺延
+            if susp_model is not None and not susp_model.is_tradable(row['日期']):
+                susp_blocked_bars += 1
+                continue
 
             # 1) 撮合上一根收盘产生的意图 (本根开盘)
             if pending is not None and i > 0:
@@ -245,6 +270,7 @@ class ReversalBacktester:
                             cost = buy_shares * fill_px + fee
                             cash -= cost
                             shares = buy_shares
+                            entry_date = row['日期']
 
                             trades.append(Trade(
                                 type='BUY', date=row['日期'], price=fill_px,
@@ -282,7 +308,12 @@ class ReversalBacktester:
                             'fee': fee,
                             'reason': pending['reason']
                         })
+                        # 审计 H5: 本笔持仓跨越的停牌交易日数
+                        if susp_model is not None and entry_date is not None:
+                            susp_holding_days += susp_model.suspended_days_between(
+                                entry_date, row['日期'])
                         shares = 0
+                        entry_date = None
                         pending = None
                     else:
                         # 开盘跌停卖不出 → 顺延(最多3根)
@@ -299,12 +330,18 @@ class ReversalBacktester:
                 pending = {'intent': 'SELL', 'reason': row['sell_reason'], 'ttl': 3}
 
         # 期末清仓 (最后一根封跌停不可卖出 → 不虚构成交, 按收盘市值计入收益)
+        # 审计 H5: 停牌日同样不可成交 → 同样不虚构成交 (按盯市计入收益)
         if shares > 0:
             last = df.iloc[-1]
             prev_close = df['收盘'].iloc[-2] if len(df) > 1 else last['收盘']
-            if can_sell_intraday(float(last['开盘']), float(last['最高']),
-                                 float(last['最低']), float(last['收盘']),
-                                 prev_close, code):
+            susp_at_end = (susp_model is not None
+                           and not susp_model.is_tradable(last['日期']))
+            if susp_at_end:
+                # 停牌 → 无法平仓: 按最后收盘价盯市, 不计卖出费用
+                susp_blocked_bars += 1
+            elif can_sell_intraday(float(last['开盘']), float(last['最高']),
+                                   float(last['最低']), float(last['收盘']),
+                                   prev_close, code):
                 sell_px = self.cost_model.fill_sell_price(float(last['收盘']))
                 fee = self.cost_model.sell_cost(sell_px, shares)
                 cash += shares * sell_px - fee
@@ -359,11 +396,18 @@ class ReversalBacktester:
             buy_hold_return=buy_hold_return,
             excess_return=excess_return,
             trades=trades,
-            trade_details=trade_details
+            trade_details=trade_details,
+            # 审计 H5: 停牌建模口径
+            suspension_modeled=susp_model is not None,
+            suspension_days=(len(susp_model.suspended_days)
+                            if susp_model is not None else 0),
+            suspension_blocked_bars=susp_blocked_bars,
+            suspension_holding_days=susp_holding_days,
         )
 
-    def run_backtest(self, stock_pool: Dict[str, str]) -> List[BacktestResult]:
-        """批量回测"""
+    def run_backtest(self, stock_pool: Dict[str, str],
+                     trading_calendar=None) -> List[BacktestResult]:
+        """批量回测 (trading_calendar: 可选交易日历 → 启用停牌建模)"""
         print()
         print('*' * 80)
         print('转折点策略回测 - 过去1年')
@@ -378,7 +422,8 @@ class ReversalBacktester:
         for i, (code, name) in enumerate(stock_pool.items(), 1):
             print(f'[{i}/{len(stock_pool)}] 回测 {name}({code})...', end=' ')
 
-            result = self.backtest_single(code, name)
+            result = self.backtest_single(code, name,
+                                          trading_calendar=trading_calendar)
             if result:
                 results.append(result)
                 print(f'收益: {result.total_return:+.2f}% | 胜率: {result.win_rate:.0f}%')
