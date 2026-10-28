@@ -493,6 +493,16 @@ class HistoricalBacktestValidator:
                 self._universe_meta = meta
             else:
                 universe = self.data_manager.get_universe(min_rows=2000)
+        else:
+            # 调用方自带股票池 → 其 point-in-time 口径/幸存者偏差由调用方
+            # 负责, 本引擎**不假装知道** (如实留空 + 说明)
+            self._universe_meta = {
+                'source': 'caller_supplied',
+                'n_stocks': len(universe),
+                'survivorship_bias': None,
+                'survivorship_note': ('股票池由调用方提供 → 其点时口径与'
+                                       '幸存者偏差本引擎未核查 (不假装知道)'),
+            }
         print(f"[INFO] 股票池: {len(universe)} 只")
         if getattr(self, '_universe_meta', None):
             m = self._universe_meta
