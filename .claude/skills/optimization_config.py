@@ -78,6 +78,20 @@ class RegimeConfig:
 
 
 @dataclass
+class RobustnessConfig:
+    """稳健性/多重检验证据配置 (审计 H10)
+
+    优化 = 在同一批 IS 窗口上重复评估后取最大 → 天然存在多重比较
+    (最优 fitness 偏乐观)。这些字段控制**落盘证据**的采样规模;
+    证据只报告, 不参与参数选择, 也不改变 GA 搜索结果 (随机基线/bootstrap
+    以 track=False 调用评估闭包 → 不计入搜索试验次数, 不进 top-k 统计)。
+    """
+    n_baseline_samples: int = 100   # 随机基线评估次数 (0 = 关闭)
+    top_k: int = 10                 # Top-k 参数离散度的 k
+    n_bootstrap: int = 500          # bootstrap 窗口重采样次数 (0 = 关闭)
+
+
+@dataclass
 class IterativeRoundConfig:
     """多轮迭代中单轮的配置"""
     round_num: int = 1
@@ -103,6 +117,8 @@ class OptimizationConfig:
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     fitness: FitnessConfig = field(default_factory=FitnessConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
+    # 审计 H10: 稳健性证据采样规模 (试验次数/随机基线/Top-k/ bootstrap)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
 
     # 多轮迭代配置
     iterative_rounds: list = field(default_factory=lambda: [
@@ -164,6 +180,7 @@ class OptimizationConfig:
             'walk_forward': asdict(self.walk_forward),
             'fitness': asdict(self.fitness),
             'regime': asdict(self.regime),
+            'robustness': asdict(self.robustness),
             'iterative_rounds': [asdict(r) for r in self.iterative_rounds],
         }
         return result
@@ -209,6 +226,10 @@ class OptimizationConfig:
         if 'regime' in data:
             config.regime = RegimeConfig(
                 **cls._filter_known(RegimeConfig, data['regime'], 'regime'))
+        if 'robustness' in data:
+            config.robustness = RobustnessConfig(
+                **cls._filter_known(RobustnessConfig, data['robustness'],
+                                    'robustness'))
         if 'iterative_rounds' in data:
             config.iterative_rounds = [
                 IterativeRoundConfig(

@@ -58,6 +58,10 @@ class IndicatorSystem:
     oos_median_sharpe: float = 0.0
     oos_median_max_drawdown: float = 0.0
 
+    # 稳健性/多重检验证据 —— 审计 H10: 试验次数 (参与"取最大"的评估次数)、
+    # 随机基线分位数、Top-k 参数离散度、bootstrap CI。只报告, 不参与选择
+    robustness: dict = field(default_factory=dict)
+
 
 @dataclass
 class Individual:
@@ -165,7 +169,8 @@ class FitnessEvaluator:
 
     def evaluate(self, params: dict, stock_data: dict,
                  regime_labels: dict = None,
-                 target_regime: str = None) -> tuple:
+                 target_regime: str = None,
+                 return_is_metrics: bool = False) -> tuple:
         """
         评估一组参数在多只股票上的表现
 
@@ -179,6 +184,11 @@ class FitnessEvaluator:
             {symbol: pd.Series} 每只股票的体制标签
         target_regime : str or None
             如果指定，仅评估该体制时段的数据
+        return_is_metrics : bool
+            True 时 details 额外携带 'is_metrics' (IS 窗口的原始指标对象
+            列表) — 审计 H10 bootstrap 重采样用; GA 路径不传 (不进 details,
+            零额外开销)。注: 失败路径 (无 IS 窗口) 恒返回空 details,
+            无该键 → 调用方如实标记不可用。
 
         Returns:
         --------
@@ -227,7 +237,22 @@ class FitnessEvaluator:
         fitness, details = self._compute_fitness(is_metrics)
         details['is_windows'] = len(is_metrics)
         details['oos'] = self._summarize_oos(oos_metrics)
+        # 审计 H10: 逐窗口 IS 指标 (bootstrap 重采样用) — 只在显式要求时
+        # 携带, GA 路径不传 → 零额外开销
+        if return_is_metrics:
+            details['is_metrics'] = is_metrics
         return fitness, details
+
+    @staticmethod
+    def _robust_combine(regime_fitnesses: dict) -> float:
+        """稳健适应度 = 0.7 * min(各体制) + 0.3 * avg(各体制)。
+
+        审计 H10 配套: 从 evaluate_robust 闭包提炼 —— bootstrap 重采样
+        必须用与搜索**完全相同**的组合口径, 否则 CI 对应的不是被报告的
+        那个 fitness (口径冒充)。
+        """
+        vals = list(regime_fitnesses.values())
+        return 0.7 * min(vals) + 0.3 * float(np.mean(vals))
 
     def _aggregate_oos(self, oos_blocks: list) -> dict:
         """跨体制汇总样本外证据 (稳健模式用)。
@@ -899,12 +924,25 @@ class OptimizationEngine:
             'convergence_threshold': 8,
         }, ga_params)
 
-        # 评估函数 (计数, 落盘用)
+        # 评估函数 (计数 + top-k 记录, 审计 H10: track=False 供基线/bootstrap
+        # 调用 → 不计入搜索试验次数、不进 top-k 统计)
         evals = {'n': 0}
+        topk = []
+        rb_cfg = self._robustness_cfg()
 
-        def evaluate(params):
-            evals['n'] += 1
-            return self.evaluator.evaluate(self._eval_params(params), sample_data)
+        def _track(fitness, params):
+            topk.append((float(fitness), dict(params)))
+            topk.sort(key=lambda t: -t[0])
+            del topk[rb_cfg['top_k']:]
+
+        def evaluate(params, track=True, collect_regimes=False, **kwargs):
+            # collect_regimes 只由稳健闭包实现; 此处吞掉 (单层评估无体制分层)
+            fitness, details = self.evaluator.evaluate(
+                self._eval_params(params), sample_data, **kwargs)
+            if track:
+                evals['n'] += 1
+                _track(fitness, params)
+            return fitness, details
 
         # 运行GA
         ga = GeneticAlgorithm(**ga_cfg)
@@ -919,6 +957,9 @@ class OptimizationEngine:
         total_time = time.time() - start_time
         self._record_ga_run('global', ga_cfg, conv_gen, total_time, evals['n'],
                             generations_run=gens_run)
+        # 审计 H10: GA 结束后组装稳健性证据 (只报告, 不参与选择)
+        robustness = self._finalize_robustness(
+            'global', evaluate, best, evals['n'], topk)
 
         # 构建结果
         system = IndicatorSystem(
@@ -936,6 +977,7 @@ class OptimizationEngine:
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
             **oos_fields(best.fitness_details),
+            robustness=robustness,
         )
 
         result = OptimizationResult(
@@ -1012,13 +1054,24 @@ class OptimizationEngine:
             }.get(regime, regime)
 
             evals = {'n': 0}
+            topk = []
+            rb_cfg = self._robustness_cfg()
 
-            def evaluate(params, r=regime):
-                evals['n'] += 1
-                return self.evaluator.evaluate(
+            def _track(fitness, params):
+                topk.append((float(fitness), dict(params)))
+                topk.sort(key=lambda t: -t[0])
+                del topk[rb_cfg['top_k']:]
+
+            def evaluate(params, r=regime, track=True, collect_regimes=False,
+                         **kwargs):
+                # collect_regimes 此处吞掉 (单一体制, 无分层可言)
+                fitness, details = self.evaluator.evaluate(
                     self._eval_params(params), sample_data,
-                    self.regime_labels, r
-                )
+                    self.regime_labels, r, **kwargs)
+                if track:
+                    evals['n'] += 1
+                    _track(fitness, params)
+                return fitness, details
 
             ga = GeneticAlgorithm(**ga_cfg)
             start_time = time.time()
@@ -1030,6 +1083,9 @@ class OptimizationEngine:
             total_time = time.time() - start_time
             self._record_ga_run(f'regime:{regime}', ga_cfg, conv_gen,
                                 total_time, evals['n'], generations_run=gens_run)
+            # 审计 H10: 稳健性证据 (只报告, 不参与选择)
+            robustness = self._finalize_robustness(
+                f'regime:{regime}', evaluate, best, evals['n'], topk)
 
             system = IndicatorSystem(
                 name=f"{regime_name_cn}专用型",
@@ -1046,6 +1102,7 @@ class OptimizationEngine:
                 median_holding_days=best.fitness_details.get('avg_holding_days', 0),
                 num_trades=best.fitness_details.get('avg_trades', 0),
                 **oos_fields(best.fitness_details),
+                robustness=robustness,
             )
 
             result = OptimizationResult(
@@ -1104,49 +1161,75 @@ class OptimizationEngine:
         }, ga_params)
 
         evals = {'n': 0}
+        topk = []
+        rb_cfg = self._robustness_cfg()
 
-        def evaluate_robust(params):
+        def _track(fitness, params):
+            topk.append((float(fitness), dict(params)))
+            topk.sort(key=lambda t: -t[0])
+            del topk[rb_cfg['top_k']:]
+
+        def evaluate_robust(params, track=True, collect_regimes=False,
+                            **kwargs):
             """稳健适应度: 各体制fitness的最小值(忽略无数据体制)"""
-            evals['n'] += 1
+            raw_params = dict(params)
+            # bootstrap 经 kwargs 传入的 return_is_metrics 与 collect_regimes
+            # 合并为同一语义 (都要逐窗口指标)。注意先 pop 再 or —— 短路会
+            # 跳过 pop, kwargs 残留该键 → 与显式传参冲突
+            want_kw = bool(kwargs.pop('return_is_metrics', False))
+            want_metrics = collect_regimes or want_kw
             params = self._eval_params(params)
             if not all_regimes or not self.regime_labels:
-                return self.evaluator.evaluate(params, sample_data)
-
-            regime_fitnesses = {}
-            regime_oos = {}
-            for regime in all_regimes:
                 fitness, details = self.evaluator.evaluate(
-                    params, sample_data, self.regime_labels, regime
-                )
-                # 仅记录有样本的体制
-                if details.get('sample_count', 0) > 0:
-                    regime_fitnesses[regime] = fitness
-                    # 审计 H1: 各体制的样本外证据一并保留 (只报告, 不参与选择)
-                    oos_block = details.get('oos')
-                    if oos_block:
-                        regime_oos[regime] = oos_block
+                    params, sample_data, return_is_metrics=want_metrics,
+                    **kwargs)
+            else:
+                regime_fitnesses = {}
+                regime_oos = {}
+                regime_metrics = {}
+                for regime in all_regimes:
+                    fitness_r, details_r = self.evaluator.evaluate(
+                        params, sample_data, self.regime_labels, regime,
+                        return_is_metrics=want_metrics, **kwargs)
+                    # 仅记录有样本的体制
+                    if details_r.get('sample_count', 0) > 0:
+                        regime_fitnesses[regime] = fitness_r
+                        # 审计 H1: 各体制的样本外证据一并保留 (只报告, 不参与选择)
+                        oos_block = details_r.get('oos')
+                        if oos_block:
+                            regime_oos[regime] = oos_block
+                        if want_metrics:
+                            regime_metrics[regime] = (
+                                details_r.get('is_metrics') or [])
 
-            if not regime_fitnesses:
-                return 0.0, {}
-
-            # 稳健适应度 = 最小fitness (最大化最差表现)
-            fitness_values = list(regime_fitnesses.values())
-            min_fitness = min(fitness_values)
-            avg_fitness = np.mean(fitness_values)
-            # 70%最小 + 30%平均
-            robust_fitness = 0.7 * min_fitness + 0.3 * avg_fitness
-
-            details = {
-                'regime_fitnesses': regime_fitnesses,
-                'min_fitness': min_fitness,
-                'avg_fitness': avg_fitness,
-                'regimes_used': list(regime_fitnesses.keys()),
-                'regimes_skipped': [r for r in all_regimes if r not in regime_fitnesses],
-                # 审计 H1: 跨体制汇总的样本外证据 (IS/OOS 分列)
-                'regime_oos': regime_oos,
-            }
-            details['oos'] = self._aggregate_oos(list(regime_oos.values()))
-            return robust_fitness, details
+                if not regime_fitnesses:
+                    fitness, details = 0.0, {}
+                else:
+                    # 稳健适应度 = 0.7*最差体制 + 0.3*平均 (H10: 提炼为
+                    # _robust_combine, bootstrap 重采样走同一口径)
+                    fitness = self.evaluator._robust_combine(regime_fitnesses)
+                    details = {
+                        'regime_fitnesses': regime_fitnesses,
+                        'min_fitness': min(regime_fitnesses.values()),
+                        'avg_fitness': float(np.mean(
+                            list(regime_fitnesses.values()))),
+                        'regimes_used': list(regime_fitnesses.keys()),
+                        'regimes_skipped': [r for r in all_regimes
+                                            if r not in regime_fitnesses],
+                        # 审计 H1: 跨体制汇总的样本外证据 (IS/OOS 分列)
+                        'regime_oos': regime_oos,
+                    }
+                    # H1 遗留 bug 修复: 原写 self._aggregate_oos, 但该方法在
+                    # FitnessEvaluator 上 (闭包内 self=Engine → 有体制标签时
+                    # 稳健模式必 AttributeError; H1 测试仅源码级, 未跑行为路径)
+                    details['oos'] = self.evaluator._aggregate_oos(
+                        list(regime_oos.values()))
+                    if want_metrics:
+                        details['regime_metrics'] = regime_metrics
+            if track:
+                evals['n'] += 1
+                _track(fitness, raw_params)
+            return fitness, details
 
         ga = GeneticAlgorithm(**ga_cfg)
         start_time = time.time()
@@ -1157,6 +1240,9 @@ class OptimizationEngine:
         total_time = time.time() - start_time
         self._record_ga_run('robust', ga_cfg, conv_gen, total_time, evals['n'],
                             generations_run=gens_run)
+        # 审计 H10: 稳健性证据 (只报告, 不参与选择)
+        robustness = self._finalize_robustness(
+            'robust', evaluate_robust, best, evals['n'], topk)
 
         regime_scores = best.fitness_details.get('regime_fitnesses', {})
         regimes_used = best.fitness_details.get('regimes_used', [])
@@ -1182,6 +1268,7 @@ class OptimizationEngine:
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
             **oos_fields(best.fitness_details),
+            robustness=robustness,
         )
 
         result = OptimizationResult(
@@ -1229,6 +1316,16 @@ class OptimizationEngine:
         seed_params = None
         # 单条流贯穿各轮 (轮次顺序固定 → 可复现)
         rng = self._stage_rng('iterative')
+        # 审计 H10: 跨轮累计 —— 最终参数经全部轮次演化, 每一轮的评估都
+        # 参与了选择 → 试验次数/top-k 取全程 (非仅末轮)
+        cum_evals = 0
+        cum_topk = []
+        rb_cfg = self._robustness_cfg()
+
+        def _track(fitness, params):
+            cum_topk.append((float(fitness), dict(params)))
+            cum_topk.sort(key=lambda t: -t[0])
+            del cum_topk[rb_cfg['top_k']:]
 
         for round_idx in range(min(n_rounds, len(round_configs))):
             cfg = round_configs[round_idx]
@@ -1239,9 +1336,14 @@ class OptimizationEngine:
 
             evals = {'n': 0}
 
-            def evaluate(params):
-                evals['n'] += 1
-                return self.evaluator.evaluate(self._eval_params(params), sample_data)
+            def evaluate(params, track=True, collect_regimes=False, **kwargs):
+                # collect_regimes 此处吞掉 (无体制分层)
+                fitness, details = self.evaluator.evaluate(
+                    self._eval_params(params), sample_data, **kwargs)
+                if track:
+                    evals['n'] += 1
+                    _track(fitness, params)
+                return fitness, details
 
             ga = GeneticAlgorithm(
                 population_size=cfg['population_size'],
@@ -1257,6 +1359,7 @@ class OptimizationEngine:
             total_time = time.time() - start_time
             self._record_ga_run(f'iterative:r{round_idx + 1}', cfg, conv_gen,
                                 total_time, evals['n'], generations_run=gens_run)
+            cum_evals += evals['n']
 
             result = {
                 'round': round_idx + 1,
@@ -1280,6 +1383,13 @@ class OptimizationEngine:
         # 构建最终指标体系
         if all_round_results:
             final = all_round_results[-1]
+            # 审计 H10: 稳健性证据 (试验次数=各轮之和; 基线/bootstrap 走
+            # 末轮评估闭包 — 同一适应度函数)
+            robustness = self._finalize_robustness(
+                'iterative', evaluate,
+                Individual(params=final['best_params'],
+                           fitness=final['best_fitness']),
+                cum_evals, cum_topk)
             system = IndicatorSystem(
                 name="迭代优化型",
                 description=f"经过{n_rounds}轮迭代精炼的参数",
@@ -1295,6 +1405,7 @@ class OptimizationEngine:
                 median_holding_days=final['best_details'].get('avg_holding_days', 0),
                 num_trades=final['best_details'].get('avg_trades', 0),
                 **oos_fields(final['best_details']),
+                robustness=robustness,
             )
 
             result = OptimizationResult(
@@ -1347,6 +1458,170 @@ class OptimizationEngine:
             'n_evals': n_evals,
             'time_sec': round(time_sec, 3),
         })
+
+    # ==================== 稳健性/多重检验证据 (审计 H10) ====================
+
+    def _robustness_cfg(self) -> dict:
+        """稳健性证据采样规模: 引擎默认 < config.robustness (审计 H10)"""
+        defaults = {'n_baseline_samples': 100, 'top_k': 10, 'n_bootstrap': 500}
+        rc = (getattr(self.config, 'robustness', None)
+              if self.config is not None else None)
+        if rc is None:
+            return defaults
+        return {
+            'n_baseline_samples': int(rc.n_baseline_samples),
+            'top_k': int(rc.top_k),
+            'n_bootstrap': int(rc.n_bootstrap),
+        }
+
+    @staticmethod
+    def _top_k_dispersion(topk_entries, k):
+        """Top-k 已评估参数的逐维离散度 (审计 H10 ③)。
+
+        基于**全部被评估过的**参数 (非仅末代种群) 按 fitness 取前 k:
+        - range/std 尖峰 → 最优区狭窄, 对参数抖动敏感 (过拟合嫌疑);
+        - 宽平台 → 相对稳健。
+        entries: [(fitness, raw_params_dict), ...] 已按 fitness 降序。
+        """
+        if not topk_entries:
+            return {'available': False, 'reason': '无已评估参数记录'}
+        k_eff = min(int(k), len(topk_entries))
+        top = topk_entries[:k_eff]
+        per_param = {}
+        names = ParameterSpace.get_param_names()
+        for name in names:
+            vals = [p[name] for _, p in top if name in p]
+            if not vals:
+                continue
+            arr = np.asarray(vals, dtype=float)
+            per_param[name] = {
+                'min': float(arr.min()),
+                'max': float(arr.max()),
+                'range': float(arr.max() - arr.min()),
+                'std': float(arr.std(ddof=1)) if len(arr) > 1 else 0.0,
+                'mean': float(arr.mean()),
+            }
+        fits = [f for f, _ in top]
+        return {
+            'available': True,
+            'k': k_eff,
+            'fitness_values': [float(f) for f in fits],
+            'fitness_spread': float(max(fits) - min(fits)) if len(fits) > 1 else 0.0,
+            'per_param': per_param,
+        }
+
+    def _random_baseline(self, stage, evaluate_fn, n_samples, best_fitness):
+        """随机参数基线 (审计 H10 ②): 回答"最优 fitness 相对随机乱猜有多罕见"。
+
+        - 走与搜索**完全相同**的评估闭包 (同一 IS 口径, 不触碰 OOS — H1
+          隔离不受影响), 以 track=False 调用 → 不计入搜索试验次数;
+        - 独立 RNG 子流 (stage:baseline), 与 GA 主流隔离 → 基线的开关/
+          规模不影响搜索结果 (E-P0-3 可复现性);
+        - n_samples=0 → 如实标记 unavailable, 不假装有基线。
+        """
+        if n_samples <= 0:
+            return {'available': False, 'n_samples': 0,
+                    'reason': 'n_baseline_samples=0 (未配置基线)'}
+        rng = self._stage_rng(f'{stage}:baseline')
+        fits = []
+        for _ in range(n_samples):
+            params = ParameterSpace.repair(ParameterSpace.random_sample(rng))
+            f, _ = evaluate_fn(params, track=False)
+            fits.append(float(f))
+        arr = np.asarray(fits, dtype=float)
+        return {
+            'available': True,
+            'n_samples': n_samples,
+            'fitness_mean': float(arr.mean()),
+            'fitness_std': float(arr.std(ddof=1)) if n_samples > 1 else 0.0,
+            'fitness_p50': float(np.percentile(arr, 50)),
+            'fitness_p90': float(np.percentile(arr, 90)),
+            'best_fitness': float(best_fitness),
+            # 最优适应度超过基线样本的比例 (分位数); 注意: 最优值取自
+            # 数千次评估, 天然偏高 — 该数字用于感知量级, 非显著性结论
+            'best_percentile': float((arr < best_fitness).mean()),
+        }
+
+    def _bootstrap_fitness_ci(self, stage, evaluate_fn, best_params, n_boot):
+        """最优参数的适应度 bootstrap 95% CI (审计 H10 ④)。
+
+        重采样对象 = 选择所用的 **IS 窗口指标** (与适应度同源):
+        - 普通阶段: 合并重采样 IS 窗口;
+        - 稳健阶段: 按体制**分层**重采样, 组合口径走 _robust_combine
+          (与搜索同一公式, 否则 CI 对应的不是被报告的那个 fitness)。
+        bootstrap 回答"窗口抽样噪声有多大", **不能替代 OOS** (那是外推
+        证据, 见 systems[].oos)。以 track=False 调用 → 不计入试验次数。
+        """
+        if n_boot <= 0:
+            return {'available': False, 'n_resamples': 0,
+                    'reason': 'n_bootstrap=0 (未配置)'}
+        rng = self._stage_rng(f'{stage}:bootstrap')
+        f0, details = evaluate_fn(best_params, track=False,
+                                  return_is_metrics=True, collect_regimes=True)
+        regime_metrics = (details or {}).get('regime_metrics')
+        if regime_metrics:
+            units = {r: list(ms) for r, ms in regime_metrics.items() if ms}
+            n_windows = sum(len(ms) for ms in units.values())
+            if n_windows < 2:
+                return {'available': False, 'n_windows': n_windows,
+                        'reason': f'IS 窗口数不足 ({n_windows} < 2)'}
+
+            def fitness_of(sampled):
+                fits = {r: self.evaluator._compute_fitness(ms)[0]
+                        for r, ms in sampled.items() if ms}
+                return self.evaluator._robust_combine(fits) if fits else 0.0
+
+            scope = 'per_regime_stratified'
+        else:
+            metrics = list((details or {}).get('is_metrics') or [])
+            if len(metrics) < 2:
+                return {'available': False, 'n_windows': len(metrics),
+                        'reason': f'IS 窗口数不足 ({len(metrics)} < 2)'}
+            units = {'_all': metrics}
+            n_windows = len(metrics)
+
+            def fitness_of(sampled):
+                return self.evaluator._compute_fitness(sampled['_all'])[0]
+
+            scope = 'is_windows'
+        boots = np.empty(n_boot, dtype=float)
+        for b in range(n_boot):
+            sampled = {r: [ms[int(i)] for i in rng.integers(0, len(ms), len(ms))]
+                       for r, ms in units.items()}
+            boots[b] = fitness_of(sampled)
+        return {
+            'available': True,
+            'scope': scope,
+            'n_resamples': n_boot,
+            'n_windows': n_windows,
+            'fitness_point': float(f0),
+            'ci_low': float(np.percentile(boots, 2.5)),
+            'ci_high': float(np.percentile(boots, 97.5)),
+            'boot_mean': float(boots.mean()),
+            'boot_std': float(boots.std(ddof=1)) if n_boot > 1 else 0.0,
+        }
+
+    def _finalize_robustness(self, stage, evaluate_fn, best, n_evals,
+                             topk_entries):
+        """GA 结束后组装稳健性证据块 (审计 H10) — 只报告, 不参与选择。
+
+        四类证据:
+        - n_selection_evaluations: 参与"取最大"的评估次数 (多重比较规模;
+          基线/bootstrap 以 track=False 调用, 不计入);
+        - random_baseline: 随机参数在同一适应度函数下的分布与最优分位;
+        - top_k_dispersion: 全程被评估参数 top-k 的逐维离散度;
+        - bootstrap: 最优参数适应度的窗口重采样 95% CI。
+        """
+        rb = self._robustness_cfg()
+        return {
+            'n_selection_evaluations': int(n_evals),
+            'random_baseline': self._random_baseline(
+                stage, evaluate_fn, rb['n_baseline_samples'], best.fitness),
+            'top_k_dispersion': self._top_k_dispersion(
+                topk_entries, rb['top_k']),
+            'bootstrap': self._bootstrap_fitness_ci(
+                stage, evaluate_fn, best.params, rb['n_bootstrap']),
+        }
 
     @staticmethod
     def _param_space_signature() -> dict:
@@ -1408,6 +1683,39 @@ class OptimizationEngine:
                   f"中位回撤 {system.oos_median_max_drawdown:.1f}%")
         else:
             print("  [样本外 OOS] 不可用 (窗口数不足, 无法划分留出段)")
+        # 审计 H10: 多重检验/稳健性证据 (只报告, 不参与选择)
+        rb = getattr(system, 'robustness', None) or {}
+        if rb:
+            print(f"  [稳健性证据] 选择评估 {rb.get('n_selection_evaluations', 0)} 次 "
+                  "(最优值取自这批评估, 存在多重比较)")
+            base = rb.get('random_baseline') or {}
+            if base.get('available'):
+                print(f"    随机基线(n={base['n_samples']}): "
+                      f"P[随机≥最优]={1 - base['best_percentile']:.1%} | "
+                      f"最优分位={base['best_percentile']:.1%} | "
+                      f"基线均值={base['fitness_mean']:.4f} | "
+                      f"基线p90={base['fitness_p90']:.4f}")
+            else:
+                print(f"    随机基线: 不可用 ({base.get('reason', '—')})")
+            top = rb.get('top_k_dispersion') or {}
+            if top.get('available'):
+                dims = top.get('per_param', {})
+                widest = max(dims.items(), key=lambda kv: kv[1]['range'],
+                             default=None)
+                widest_s = (f", 最宽维 {widest[0]} range={widest[1]['range']:.3g}"
+                            if widest else '')
+                print(f"    Top-{top.get('k')} 参数离散: {len(dims)} 维"
+                      f"{widest_s}")
+            else:
+                print(f"    Top-k 离散: 不可用 ({top.get('reason', '—')})")
+            boot = rb.get('bootstrap') or {}
+            if boot.get('available'):
+                print(f"    bootstrap({boot['n_windows']}窗×"
+                      f"{boot['n_resamples']}次): 95% CI "
+                      f"[{boot['ci_low']:.4f}, {boot['ci_high']:.4f}] "
+                      f"(点估计 {boot['fitness_point']:.4f})")
+            else:
+                print(f"    bootstrap: 不可用 ({boot.get('reason', '—')})")
         print(f"  收敛代数: {result.convergence_gen}")
         print(f"  实际运行代数: {result.generations_run}")
         print(f"  耗时: {result.total_time_sec:.1f}s")
@@ -1445,11 +1753,23 @@ class OptimizationEngine:
             'fitness_weights': dict(self.evaluator.weights),
             'param_space': self._param_space_signature(),
             'ga_runs': list(self._ga_runs),
+            # 审计 H10: 全部阶段参与"取最大"的评估次数合计 (多重比较规模;
+            # 基线/bootstrap 以 track=False 调用, 不计入)
+            'n_evaluations_total': int(sum(r.get('n_evals') or 0
+                                           for r in self._ga_runs)),
             # 审计 H1: 落盘记录样本外隔离策略 (末尾窗口留出, 选择不参与)
             'oos_policy': {
                 'ratio': self.evaluator.walk_forward_config.oos_ratio,
                 'note': ('末尾比例的 walk-forward 窗口留作样本外 (OOS), '
                          '参数选择只用 IS 窗口; OOS 指标见 systems[].oos'),
+            },
+            # 审计 H10: 稳健性证据口径 (试验次数/随机基线/Top-k/ bootstrap)
+            'robustness_policy': {
+                **self._robustness_cfg(),
+                'note': ('随机基线/Top-k 离散/bootstrap CI 只报告, 不参与'
+                         '参数选择 (以 track=False 调用, 独立 RNG 子流); '
+                         '试验次数 = 参与取最大的评估次数; bootstrap 回答'
+                         '"窗口抽样噪声", 不能替代 OOS 外推证据'),
             },
             'systems': []
         }
@@ -1479,6 +1799,8 @@ class OptimizationEngine:
                     'median_sharpe': system.oos_median_sharpe,
                     'median_max_drawdown': system.oos_median_max_drawdown,
                 },
+                # 审计 H10: 稳健性/多重检验证据 (只报告, 不参与选择)
+                'robustness': system.robustness or {},
                 'regime': result.regime,
                 'generations_run': result.generations_run,
                 'convergence_gen': result.convergence_gen,
@@ -1510,6 +1832,8 @@ class OptimizationEngine:
                 median_holding_days=sys_data.get('median_holding_days', 0),
                 num_trades=sys_data.get('num_trades', 0),
                 **(oos_fields({'oos': sys_data.get('oos') or {}})),
+                # 审计 H10: 稳健性证据读回 (旧 JSON 无键 → 空 dict, 如实)
+                robustness=sys_data.get('robustness') or {},
             )
 
             regime = sys_data.get('regime', 'UNKNOWN')

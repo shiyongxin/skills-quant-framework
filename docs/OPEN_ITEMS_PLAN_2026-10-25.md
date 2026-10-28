@@ -103,7 +103,7 @@
 ## 4. 批次 3 —— 研究有效性（高影响，**需先拍板再动手**）
 
 > 这一批不是"写错了"，是"**这套系统的回测结论目前不能当真**"。改完之后历史结论与现有产出**不可比**。
-> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
+> 进度：**H1 已拍板并落地**（2026-10-26，见下方明细）；**H10 已落地**（2026-10-26，见下方明细）；其余条目仍待定方案。
 
 | # | 问题 | 证据 | 性质 |
 |---|---|---|---|
@@ -112,10 +112,10 @@
 | **H4** ✅ | 幸存者偏差：`get_universe()` **无 `as_of` 参数**，用 `datetime.now()` 回溯到 1996；`stock_selector.get_hot_stocks` 硬编码热门股字典 | `historical_data_manager.py:433-434` `get_universe(min_history_days=5000, min_rows=2000)` —— **无 as_of 参数** | 与 C-P0-7 的 point-in-time 止血契约同源，但因子层没跟上 |
 | **H6** ✅ | 多因子权重拟合仍**样本内 + 前瞻收益**（`shift(-1)`），且与 `shift(1)` 的打分口径**互相矛盾** | `multi_factor_selection.py:176`/`:239` `shift(-1)` vs `:411` `shift(1)` —— 口径自相矛盾 | 因子层是选股入口，影响面大 |
 | **H2** ✅ | `confidence` 是**硬编码常数**（`0.7`/`min(0.9, fitness*1.2)`/`0.6`/`0.75`），却被 `daily_signal_generator` 当作**生产参数体系的唯一挑选依据** | `optimization_engine.py:810` `confidence=0.7` / `:919` `min(0.9, best.fitness*1.2)` / `:1045` `0.6` / `:1156` `0.75` | 编造的数参与决策 |
-| **H10** ✅ | 优化结果无**多重检验校正 / 稳健性证据**：`save_results` 落盘无试验次数、最优 fitness 在随机基线上的分位数、Top-10 参数离散度、bootstrap 置信区间。而 `optimize_global` 3200 次 / `iterative` ~7000 次回测量级 | `optimization_engine.py:1282-1294` 落盘仅 `seed`/`n_stocks`/`fitness_weights`/`param_space`/`ga_runs` —— 无试验次数/分位数/bootstrap | 落盘层补字段成本低 |
+| ~~**H10**~~ | ~~优化结果无**多重检验校正 / 稳健性证据**：`save_results` 落盘无试验次数、最优 fitness 在随机基线上的分位数、Top-10 参数离散度、bootstrap 置信区间。而 `optimize_global` 3200 次 / `iterative` ~7000 次回测量级~~ → **✅ 已修（稳健性证据落盘）** | 复验确认属实：落盘仅 `seed`/`n_stocks`/`fitness_weights`/`param_space`/`ga_runs` —— 无试验次数/分位数/bootstrap | 已修 + `tests/test_h10_robustness.py` 32 用例；明细见下方说明 |
 | **H5** | 停牌建模**只落在信号层**（`trade_constraints` + `core/trading_calendar.py`），4 套回测引擎侧**完全没接** —— "停牌期间持仓无法平仓"未建模 | `rg 停牌\|suspend` 在 `backtest_framework`/`vectorized_backtest`/`reversal_backtest`/`historical_backtest_validator` → **0 命中**；`execution_model.py:13-14` docstring 自述"停牌: 数据侧无停牌标记" | ✅ 已复验 |
 
-**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；H10（只改落盘）建议下一个做；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计。
+**建议决策点**：~~H1（接线成本最低、收益最高）~~ **✅ 已做（2026-10-26，见下方明细）**；~~H10（只改落盘）~~ **✅ 已做（2026-10-26，见下方明细）**；H4/H6 涉及因子层改造，工作量大；H3 需要重做验证链设计。
 
 **H1 修复明细（2026-10-26，真样本外隔离）**：
 
@@ -130,6 +130,22 @@
 端到端实测：3 股 × 4 窗 → 9 IS + 3 OOS，控制台摘要与落盘 manifest 均分列。
 
 > **为什么不接 `walk_forward(param_space=...)` 分支**（与台账原"能力已备、链路未接"表述的偏离说明）：该分支的语义是"每窗在训练段重新网格拟合指定维度，**拟合值覆盖 GA 候选值**"。若把它接到 GA 生产路径，被评估的参数（每窗拟合值）与最终**部署**的参数（GA 的 `best.params`）**不是同一套** → 报告出来的 OOS 指标无法代表部署参数的表现 = 制造新的口径冒充。本框架部署的是**固定参数**（`optimized_params` → `signal_generator`），没有逐窗重估的等价实现，因此正确做法是把 **GA 定位为 IS 拟合器**、给它一份**从未参与拟合的留出窗口**（即本次修复），`param_space` 分支保留为"自适应策略"研究工具，不接生产选择路径。另：`train_days` 段在修复后仍只是"窗口前置丢弃期（指标预热）"，不再是拟合段 —— `walk_forward` docstring 已按此口径改写。
+
+**H10 修复明细（2026-10-26，稳健性证据落盘）**：
+
+| 环节 | 做法 |
+|---|---|
+| ① 试验次数 | `IndicatorSystem.robustness['n_selection_evaluations']` = 参与"取最大"的评估数（基线/bootstrap 以 `track=False` 调用 → **不计入**）；manifest 顶层 `n_evaluations_total` = 各轮 `ga_runs[].n_evals` 之和 |
+| ② 随机基线 | `_random_baseline(stage, evaluate_fn, n_samples, best_fitness)` —— 随机参数经**同一评估闭包**（同一 IS 口径，不触碰 OOS）产出适应度分布 → 落盘 `fitness_mean/std/p50/p90/best_fitness/best_percentile`（最优值在基线分布中的分位数）；独立 RNG 子流 `f'{stage}:baseline'` → **不扰动 GA 搜索**（同 seed 基线开关 on/off 参数逐位一致，已测） |
+| ③ Top-k 离散度 | `_top_k_dispersion(entries, k)`（staticmethod）—— 全程被评估参数按适应度取前 k，逐维 `min/max/range/mean/std(ddof=1)` + `fitness_values`/`fitness_spread`；空集 → `available=False` + 原因 |
+| ④ bootstrap CI | `_bootstrap_fitness_ci(stage, evaluate_fn, best_params, n_boot)` —— 最优参数的 **IS 窗口重采样** 95% percentile CI；稳健模式按体制分层，组合口径走 **`FitnessEvaluator._robust_combine`（0.7×min+0.3×avg，从闭包提炼 → 与搜索同源，防口径冒充）**；窗口 < 2 或 `n_bootstrap=0` → 诚实标 `available=False` + 原因 |
+| ⑤ 落盘与读回 | `save_results`：`systems[].robustness` + 顶层 `robustness_policy`（`n_baseline_samples`/`top_k`/`n_bootstrap` + "不参与选择"注记）+ `n_evaluations_total`；`load_results` 读回（旧 JSON 无键 → 空 dict，不编造）；`_print_result_summary` 打印 `[稳健性证据]` 块（不可用时打印 reason） |
+| ⑥ 配置接线 | `optimization_config.RobustnessConfig`（出厂 100/10/500，0 = 关闭→如实标 unavailable）三级优先级：显式 kwargs > config > 引擎默认；`_from_dict` 走 `_filter_known` 存量 JSON 兼容（M2 同款） |
+| ⑦ 顺带修复 H1 遗留 | `optimize_robust` 的 `evaluate_robust` 原写 `self._aggregate_oos(...)` —— 该方法在 `FitnessEvaluator` 上 → **有体制标签的稳健模式必 `AttributeError`**（H1 测试仅源码级断言，未跑行为路径 → 潜伏）；改 `self.evaluator._aggregate_oos(...)`，并加行为回归用例（spy 证明 OOS 汇总路径真的被执行） |
+
+关键设计约束：**证据只在选择之后组装**（`_finalize_robustness` 在 `ga.run` 返回后调用，恰好 1 次/阶段，有源码级门禁）——基线/bootstrap 的评估**不进选择计数、不进 top-k、不参与取最大**，因此不改变搜索结果（核心门禁：同 seed 基线 on/off `best.params` 逐位一致）。不落任何"校正后 p 值"（无多次检验原始统计量，编一个比不给更糟）——只落**可解释的证据**。
+
+端到端实测：global 阶段 `n_selection_evaluations=4`（= GA pop×gen）+ 基线 3 次 = 评估器总调用 7 次（分账正确）；manifest `n_evaluations_total` = `sum(ga_runs n_evals)`；稳健模式 1000 行 × 双体制全链路跑通（GA + 基线 + 分层 bootstrap + 落盘/读回）。
 
 ---
 
@@ -179,7 +195,7 @@ historical_data_mgr    189 行分歧      backtest_framework      70 行
 ## 7. 建议执行顺序
 
 1. **批 1**（~14 条小 bug）→ 低风险，逐条配回归测试，沿用 `tests/test_optional_deps.py` 的门禁模式
-2. **H1 接线** + **H10 落盘字段** → 批次 3 里成本最低、收益最高的两条
+2. ~~**H1 接线** + **H10 落盘字段** → 批次 3 里成本最低、收益最高的两条~~ **✅ 两条均已落地（2026-10-26）**
 3. **批 4.1 决策**（副本：废弃 / 维护 / 依赖主链）→ 阻塞后续所有改动
 4. **批 2**（回测数值）→ 一次性做完 + 重新评估黄金快照
 5. **H4 / H6 / H3**（研究有效性核心）→ 需先定方案再动
