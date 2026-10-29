@@ -26,6 +26,7 @@ import traceback
 import numpy as np
 import pandas as pd
 
+from core.dataframe import standardize_daily_frame
 from core.indicators import sma as _core_sma
 from core.suspension import SuspensionModel
 from core.trading_calendar import TradingCalendar
@@ -290,11 +291,7 @@ class HistoricalBacktestValidator:
             with js_guard():
                 df = ak.stock_zh_index_daily(symbol=symbol)
             if df is not None and len(df) > 0:
-                col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
-                           'low': '最低', 'close': '收盘', 'volume': '成交量'}
-                df = df.rename(columns=col_map)
-                df['日期'] = pd.to_datetime(df['日期'])
-                df = df.sort_values('日期').reset_index(drop=True)
+                df = standardize_daily_frame(df, add_change=False)
                 print(f"[OK] 从akshare获取指数{index_code}: {len(df)}天")
                 return df
         except Exception as e:
@@ -311,11 +308,7 @@ class HistoricalBacktestValidator:
                 with js_guard():
                     df = ak.stock_zh_index_daily(symbol='sh000001')
                 if df is not None and len(df) > 0:
-                    col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
-                               'low': '最低', 'close': '收盘', 'volume': '成交量'}
-                    df = df.rename(columns=col_map)
-                    df['日期'] = pd.to_datetime(df['日期'])
-                    df = df.sort_values('日期').reset_index(drop=True)
+                    df = standardize_daily_frame(df, add_change=False)
                     print(f"[OK] 从akshare获取上证指数: {len(df)}天")
                     return df
             except Exception:

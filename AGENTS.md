@@ -45,6 +45,7 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 | 指数命名空间 (M12) | 指数代码走 `load_index()` / `historical/index/`, 不得走个股 `load()` | `test_index_namespace.py` |
 | 读路径降级 (M13) | 共享 `_read_local()`; 全文件只允许 1 处 `pd.read_parquet` | `test_optional_deps.py` |
 | 死 import (L12) | 全仓无未用 import (两个 `# noqa: F401` 豁免) | `test_source_hygiene.py::TestUnusedImportsRepoWide` |
+| 日线列名/涨跌幅 (M19) | 列名映射只走 `core/dataframe.OHLCV_COLUMN_MAP`; `涨跌幅` 只能由 `ensure_change_pct` 派生 (禁直接赋值); 不消费涨跌幅的模块不补该列 | `test_m19_column_standardization.py` |
 | 部署包 (批次 4) | 副本 = 构建产物; 打包脚本必须在主链且**被 git 跟踪** | `test_package_parity.py` |
 
 ## JS runtime gate (V8)
@@ -74,7 +75,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **842 offline tests** (842 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **866 offline tests** (866 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -85,7 +86,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 | 停牌与日历 (H5 + C-P1-12) | `test_h5_suspension.py` `test_trading_calendar.py` `test_trade_constraints.py` |
 | 指标引擎 (审计 #10) | `test_indicator_engine.py` `test_indicator_convergence.py` `test_core_unification.py` |
 | 信号/选股契约 (审计 #9 + 项 21) | `test_signal_contract.py` `test_selection_contract.py` `test_signal_merge.py` `test_signal_semantics.py` |
-| 数据层 (P0-4/5 + M12/M13/M16/M17/M22) | `test_data_layer_p0.py` `test_data_adjust_dimension.py` `test_index_namespace.py` `test_realtime_quote.py` `test_batch1_m22_m15_m18_m16.py` |
+| 数据层 (P0-4/5 + M12/M13/M16/M17/M19/M22) | `test_data_layer_p0.py` `test_data_adjust_dimension.py` `test_index_namespace.py` `test_realtime_quote.py` `test_batch1_m22_m15_m18_m16.py` `test_m19_column_standardization.py` |
 | 源码卫生 + 可选依赖降级契约 | `test_source_hygiene.py` `test_optional_deps.py` |
 | 部署包一致性 (批次 4) | `test_package_parity.py` |
 | 其余 | `test_b_report_p2.py` `test_e2e_regression.py` `test_execution_model.py` `test_factor_library.py` `test_indicator_skill_p0.py` `test_js_runtime.py` `test_ml_predictor_timeseries.py` `test_reversal_unification.py` `test_risk_wiring.py` `test_stage1_regressions.py` `test_stage2_fix_regressions.py` `test_web_presentation_p2.py` |

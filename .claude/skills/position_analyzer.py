@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 
 from stock_data_fetcher import StockDataFetcher
+from core.dataframe import ensure_change_pct
 from core.indicator_engine import IndicatorEngine
 
 
@@ -79,8 +80,8 @@ class PositionAnalyzer:
         data['TR'] = eng.true_range()
         data['ATR'] = eng.atr(14)
 
-        # 涨跌幅
-        data['涨跌幅'] = close.pct_change() * 100
+        # 涨跌幅 (以收盘口径无条件重算; 共享单一真相源, 审计 M19)
+        data = ensure_change_pct(data, overwrite=True)
 
         return data
 

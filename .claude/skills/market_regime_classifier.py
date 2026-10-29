@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from core.dataframe import standardize_daily_frame
 from core.indicators import sma as _core_sma
 from js_runtime import js_guard
 
@@ -107,12 +108,8 @@ class MarketRegimeClassifier:
                     df = ak.stock_zh_index_daily(symbol=f"sh{index_code}")
 
             if df is not None and len(df) > 0:
-                # 标准化列名
-                col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
-                           'low': '最低', 'close': '收盘', 'volume': '成交量'}
-                df = df.rename(columns=col_map)
-                df['日期'] = pd.to_datetime(df['日期'])
-                df = df.sort_values('日期').reset_index(drop=True)
+                # 标准化列名 + 按日期排序 (共享单一真相源, 审计 M19)
+                df = standardize_daily_frame(df, add_change=False)
 
                 # 过滤日期范围
                 start_dt = pd.to_datetime(start_date)

@@ -31,6 +31,7 @@ from reversal_rules import (
     decide_action,
 )
 import trade_constraints
+from core.dataframe import standardize_daily_frame
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 
@@ -174,13 +175,9 @@ class ReversalDetector:
             if df is None or len(df) < 60:
                 return None
 
-            column_mapping = {
-                'date': '日期', 'open': '开盘', 'high': '最高',
-                'low': '最低', 'close': '收盘', 'volume': '成交量'
-            }
-            df = df.rename(columns=column_mapping)
-            df['日期'] = pd.to_datetime(df['日期'])
-            df = df.sort_values('日期').reset_index(drop=True)
+            # 标准化列名 + 日期排序 (共享单一真相源, 审计 M19;
+            # 本模块不消费涨跌幅 → 不补该列, 与旧行为一致)
+            df = standardize_daily_frame(df, add_change=False)
 
             return df
 

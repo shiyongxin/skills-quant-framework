@@ -32,6 +32,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore
 
+from core.dataframe import (standardize_daily_frame,
+                            standardize_ohlcv_columns)
 from sina_daily import fetch_daily, format_symbol
 from stock_list_manager import get_stock_name as _lookup_stock_name
 from js_runtime import js_guard
@@ -364,19 +366,8 @@ class HistoricalDataManager:
             )
 
             if df is not None and len(df) > 0:
-                # 标准化列名
-                col_map = {
-                    'date': '日期', 'open': '开盘', 'high': '最高',
-                    'low': '最低', 'close': '收盘', 'volume': '成交量',
-                    'amount': '成交额'
-                }
-                df = df.rename(columns=col_map)
-                df['日期'] = pd.to_datetime(df['日期'])
-                df = df.sort_values('日期').reset_index(drop=True)
-
-                # 计算涨跌幅
-                if '涨跌幅' not in df.columns:
-                    df['涨跌幅'] = df['收盘'].pct_change() * 100
+                # 标准化列名 + 日期排序 + 涨跌幅 (共享单一真相源, 审计 M19)
+                df = standardize_daily_frame(df)
 
                 return df
 
@@ -403,9 +394,7 @@ class HistoricalDataManager:
                 df = ak.stock_zh_index_daily(symbol=sina_symbol)
 
             if df is not None and len(df) > 0:
-                col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
-                           'low': '最低', 'close': '收盘', 'volume': '成交量'}
-                df = df.rename(columns=col_map)
+                df = standardize_ohlcv_columns(df)
                 if '日期' not in df.columns:
                     print(f"[WARN] {symbol} 指数接口返回列异常, 无日期列")
                     return None
@@ -413,10 +402,9 @@ class HistoricalDataManager:
                 start_dt = pd.to_datetime(start_date)
                 end_dt = pd.to_datetime(end_date)
                 df = df[(df['日期'] >= start_dt) & (df['日期'] <= end_dt)]
-                df = df.sort_values('日期').reset_index(drop=True)
-
-                if '收盘' in df.columns and '涨跌幅' not in df.columns:
-                    df['涨跌幅'] = df['收盘'].pct_change() * 100
+                # 标准化 (幂等) + 按日期排序 + 重置索引 + 涨跌幅
+                # (共享单一真相源, 审计 M19)
+                df = standardize_daily_frame(df)
 
                 return df
 

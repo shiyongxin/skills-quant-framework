@@ -34,6 +34,7 @@ except ImportError:
     requests = None
     REQUESTS_AVAILABLE = False
 
+from core.dataframe import ensure_change_pct, standardize_daily_frame
 from core.fetch_result import FetchResult
 from core.indicator_engine import IndicatorEngine
 from sina_daily import fetch_daily, format_symbol
@@ -178,28 +179,9 @@ class StockDataFetcher:
             )
 
             if df is not None and len(df) > 0:
-                # 标准化列名（新浪接口返回英文列名）
-                column_mapping = {
-                    'date': '日期',
-                    'open': '开盘',
-                    'high': '最高',
-                    'low': '最低',
-                    'close': '收盘',
-                    'volume': '成交量',
-                    'amount': '成交额'
-                }
-                df = df.rename(columns=column_mapping)
-
-                # 确保日期是datetime类型
-                if '日期' in df.columns:
-                    df['日期'] = pd.to_datetime(df['日期'])
-
-                # 按日期排序
-                df = df.sort_values('日期').reset_index(drop=True)
-
-                # 计算涨跌幅
-                if '涨跌幅' not in df.columns:
-                    df['涨跌幅'] = df['收盘'].pct_change() * 100
+                # 标准化列名 + 日期排序 + 涨跌幅 (共享单一真相源, 审计 M19;
+                # 新浪接口返回英文列名)
+                df = standardize_daily_frame(df)
 
                 # 保存到本地 (同 (股票, 口径) 只留最新快照 — 审计 M16)
                 # 复权口径进文件名 (raw 保持旧名兼容; 审计 P0-4 同构)
@@ -544,9 +526,8 @@ class StockDataFetcher:
         # 成交量移动平均
         df['VOL_MA5'] = eng.volume_ma(5)
 
-        # 涨跌幅（如果还没有）
-        if '涨跌幅' not in df.columns:
-            df['涨跌幅'] = close.pct_change() * 100
+        # 涨跌幅（如果还没有; 共享单一真相源, 审计 M19）
+        df = ensure_change_pct(df)
 
         return df
 

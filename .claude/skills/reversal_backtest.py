@@ -18,6 +18,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
+from core.dataframe import standardize_daily_frame
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
@@ -95,13 +96,8 @@ class ReversalBacktester:
             if df is None or len(df) < 100:
                 return None
 
-            column_mapping = {
-                'date': '日期', 'open': '开盘', 'high': '最高',
-                'low': '最低', 'close': '收盘', 'volume': '成交量'
-            }
-            df = df.rename(columns=column_mapping)
-            df['日期'] = pd.to_datetime(df['日期'])
-            df = df.sort_values('日期').reset_index(drop=True)
+            # 标准化列名 + 按日期排序 (共享单一真相源, 审计 M19)
+            df = standardize_daily_frame(df, add_change=False)
 
             # 只取最近1年
             if len(df) > days:

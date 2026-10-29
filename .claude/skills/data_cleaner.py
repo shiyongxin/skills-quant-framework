@@ -31,9 +31,13 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from core.dataframe import (OHLCV_COLUMN_MAP, change_pct,
+                            ensure_change_pct)
+
+# 列名别名: OHLCV 部分派生自共享映射 (审计 M19, 唯一真相源),
+# 另加本工具特有的两个别名
 COLUMN_ALIASES = {
-    'date': '日期', 'open': '开盘', 'high': '最高', 'low': '最低',
-    'close': '收盘', 'volume': '成交量', 'amount': '成交额',
+    **OHLCV_COLUMN_MAP,
     '日期时间': '日期', '股票代码': '代码',
 }
 
@@ -110,7 +114,7 @@ def find_suspicious_jumps(df: pd.DataFrame) -> List[Dict[str, object]]:
         dates = df['日期']
     else:
         dates = pd.Series(df.index, index=df.index)
-    ret = close.pct_change() * 100
+    ret = change_pct(close)
     out = []
     for i in ret.index:
         val = ret.loc[i]
@@ -170,7 +174,8 @@ def clean_ohlcv_frame(df: pd.DataFrame, adjust: str = ''
         report['actions'].append('成交额单位 万元→元 (×10000)')
 
     if '收盘' in out.columns and '涨跌幅' not in out.columns:
-        out['涨跌幅'] = pd.to_numeric(out['收盘'], errors='coerce').pct_change() * 100
+        # CSV 路径: 收盘价可能是字符串 → 需转数值 (共享单一真相源, 审计 M19)
+        out = ensure_change_pct(out, coerce=True)
         report['actions'].append('补算 涨跌幅 列')
 
     jumps = find_suspicious_jumps(out)
