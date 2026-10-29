@@ -19,16 +19,14 @@ sys.path.append('.claude/skills')
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
 
 import trade_constraints
-from core.dataframe import standardize_daily_frame
 from core.indicators import sma as _core_sma
-from sina_daily import fetch_daily, format_symbol
 
 
 @dataclass
@@ -156,48 +154,55 @@ class StockAnalysis:
 class LongTermSelector:
     """中长期选股器"""
 
-    def __init__(self):
+    def __init__(self, data_dir: str = './stock_data'):
+        # 缓存键含**口径维度** (code, adjust, as_of) —— 同一只股票的不同
+        # 复权口径/参考日不是同一份数据 (审计 M20)
         self.cache = {}
+        self._data_manager = None
+        self.data_dir = data_dir
 
-    def get_stock_data(self, code: str, days: int = 500) -> Optional[pd.DataFrame]:
+    @property
+    def data_manager(self):
+        """共享数据层 (延迟创建 —— 构造即建目录/读元数据是副作用)。"""
+        if self._data_manager is None:
+            from historical_data_manager import HistoricalDataManager
+            self._data_manager = HistoricalDataManager(self.data_dir)
+        return self._data_manager
+
+    def get_stock_data(self, code: str, days: int = 500,
+                        adjust: str = '', as_of: str = None
+                        ) -> Optional[pd.DataFrame]:
         """
-        获取股票历史数据
+        获取股票历史数据 (走**共享数据层**, 审计 M20)
+
+        旧实现自行调 `fetch_daily`: 无复权维度 / 无 as_of / 失败静默返回
+        None / 无交易日历 → 与 P0-4 口径矛盾 (且除权跳空会污染收益率)。
+        现统一走 `HistoricalDataManager.get_daily_result`: 复权维度 +
+        参考日 + FetchResult (失败带原因) + 交易日历窗口。
 
         Args:
             code: 股票代码
-            days: 获取天数
+            days: 需要最近多少根日线
+            adjust: 复权口径 (''=不复权 / 'qfq' / 'hfq') —— 维度随缓存
+                一起区分 (同一只股票不同口径不是同一份数据)
+            as_of: 参考日 (显式传入 → 可复现; None → 今天)
 
         Returns:
-            DataFrame or None
+            DataFrame or None (失败时打印原因, 不静默)
         """
-        if code in self.cache:
-            return self.cache[code]
+        cache_key = (code, adjust, as_of)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
 
-        # 前缀规则单一真相源 (审计 M18: 旧内联映射缺 bj 分支)
-        full_code = format_symbol(code)
-
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days * 2)
-
-        try:
-            df = fetch_daily(
-                symbol=full_code,
-                start_date=start_date.date(),
-                end_date=end_date.date()
-            )
-
-            if df is None or len(df) < 250:
-                return None
-
-            # 标准化列名 + 日期排序 (共享单一真相源, 审计 M19;
-            # 本模块不消费涨跌幅 → 不补该列, 与旧行为一致)
-            df = standardize_daily_frame(df, add_change=False)
-
-            self.cache[code] = df
-            return df
-
-        except Exception as e:
+        result = self.data_manager.get_daily_result(
+            code, days=days, adjust=adjust, as_of=as_of, min_rows=250)
+        if not result.ok:
+            print(f"[WARN] {code} 取数失败: {result.error}")
             return None
+
+        df = result.data
+        self.cache[cache_key] = df
+        return df
 
     def calculate_returns(self, df: pd.DataFrame) -> Dict[str, float]:
         """

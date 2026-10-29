@@ -47,6 +47,7 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 | 死 import (L12) | 全仓无未用 import (两个 `# noqa: F401` 豁免) | `test_source_hygiene.py::TestUnusedImportsRepoWide` |
 | 日线列名/涨跌幅 (M19) | 列名映射只走 `core/dataframe.OHLCV_COLUMN_MAP`; `涨跌幅` 只能由 `ensure_change_pct` 派生 (禁直接赋值); 不消费涨跌幅的模块不补该列 | `test_m19_column_standardization.py` |
 | 评估失败可见 (M5) | 逐股回测失败必须记账 (`n_stocks_failed`/`success_rate`) + 受罚 (`fitness *= success_rate`; 成功率 < `min_success_rate` → 归零); 评估路径禁静默 `except: continue` | `test_m5_evaluation_failures.py` |
+| 共享数据层 (M20) | 取数一律走 `HistoricalDataManager.get_daily_result` (复权维度 + 参考日 + FetchResult + 交易日历窗口); 禁各模块自行取数/用 wall clock 划窗口; 缓存键须含口径维度 | `test_m20_shared_data_layer.py` |
 | 部署包 (批次 4) | 副本 = 构建产物; 打包脚本必须在主链且**被 git 跟踪** | `test_package_parity.py` |
 
 ## JS runtime gate (V8)
@@ -76,7 +77,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **883 offline tests** (883 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **903 offline tests** (903 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -87,7 +88,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 | 停牌与日历 (H5 + C-P1-12) | `test_h5_suspension.py` `test_trading_calendar.py` `test_trade_constraints.py` |
 | 指标引擎 (审计 #10) | `test_indicator_engine.py` `test_indicator_convergence.py` `test_core_unification.py` |
 | 信号/选股契约 (审计 #9 + 项 21) | `test_signal_contract.py` `test_selection_contract.py` `test_signal_merge.py` `test_signal_semantics.py` |
-| 数据层 (P0-4/5 + M12/M13/M16/M17/M19/M22) | `test_data_layer_p0.py` `test_data_adjust_dimension.py` `test_index_namespace.py` `test_realtime_quote.py` `test_batch1_m22_m15_m18_m16.py` `test_m19_column_standardization.py` |
+| 数据层 (P0-4/5 + M12/M13/M16/M17/M19/M20/M22) | `test_data_layer_p0.py` `test_data_adjust_dimension.py` `test_index_namespace.py` `test_realtime_quote.py` `test_batch1_m22_m15_m18_m16.py` `test_m19_column_standardization.py` `test_m20_shared_data_layer.py` |
 | 源码卫生 + 可选依赖降级契约 | `test_source_hygiene.py` `test_optional_deps.py` |
 | 部署包一致性 (批次 4) | `test_package_parity.py` |
 | 其余 | `test_b_report_p2.py` `test_e2e_regression.py` `test_execution_model.py` `test_factor_library.py` `test_indicator_skill_p0.py` `test_js_runtime.py` `test_ml_predictor_timeseries.py` `test_reversal_unification.py` `test_risk_wiring.py` `test_stage1_regressions.py` `test_stage2_fix_regressions.py` `test_web_presentation_p2.py` |
@@ -105,7 +106,8 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 **仍开** (完整条目与证据见台账 §3/§5.2/§5.3/§6):
 
-- **批次 2 余量**: **M4** (短体制窗口冷启动: `ma_slow` 可达 120 > warmup 60; `min_hold_end` 使止盈/移动止损在体制窗内永不触发) / **M20** (`long_term_selector`/`reversal_detector` 绕过共享数据层自行调 akshare: 无 adjust 维度 / as_of / FetchResult / 交易日历) —— M4 标 ⚠️ **动手前必须先复验** (审计基线距今 30+ 提交)。
+- **批次 2 余量**: **M4** (短体制窗口冷启动: `ma_slow` 可达 120 > warmup 60; `min_hold_end` 使止盈/移动止损在体制窗内永不触发) —— 标 ⚠️ **动手前必须先复验** (审计基线距今 30+ 提交)。**批次 2 至此仅余 M4**。
+- **复权默认口径待产品决策**: 全仓默认 `adjust=''` (不复权) → 含除权跳空 (优化器自身也用不复权, 回测收益口径受影响)。M20 已把**维度**打通 (可按口径取数/缓存分键), 但"默认用哪个口径"尚未定 —— 建议单独拍板。
 - **批次 4.2 工程基座**: L1 (`strategy_optimizer` 5 处 `get_param_grid` 与 `ParameterSpace` 不一致, `sell_threshold` 符号冲突) / L2 (硬编码他人机器绝对路径) / L3 (无 `pyproject.toml`/CI) / L4 (11 处 `sys.path.append` CWD 依赖) / L5 (`test_tool.py` import 即执行) / L9 (`OptimizationConfig` 双份定义) / L10 (VWAP 全样本 vs 当日语义冲突) / L11 (体制字符串 vs 枚举混用)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。
 - **幸存者偏差无法本地消除**: 退市股历史行情本地缺失 → 只能标记 (`survivorship_bias=True`); 消除需外部数据源 (台账 §5.3)。

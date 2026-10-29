@@ -34,6 +34,7 @@ from threading import Semaphore
 
 from core.dataframe import (standardize_daily_frame,
                             standardize_ohlcv_columns)
+from core.fetch_result import FetchResult
 from sina_daily import fetch_daily, format_symbol
 from stock_list_manager import get_stock_name as _lookup_stock_name
 from js_runtime import js_guard
@@ -49,6 +50,8 @@ class HistoricalDataManager:
     - 数据验证: 完整性、异常值检查
     - 股票池管理: 按历史天数过滤
     """
+
+    SOURCE = 'historical_data_manager'   # FetchResult.source 标记
 
     def __init__(self, data_dir="./stock_data"):
         self.data_dir = Path(data_dir)
@@ -412,6 +415,143 @@ class HistoricalDataManager:
             print(f"[WARN] {symbol} 指数API获取失败: {str(e)[:120]}")
 
         return None
+
+    # ------------------------------------------------------------------
+    # 共享数据层的日线入口 (审计 M20)
+    # ------------------------------------------------------------------
+    def get_daily_result(self, symbol: str, *, days: int = None,
+                          start_date: str = None, end_date: str = None,
+                          adjust: str = '', as_of: str = None,
+                          min_rows: int = 0,
+                          trading_calendar=None) -> FetchResult:
+        """共享数据层的日线入口 —— 供"各自取数"的模块统一走本层 (审计 M20)。
+
+        一次给齐以前缺失的四件事:
+
+        - **复权维度** (adjust): ''=不复权 / 'qfq' / 'hfq'。落库文件名与
+          元数据都带该维度 (审计 P0-4) → 不复权序列含除权跳空, 收益率/指标
+          会失真。此前 `long_term_selector` / `reversal_detector` 自行调
+          `fetch_daily` → **无此维度**, 与 P0-4 口径矛盾。
+        - **参考日** (as_of): 显式 as_of 优先; None → 今天 (实时取数默认)。
+          结果的 `as_of` 字段记录实际参考日 → 需要可复现的调用方必须显式传。
+        - **FetchResult**: 失败带 error (不再静默 None / 空 DF 假装成功)。
+        - **交易日历**: 用"最近 N 个**交易日**"换算取数窗口 (无日历 → 降级
+          为自然日并在 meta 标记 `calendar_used=False`, 不静默)。
+
+        Args:
+            symbol: 股票代码 (6 位; 前缀规则由本层处理)
+            days: 需要最近多少根日线 (按交易日换算窗口)
+            start_date / end_date: 显式窗口 (优先于 days)
+            adjust: 复权口径
+            as_of: 参考日 (显式传入 → 可复现)
+            min_rows: 最少行数 (不足 → ok=False + 原因)
+            trading_calendar: 交易日历 (None → 尝试用本地指数现算, 不联网)
+
+        Returns:
+            FetchResult (ok=False 时 data 为空 DF, error 说明原因)
+        """
+        symbol = str(symbol).zfill(6)
+        adjust = self._adjust_tag(adjust)
+
+        # 参考日: 显式 as_of 优先, 否则今天 (实时取数默认; 结果记录实际值)
+        if as_of is not None:
+            try:
+                ref = pd.Timestamp(as_of).date()
+            except (TypeError, ValueError):
+                return FetchResult.failure(
+                    f'as_of 解析失败: {as_of!r}', source=self.SOURCE,
+                    adjust=adjust)
+        else:
+            ref = datetime.now().date()
+
+        # 取数窗口起点
+        win_start = None
+        calendar_used = False
+        if start_date is not None:
+            try:
+                win_start = pd.Timestamp(start_date).date()
+            except (TypeError, ValueError):
+                return FetchResult.failure(
+                    f'start_date 解析失败: {start_date!r}',
+                    source=self.SOURCE, adjust=adjust)
+        elif days:
+            win_start, calendar_used = self._window_start(ref, days,
+                                                          trading_calendar)
+
+        end = end_date or ref.strftime('%Y%m%d')
+        begin = win_start.strftime('%Y%m%d') if win_start else "19960101"
+
+        df = self.fetch_and_cache(symbol, start_date=begin, end_date=end,
+                                  adjust=adjust)
+        if df is None or len(df) == 0:
+            return FetchResult.failure(
+                f'取数失败或无数据 (symbol={symbol}, adjust={adjust or "raw"})',
+                source=self.SOURCE, adjust=adjust,
+                as_of=ref.isoformat(),
+                meta={'window_start': begin, 'window_end': end,
+                      'calendar_used': calendar_used, 'n_rows': 0})
+
+        # 裁剪到请求窗口 (fetch_and_cache 会与本地缓存合并 → 可能含窗口外行)
+        if '日期' in df.columns:
+            mask = pd.to_datetime(df['日期']) <= pd.Timestamp(ref)
+            if win_start is not None:
+                mask &= pd.to_datetime(df['日期']) >= pd.Timestamp(win_start)
+            df = df[mask].reset_index(drop=True)
+
+        if len(df) < min_rows:
+            return FetchResult.failure(
+                f'数据不足 ({len(df)} 行 < 要求的 {min_rows} 行)',
+                source=self.SOURCE, adjust=adjust,
+                as_of=ref.isoformat(),
+                meta={'window_start': begin, 'window_end': end,
+                      'calendar_used': calendar_used, 'n_rows': len(df)})
+
+        return FetchResult(
+            ok=True, data=df, source=self.SOURCE, adjust=adjust,
+            as_of=ref.isoformat(),
+            meta={'window_start': begin, 'window_end': end,
+                  'calendar_used': calendar_used, 'n_rows': len(df)})
+
+    def _window_start(self, ref, days: int, trading_calendar=None):
+        """取数窗口起点: 有交易日历 → N 个交易日前; 无 → 自然日 days*2。
+
+        日历来源: 显式传入 > 本地指数行情现算 (不联网、不落盘)。都没有 →
+        降级为自然日并返回 `calendar_used=False` (如实标记, 不静默)。
+        """
+        cal = trading_calendar
+        if cal is None:
+            cal = self._local_calendar()
+        if cal is not None:
+            try:
+                first = cal.first_day          # property (不是方法)
+                tdays = (cal.trading_days_between(first, ref)
+                         if first is not None else [])
+            except Exception:
+                tdays = []
+            if tdays:
+                if len(tdays) > days:
+                    return tdays[len(tdays) - days], True
+                return tdays[0], True
+        return ref - timedelta(days=days * 2), False
+
+    def _local_calendar(self):
+        """由本地指数行情现算交易日历 (不联网、**不落盘**)。
+
+        `build_calendar_from_index` 会写日历 JSON 并注入进程级单例 →
+        取数路径不写仓库目录, 故这里直接用 `TradingCalendar.from_index`。
+        本地无指数行情 → None (不臆造日历)。
+        """
+        try:
+            index_df = self.load_index('000001')
+        except Exception:
+            return None
+        if index_df is None or len(index_df) == 0:
+            return None
+        try:
+            from core.trading_calendar import TradingCalendar
+            return TradingCalendar.from_index(index_df)
+        except Exception:
+            return None
 
     def load(self, symbol: str, start_date: str = None,
              end_date: str = None, adjust: str = "") -> pd.DataFrame:

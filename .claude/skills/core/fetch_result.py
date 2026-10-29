@@ -31,17 +31,26 @@ class FetchResult:
     source: Optional[str] = None
     as_of: Optional[str] = None
     adjust: Optional[str] = None      # ''=不复权 / 'qfq' / 'hfq'
+    # 附加口径元信息 (审计 M20): 取数窗口/日历是否可用/行数等 —— 让
+    # "这次取数到底是怎么来的"可审计 (不靠日志猜测)
+    meta: dict = field(default_factory=dict)
 
     @classmethod
     def success(cls, data: pd.DataFrame, source: Optional[str] = None,
-                adjust: Optional[str] = None) -> "FetchResult":
+                adjust: Optional[str] = None,
+                as_of: Optional[str] = None,
+                meta: Optional[dict] = None) -> "FetchResult":
         return cls(ok=True, data=data, source=source,
-                   as_of=datetime.now().isoformat(), adjust=adjust)
+                   as_of=as_of or datetime.now().isoformat(), adjust=adjust,
+                   meta=meta or {})
 
     @classmethod
     def failure(cls, error: str, source: Optional[str] = None,
                 data: Optional[pd.DataFrame] = None,
-                adjust: Optional[str] = None) -> "FetchResult":
+                adjust: Optional[str] = None,
+                as_of: Optional[str] = None,
+                meta: Optional[dict] = None) -> "FetchResult":
         return cls(ok=False, data=data if data is not None else pd.DataFrame(),
                    error=error, source=source,
-                   as_of=datetime.now().isoformat(), adjust=adjust)
+                   as_of=as_of or datetime.now().isoformat(), adjust=adjust,
+                   meta=meta or {})

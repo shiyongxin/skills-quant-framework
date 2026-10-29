@@ -18,20 +18,18 @@ import sys
 sys.path.append('.claude/skills')
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings('ignore')
 
-from sina_daily import fetch_daily, format_symbol
 
 from reversal_rules import (
     score_oversold, score_overbought, score_divergence, score_exhaustion,
     decide_action,
 )
 import trade_constraints
-from core.dataframe import standardize_daily_frame
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 
@@ -154,35 +152,34 @@ class ReversalAlert:
 class ReversalDetector:
     """转折点检测器"""
 
-    def __init__(self):
-        pass
+    def __init__(self, data_dir: str = './stock_data'):
+        # 共享数据层 (延迟创建 —— 构造即建目录/读元数据是副作用)
+        self._data_manager = None
+        self.data_dir = data_dir
 
-    def get_stock_data(self, code: str, days: int = 250) -> Optional[pd.DataFrame]:
-        """获取股票数据"""
-        try:
-            # 前缀规则单一真相源 (审计 M18: 旧内联映射缺 bj 分支)
-            full_code = format_symbol(code)
+    @property
+    def data_manager(self):
+        """共享数据层 (审计 M20: 统一走本层取数)。"""
+        if self._data_manager is None:
+            from historical_data_manager import HistoricalDataManager
+            self._data_manager = HistoricalDataManager(self.data_dir)
+        return self._data_manager
 
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days * 2)
+    def get_stock_data(self, code: str, days: int = 250, adjust: str = '',
+                        as_of: str = None) -> Optional[pd.DataFrame]:
+        """获取股票数据 (走**共享数据层**, 审计 M20)
 
-            df = fetch_daily(
-                symbol=full_code,
-                start_date=start_date.date(),
-                end_date=end_date.date()
-            )
-
-            if df is None or len(df) < 60:
-                return None
-
-            # 标准化列名 + 日期排序 (共享单一真相源, 审计 M19;
-            # 本模块不消费涨跌幅 → 不补该列, 与旧行为一致)
-            df = standardize_daily_frame(df, add_change=False)
-
-            return df
-
-        except Exception as e:
+        旧实现自行调 `fetch_daily`: 无复权维度 / 无 as_of / 失败静默返回
+        None / 无交易日历 → 与 P0-4 口径矛盾 (且除权跳空会污染反转判定)。
+        现统一走 `HistoricalDataManager.get_daily_result`: 复权维度 +
+        参考日 + FetchResult (失败带原因) + 交易日历窗口。
+        """
+        result = self.data_manager.get_daily_result(
+            code, days=days, adjust=adjust, as_of=as_of, min_rows=60)
+        if not result.ok:
+            print(f"[WARN] {code} 取数失败: {result.error}")
             return None
+        return result.data
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """计算技术指标"""

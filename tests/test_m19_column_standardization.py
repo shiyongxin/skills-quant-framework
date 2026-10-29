@@ -100,17 +100,18 @@ class TestNoDirectChangePctAssignment:
     def test_shared_helper_is_actually_used_by_call_sites(self):
         """接线核对: 6 个消费方确实调用了共享实现 (防"建了函数没人用")。"""
         expected = {
-            # 4 个个股/指数取数站: 列名标准化 + 日期排序
+            # 个股/指数取数站: 列名标准化 + 日期排序
             'stock_data_fetcher.py': 'standardize_daily_frame',
             'historical_data_manager.py': 'standardize_daily_frame',
-            'long_term_selector.py': 'standardize_daily_frame',
-            'reversal_detector.py': 'standardize_daily_frame',
             'historical_backtest_validator.py': 'standardize_daily_frame',
             'market_regime_classifier.py': 'standardize_daily_frame',
             'reversal_backtest.py': 'standardize_daily_frame',
             # 涨跌幅派生站
             'position_analyzer.py': 'ensure_change_pct',
             'data_cleaner.py': 'ensure_change_pct',
+            # `long_term_selector` / `reversal_detector` 自 M20 起改走共享
+            # 数据层 → 标准化由 `historical_data_manager.get_daily_result`
+            # 统一完成 (两模块不再自行取数/标准化)
         }
         for name, func in expected.items():
             py = _SKILLS / name

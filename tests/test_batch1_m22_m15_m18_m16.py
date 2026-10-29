@@ -266,12 +266,24 @@ class TestM18FetchRouting:
         assert seen['adjust'] == 'hfq'
 
     def test_five_callers_route_through_shared_layer(self):
+        # 直连 akshare 清零 (M18 契约不变): 5 个取数方都必须走共享层 ——
+        # 其中 3 个直接用取数层 (sina_daily), 2 个选择器在 M20 后进一步
+        # 改走**数据层** (historical_data_manager → 内部再走取数层)
         for name in ('stock_data_fetcher.py', 'historical_data_manager.py',
                      'long_term_selector.py', 'reversal_backtest.py',
                      'reversal_detector.py'):
             src = _read(name)
-            assert 'sina_daily' in src, name
             assert 'ak.stock_zh_a_daily(' not in src, name  # 直连调用清零
+        for name in ('stock_data_fetcher.py', 'historical_data_manager.py',
+                     'reversal_backtest.py'):
+            src = _read(name)
+            assert 'sina_daily' in src, name
+        # M20: 两个选择器不再自行取数 (复权维度/as_of/FetchResult/日历
+        # 统一由数据层提供) → 不得再直接引取数层
+        for name in ('long_term_selector.py', 'reversal_detector.py'):
+            src = _read(name)
+            assert 'historical_data_manager' in src, name
+            assert 'from sina_daily import' not in src, name
         # 3 个内联前缀模块不再手拼 sh/sz
         for name in ('long_term_selector.py', 'reversal_backtest.py',
                      'reversal_detector.py'):
