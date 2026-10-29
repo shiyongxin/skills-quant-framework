@@ -91,6 +91,8 @@ update_*.py
 持仓*.py
 持仓*.html
 stock_selection_history.json
+# 优化器输出产物 (生成的, 非源码; 曾被误提交 → 2026-10-29 取消跟踪)
+optimization_result.json
 
 # Chart output directories
 charts/
