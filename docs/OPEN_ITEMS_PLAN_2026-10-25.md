@@ -220,20 +220,32 @@
 
 ## 5. 批次 4 —— 工程基座与副本治理（需先定方向）
 
-### 5.1 `optimization_package/` 副本已严重分叉 ⚠️
+### 5.1 `optimization_package/` 副本治理 —— ✅ 已决策并落地（2026-10-26，选③「依赖主链」）
 
-该目录 **gitignored**，`git status` 看不见，但仍在被使用。实测分歧行数：
+**决策**：**③ 改为依赖主链** —— 主链 `.claude/skills/` 是唯一真相源；本目录的 `skills/` 降级为**构建产物**（由 `pack.py` 自动生成，**请勿手改**）。不选①废弃（README 承诺的"整目录复制到其他电脑离线跑"是真实交付形态，且成本已被压到一次 `pack.py`），不选②维护（不变量级复制 + gitignored = 每次改动必然隐形漂移，已实证 7 个批次）。
 
-```
-optimization_engine    546 行分歧      signal_generator       509 行
-vectorized_backtest    336 行分歧      trend_indicators       206 行
-pattern_recognition    185 行分歧      stock_data_fetcher     157 行
-historical_data_mgr    189 行分歧      backtest_framework      70 行
-```
+**决策依据（实测，非推测）**：
 
-主链这批改动（IndicatorEngine / Signal 契约 / trade_constraints / adjust 维度）**一行都没过去**。
+| 事实 | 证据 |
+|---|---|
+| 副本已漂移 **5000+ 行**，且**不含任何已审计修复** | `optimization_engine` 1106 行 / `vectorized_backtest` 690 / `historical_data_manager` 577 / `signal_generator` 466 / `backtest_framework` 411 …（台账旧记录 546/336/… 已严重低估）；`split_is_oos`/`confidence_from_fitness`/`core.suspension`/`trading_day_index`/`get_universe_meta` 在副本中**命中 0 文件** |
+| 副本可 import → **陈旧产物冒充最新** | 现存副本自包含可运行，但它跑的是**未审计语义**（无 H1 样本外隔离 / 无 H2 证据 / 无 H5 停牌 / 无 H6 点时 / 无 H4 PIT 池），产出的 `optimization_result.json` 可被主链 `optimized_params`/`daily_signal_generator` 直接加载 → **未审计逻辑污染已审计主链** |
+| 旧 `pack.py` **已断链**，打包产物连 import 都过不去 | 手写清单漏 `execution_model`/`factor_library`/`sina_daily`/`stock_list_manager`/`trade_constraints` + 整个 `core/` → 实测 `ModuleNotFoundError: No module named 'execution_model'` |
+| `indicator_system_report.py` **只在副本存在**、主链无源 | `pack.py` 对它 `[SKIP]` → 产物缺报告生成器（副本 `run_optimize.py` 依赖它出报告） |
+| 副本从未跑出过结果 | `optimization_package/stock_data` = **0B**，无 `optimization_result.json`/reports → 部署链路长期处于"能打包但没人验证过"状态 |
 
-**决策项**：① 正式废弃（则删除，并在 AGENTS.md 移除相关约定）② 继续维护（则需要一个同步脚本 + 明确的"哪些能力不回灌"清单）③ 改为依赖主链（最干净，但要破它的"自包含"约束）
+**落地动作**：
+
+| 动作 | 做法 |
+|---|---|
+| ① 打包工具**移入主链** + 改依赖闭包自动打包 | 旧 `pack.py` 在 gitignored 目录里 → **构建工具本身不受版本控制**（治理不可复现/评审）→ 移入 `.claude/skills/tools/pack.py`（**受跟踪**）+ AST 递归闭包 → 结构上不可能再漏依赖；整包复制 `core/` 子包；带戳头注入（"由 pack.py 生成, 请勿手改"，幂等） |
+| ② 版本戳 `PROVENANCE.json` | 写源 commit + 生成时间 + 每文件 sha256 → 部署包**自带"来自哪个版本"的证据**，陈旧产物无法冒充最新（可核对 `source_commit`） |
+| ③ 孤儿模块并入主链 | `indicator_system_report.py`（518 行，自包含、主链无源）→ 并入 `.claude/skills/` 成为唯一真相源 → 打包自动收录，产物不再缺报告器（需给 `.gitignore` 的 `*_report.py` 加**单文件**豁免 —— 该规则本为拦一次性生成脚本；注意 gitignore **不支持行尾注释**，豁免与注释须分行） |
+| ④ 副本重打一次 | 用新 `pack.py` 重打 → 副本**一次性对齐主链**（含 H1/H2/H4/H5/H6 修复 + `core/`）→ 副本从此不再是"另一个真相源" |
+| ⑤ README 改写定位 | 头部加"构建产物, 请勿手改"告示 + provenance 核对方法 + "旧版副本不含这些修复, 别用旧包产出的参数"警告 |
+| ⑥ 门禁 | 新建 `tests/test_package_parity.py`（16 用例）：打包产物**可 import** + 内容与主链**逐字节一致**（除戳头）+ PROVENANCE 完整（源 commit + 每文件 sha256）+ 入口模块主链必须存在（孤儿清零）+ 闭包解析回归（双扩展名 bug）+ **打包脚本必须被 git 跟踪**（构建工具不可游离于版本控制外）+ 副本里不得残留 pack.py；工作区副本若陈旧 → **可检出**（sha256 不符）但**不阻塞**（该目录 gitignored，不是仓库内容，不该让每次提交都红） |
+
+**残余风险（如实记录）**：副本仍 gitignored → 克隆仓库后需重跑 `pack.py` 才有包（README 已写明）；副本内的 `run_optimize.py`/`fetch_data.py` 等**入口脚本不在闭包内**（它们是包自己的胶水层，非主链模块），其与主链新 API 的兼容性需在真跑一次完整优化流程时验证（目前无数据可跑，0B）。
 
 ### 5.2 工程基座 ⚠️
 

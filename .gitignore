@@ -63,6 +63,8 @@ analyze_*.py
 *_demo.py
 *_real.py
 *_report.py
+# 主链正式模块 (审计 H3 批次4: 原只在 gitignored 副本里, 已并入主链作唯一真相源)
+!.claude/skills/indicator_system_report.py
 *_monitor.py
 akshare_diagnostic.py
 backtest_*.py
