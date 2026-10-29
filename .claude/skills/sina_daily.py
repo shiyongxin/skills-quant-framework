@@ -29,6 +29,8 @@ import re
 import akshare as ak
 import pandas as pd
 
+from js_runtime import decode_klc_payload
+
 # 新浪日线 (KLC 加密) 与复权因子端点 —— 与 akshare stock/cons.py 同源
 _KLC_URL = "https://finance.sina.com.cn/realstock/company/{}/hisdata_klc2/klc_kl.js"
 _QFQ_URL = "https://finance.sina.com.cn/realstock/company/{}/qfq.js"
@@ -203,12 +205,12 @@ def _decode_klc(payload: str) -> list:
 
     依赖 py_mini_racer 与 akshare.stock.cons.hk_js_decode —— 二者均由
     akshare 传递安装; 缺失时此处抛 ImportError, 由调用方的异常路径如实上报。
+
+    解密交给 `js_runtime.decode_klc_payload`: V8 非线程安全, 批量取数并发
+    时会**崩进程** (V8 CHECK 断言 SIGTRAP, 非 Python 异常, try/except
+    拦不住) —— 闸门在 js_runtime 收口, 见该模块 docstring。
     """
-    from py_mini_racer import MiniRacer
-    from akshare.stock.cons import hk_js_decode
-    js = MiniRacer()
-    js.eval(hk_js_decode)
-    return js.call("d", payload)
+    return decode_klc_payload(payload)
 
 
 def _extract_js_payload(text: str) -> str:

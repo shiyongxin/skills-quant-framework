@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 
 from core.indicators import sma as _core_sma
+from js_runtime import js_guard
 
 
 class Regime(Enum):
@@ -94,14 +95,16 @@ class MarketRegimeClassifier:
         print(f"[INFO] 加载指数 {index_code} 数据 ({start_date} ~ {end_date})...")
 
         try:
-            # akshare获取指数数据
-            if index_code == "000300":
-                df = ak.stock_zh_index_daily(symbol="sh000300")
-            elif index_code == "000001":
-                df = ak.stock_zh_index_daily(symbol="sh000001")
-            else:
-                # 尝试通用接口
-                df = ak.stock_zh_index_daily(symbol=f"sh{index_code}")
+            # akshare获取指数数据 (指数接口内部用 py_mini_racer 解密 → V8
+            # 非线程安全, 整段串行化, 详见 js_runtime)
+            with js_guard():
+                if index_code == "000300":
+                    df = ak.stock_zh_index_daily(symbol="sh000300")
+                elif index_code == "000001":
+                    df = ak.stock_zh_index_daily(symbol="sh000001")
+                else:
+                    # 尝试通用接口
+                    df = ak.stock_zh_index_daily(symbol=f"sh{index_code}")
 
             if df is not None and len(df) > 0:
                 # 标准化列名

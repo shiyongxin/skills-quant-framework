@@ -89,6 +89,7 @@ All core modules live flat in `.claude/skills/`. The framework imports them by b
 **Orchestration / utilities**
 - `quant_workflow.py` — `QuantWorkflow` class wires all 7 stages end-to-end
 - `position_analyzer.py` — analyzes an existing portfolio CSV
+- `js_runtime.py` — **进程级 V8 闸门**: 新浪 KLC 载荷解密要跑 `py_mini_racer` (V8), 而 V8 isolate 非线程安全 → 批量取数 4 线程并发建 isolate 会触发 `address_pool_manager.cc: Check failed: !pool->IsInitialized!` → **SIGTRAP 打死进程** (非 Python 异常, try/except 拦不住). 闸门用代理类替换 `py_mini_racer.MiniRacer`, 把建 isolate/eval/call/释放全部串到一把 RLock (网络 I/O 仍并行); 语义不变 (仍独立 context). `sina_daily`/指数取数路径接线, 导入即装闸门. 门禁 `tests/test_js_runtime.py`
 - `parameter_space.py` / `optimization_config.py` / `optimization_engine.py` — optuna-style search (engine 真读配置: `OptimizationEngine(config=)` / CLI `run --config x.json`, 优先级: 显式 CLI 参数 > config.* > 阶段分档默认; 子命令 > config.mode; `use_weighted_scoring` 默认开 — GA 六个评分维 (w_trend/w_momentum/w_risk/w_performance/score_buy/score_sell) 真参与 fitness, `false` 回退投票制旧基线). E-P1 #19 已闭环: `optimized_params.load_optimized_params(best_params.json)` 下发 + `SignalGenerator(use_weighted_scoring, scoring_params)` 评分双模式 (默认 False, 生产调用方零变化; 便捷函数 `get_latest_signal(data, params=)` 直通; web_app 侧边栏 `🎯 优化参数` 加载/清除 best_params.json → `generator_from_params` 换实例全站信号面跟随)
 
 ## 7-Stage Pipeline (in `quant_workflow.py`)

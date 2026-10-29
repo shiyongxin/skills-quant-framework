@@ -35,6 +35,7 @@ from pathlib import Path
 
 from historical_data_manager import HistoricalDataManager
 from daily_signal_generator import generate_signal
+from js_runtime import js_guard
 from parameter_space import ParameterSpace
 from execution_model import CostModel
 
@@ -285,7 +286,9 @@ class HistoricalBacktestValidator:
         try:
             import akshare as ak
             symbol = f'sh{index_code}'
-            df = ak.stock_zh_index_daily(symbol=symbol)
+            # 指数接口内部用 py_mini_racer 解密 (V8 非线程安全) → 整段串行化
+            with js_guard():
+                df = ak.stock_zh_index_daily(symbol=symbol)
             if df is not None and len(df) > 0:
                 col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
                            'low': '最低', 'close': '收盘', 'volume': '成交量'}
@@ -305,7 +308,8 @@ class HistoricalBacktestValidator:
                 return data
             try:
                 import akshare as ak
-                df = ak.stock_zh_index_daily(symbol='sh000001')
+                with js_guard():
+                    df = ak.stock_zh_index_daily(symbol='sh000001')
                 if df is not None and len(df) > 0:
                     col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
                                'low': '最低', 'close': '收盘', 'volume': '成交量'}

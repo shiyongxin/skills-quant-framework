@@ -34,6 +34,7 @@ from threading import Semaphore
 
 from sina_daily import fetch_daily, format_symbol
 from stock_list_manager import get_stock_name as _lookup_stock_name
+from js_runtime import js_guard
 
 
 class HistoricalDataManager:
@@ -396,7 +397,10 @@ class HistoricalDataManager:
         """
         sina_symbol = self._format_symbol(symbol, is_index=True)
         try:
-            df = ak.stock_zh_index_daily(symbol=sina_symbol)
+            # 指数接口内部用 py_mini_racer 解密 (V8 非线程安全) → 整段串行化:
+            # 闸门未生效时也能保证"同一时刻只有一个线程在 V8 里" (崩溃根因)
+            with js_guard():
+                df = ak.stock_zh_index_daily(symbol=sina_symbol)
 
             if df is not None and len(df) > 0:
                 col_map = {'date': '日期', 'open': '开盘', 'high': '最高',
