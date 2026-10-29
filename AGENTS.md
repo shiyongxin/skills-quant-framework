@@ -48,6 +48,7 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 | 日线列名/涨跌幅 (M19) | 列名映射只走 `core/dataframe.OHLCV_COLUMN_MAP`; `涨跌幅` 只能由 `ensure_change_pct` 派生 (禁直接赋值); 不消费涨跌幅的模块不补该列 | `test_m19_column_standardization.py` |
 | 评估失败可见 (M5) | 逐股回测失败必须记账 (`n_stocks_failed`/`success_rate`) + 受罚 (`fitness *= success_rate`; 成功率 < `min_success_rate` → 归零); 评估路径禁静默 `except: continue` | `test_m5_evaluation_failures.py` |
 | 共享数据层 (M20) | 取数一律走 `HistoricalDataManager.get_daily_result` (复权维度 + 参考日 + FetchResult + 交易日历窗口); 禁各模块自行取数/用 wall clock 划窗口; 缓存键须含口径维度 | `test_m20_shared_data_layer.py` |
+| 窗口预热 (M4) | 预热长度按**参数** (`required_warmup_bars`), 不得写死; 窗口比 `min_holding_days` 短 → 跳过并记账 (`regime_window_stats`) | `test_m4_regime_warmup.py` |
 | 部署包 (批次 4) | 副本 = 构建产物; 打包脚本必须在主链且**被 git 跟踪** | `test_package_parity.py` |
 
 ## JS runtime gate (V8)
@@ -77,12 +78,13 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **903 offline tests** (903 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **914 offline tests** (914 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
 |---|---|
 | 回测诚实度 (H7 容量 / H8 持仓状态机 / H9 walk-forward / M1 指标口径 + 黄金快照) | `test_backtest_honesty.py` |
+| 短窗口冷启动 (M4) | `test_m4_regime_warmup.py` |
 | 优化器 (H1 样本外 / H2 confidence / H10 稳健性 / M5 失败惩罚 + 配置接线 / 评分制 / 参数下发) | `test_h1_oos_isolation.py` `test_h2_confidence.py` `test_h10_robustness.py` `test_m5_evaluation_failures.py` `test_optimizer_config_wiring.py` `test_optimizer_honesty.py` `test_optimizer_reproducibility.py` `test_weighted_scoring.py` `test_params_delivery.py` |
 | 研究有效性 (H3 验证链 / H4 PIT 股票池 / H6 因子点时) | `test_h3_validation_chain.py` `test_h4_point_in_time_universe.py` `test_h6_factor_point_in_time.py` |
 | 停牌与日历 (H5 + C-P1-12) | `test_h5_suspension.py` `test_trading_calendar.py` `test_trade_constraints.py` |
@@ -106,7 +108,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 **仍开** (完整条目与证据见台账 §3/§5.2/§5.3/§6):
 
-- **批次 2 余量**: **M4** (短体制窗口冷启动: `ma_slow` 可达 120 > warmup 60; `min_hold_end` 使止盈/移动止损在体制窗内永不触发) —— 标 ⚠️ **动手前必须先复验** (审计基线距今 30+ 提交)。**批次 2 至此仅余 M4**。
+- **批次 2 已全部收口** (M13/M12/M17/M14/L6-L12/M2/M3/M9/M22/M15/M18/M16 → 批次1; H8/H9/H7/M1/M5/M19/M20/M4 → 批次2)。
 - **复权默认口径待产品决策**: 全仓默认 `adjust=''` (不复权) → 含除权跳空 (优化器自身也用不复权, 回测收益口径受影响)。M20 已把**维度**打通 (可按口径取数/缓存分键), 但"默认用哪个口径"尚未定 —— 建议单独拍板。
 - **批次 4.2 工程基座**: L1 (`strategy_optimizer` 5 处 `get_param_grid` 与 `ParameterSpace` 不一致, `sell_threshold` 符号冲突) / L2 (硬编码他人机器绝对路径) / L3 (无 `pyproject.toml`/CI) / L4 (11 处 `sys.path.append` CWD 依赖) / L5 (`test_tool.py` import 即执行) / L9 (`OptimizationConfig` 双份定义) / L10 (VWAP 全样本 vs 当日语义冲突) / L11 (体制字符串 vs 枚举混用)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。

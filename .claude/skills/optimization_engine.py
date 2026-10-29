@@ -22,7 +22,8 @@ import zlib
 import hashlib
 
 from parameter_space import ParameterSpace
-from vectorized_backtest import (VectorizedBacktester, metrics_from_trades)
+from vectorized_backtest import (VectorizedBacktester, metrics_from_trades,
+                                required_warmup_bars)
 from historical_data_manager import HistoricalDataManager
 from optimization_config import (FitnessConfig, WalkForwardConfig,
                                  OptimizationConfig)
@@ -285,6 +286,9 @@ class FitnessEvaluator:
         n_failed_events = 0      # 失败事件总数 (一只股票可失败多个窗口)
         n_skipped = 0            # 体制数据不足 (不适用, 非失败)
         failures = []
+        # 审计 M4: 体制窗统计 (窗口数 / 因过短跳过 / 无交易跳过) ——
+        # "这个体制到底测了多少东西"必须可见
+        window_stats = {}
 
         for symbol, data in stock_data.items():
             stock_failed = False
@@ -300,9 +304,12 @@ class FitnessEvaluator:
                         continue
                     n_attempted += 1
                     # 使用连续的体制时段进行回测
-                    windows, sub_failures = self._backtest_regime_windows(
-                        data, params, labels, target_regime
-                    )
+                    windows, sub_failures, sub_stats = \
+                        self._backtest_regime_windows(
+                            data, params, labels, target_regime
+                        )
+                    for k, v in (sub_stats or {}).items():
+                        window_stats[k] = window_stats.get(k, 0) + v
                     if sub_failures:
                         stock_failed = True
                         n_failed_events += len(sub_failures)
@@ -335,6 +342,7 @@ class FitnessEvaluator:
         n_ok = max(n_attempted - n_failed_stocks, 0)
         success_rate = (n_ok / n_attempted) if n_attempted else 1.0
         coverage = {
+            'regime_window_stats': window_stats,
             'n_stocks_total': n_total,
             'n_stocks_evaluated': n_attempted,
             'n_stocks_failed': n_failed_stocks,
@@ -449,11 +457,24 @@ class FitnessEvaluator:
         - 长窗口体制(BULL/BEAR/SIDEWAYS): 按连续窗口切割回测
         - 短窗口体制(CRASH/RECOVERY): 全量回测后按交易入口过滤
 
-        审计 M5: 返回 `(metrics_list, failures)` —— 体制窗内的回测失败不再
-        静默丢弃, 逐窗记账并向上冒泡 (旧实现 `except Exception: continue`)。
+        审计 M5: 返回 `(metrics_list, failures, stats)` —— 体制窗内的回测
+        失败不再静默丢弃, 逐窗记账并向上冒泡 (旧实现
+        `except Exception: continue`)。
+
+        审计 M4 (短体制窗口冷启动 + 短窗出场失效):
+        - ① 指标预热: 旧实现把窗口切片**单独**回测 → 指标只在窗口内计算 →
+          `ma_slow` 可达 120 > 窗口长度时全 NaN → 信号恒 0 → **该窗测不出
+          任何东西** (静默失效)。现按参数所需传入窗口前历史段 (账户仍从
+          窗口首根空仓起步, 不带入历史期盈亏)。
+        - ② 出场规则: 窗口比 `min_holding_days` 还短时, 止盈/移动止损/卖讯
+          在窗口内**永远不触发** → 只能"持有到窗口末" → 测的不是部署的那套
+          策略 → 跳过该窗并记账 (不静默)。
         """
         metrics_list = []
         failures = []
+        stats = {'n_windows': 0, 'skipped_short': 0, 'skipped_no_trade': 0}
+        need = required_warmup_bars(params)
+        min_holding = int(params.get('min_holding_days', 0) or 0)
 
         # 找出连续的体制时段
         in_regime = labels == target_regime
@@ -492,10 +513,24 @@ class FitnessEvaluator:
             if len(window_data) < 15:
                 continue
 
+            # 审计 M4②: 窗口比最小持有期还短 → 出场规则在窗口内永不触发
+            # → 该窗无法检验部署的那套策略 → 跳过并记账
+            if len(window_data) <= min_holding:
+                stats['skipped_short'] += 1
+                continue
+
+            stats['n_windows'] += 1
+
+            # 审计 M4①: 传入窗口前历史段做指标预热 (账户仍从窗口首根空仓起步)
+            history = data.iloc[max(0, start - need):start]
+
             try:
-                metrics = self.backtester.backtest(window_data, params)
+                metrics = self.backtester.backtest(window_data, params,
+                                                    history=history)
                 if metrics.num_trades > 0:
                     metrics_list.append(metrics)
+                else:
+                    stats['skipped_no_trade'] += 1
             except Exception as e:
                 # 审计 M5: 记账而非静默 continue (失败数进入上层惩罚)
                 failures.append({'error': type(e).__name__,
@@ -503,7 +538,7 @@ class FitnessEvaluator:
                                  'window': [int(start), int(end)]})
                 continue
 
-        return metrics_list, failures
+        return metrics_list, failures, stats
 
     def _backtest_by_trade_filter(self, data, params, labels, target_regime):
         """
@@ -515,16 +550,21 @@ class FitnessEvaluator:
         3. 仅保留入场时处于目标体制的交易
         4. 用过滤后的交易计算指标
 
-        审计 M5: 返回 `(metrics_list, failures)` —— 整股回测失败不再静默
-        返回空列表 (旧实现), 失败被记账并进入上层惩罚。
+        审计 M5: 返回 `(metrics_list, failures, stats)` —— 整股回测失败不再
+        静默返回空列表 (旧实现), 失败被记账并进入上层惩罚。
+
+        注: 该路径在**全量历史**上回测 (只在入场日按体制过滤) → 指标预热与
+        最小持有期都不受窗口长度限制 (审计 M4 的两个坑只存在于连续窗口路径)。
         """
+        stats = {'n_windows': 1, 'skipped_short': 0, 'skipped_no_trade': 0}
         try:
             metrics, trade_details = self.backtester.backtest_with_details(data, params)
         except Exception as e:
-            return [], [{'error': type(e).__name__, 'message': str(e)[:200]}]
+            return [], [{'error': type(e).__name__, 'message': str(e)[:200]}], stats
 
         if not trade_details:
-            return [], []
+            stats['skipped_no_trade'] += 1
+            return [], [], stats
 
         # 按入口过滤交易
         filtered_trades = []
@@ -540,8 +580,9 @@ class FitnessEvaluator:
         # 从过滤后的交易计算指标
         filtered_metrics = self._compute_metrics_from_trades(filtered_trades, data, params)
         if filtered_metrics and filtered_metrics.num_trades > 0:
-            return [filtered_metrics], []
-        return [], []
+            return [filtered_metrics], [], stats
+        stats['skipped_no_trade'] += 1
+        return [], [], stats
 
     def _compute_metrics_from_trades(self, trades, data, params):
         """从过滤后的交易列表计算 BacktestMetrics（审计 E-P1: 调用共享

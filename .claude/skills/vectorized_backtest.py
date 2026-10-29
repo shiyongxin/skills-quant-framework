@@ -34,6 +34,35 @@ def warmup_bars(n: int) -> int:
     return min(WARMUP_MAX_BARS, max(10, n // 3))
 
 
+def required_warmup_bars(params: dict) -> int:
+    """参数所需的**指标预热**长度 (根) —— 审计 M4。
+
+    旧实现把预热长度写死为 `WARMUP_MAX_BARS` (60), 但**指标周期由参数决定**:
+    `ma_slow` 可达 **120** (parameter_space: 15~120) → 60 根历史不够 →
+    窗口内 `ma_slow` 全 NaN → 信号恒 0 → **该窗口测不出任何东西**
+    (既不报错也不产生交易 → 优化器把"上半个 ma_slow 区间"静默当成不可用,
+    参数空间的实际上限被无声截断)。
+
+    现按参数实际周期计算 (各周期最大值 + 缓冲), 且不小于 `WARMUP_MAX_BARS`
+    (信号掩码本身的上限)。默认参数 → 60 (与旧实现逐位一致, 零回归)。
+    """
+    p = params or {}
+    macd_need = (int(p.get('macd_fast', 12))
+                 + int(p.get('macd_slow', 26))
+                 + int(p.get('macd_signal', 9)))
+    periods = [
+        int(p.get('ma_fast', 5)),
+        int(p.get('ma_mid', 10)),
+        int(p.get('ma_slow', 20)),
+        macd_need,
+        int(p.get('rsi_period', 14)),
+        int(p.get('kdj_n', 9)),
+        int(p.get('bb_period', 20)),
+        int(p.get('atr_period', 14)),
+    ]
+    return max(WARMUP_MAX_BARS, max(periods) + 5)
+
+
 @dataclass
 class BacktestMetrics:
     """回测结果指标"""
@@ -859,16 +888,25 @@ class VectorizedBacktester:
         if len(data) < train_days + test_days:
             return []
 
-        def _history(start: int) -> pd.DataFrame:
-            """窗口前历史段 (warmup 落点), 不足则取全部可用"""
-            return data.iloc[max(0, start - WARMUP_MAX_BARS):start]
+        def _history(start: int, p: dict = None) -> pd.DataFrame:
+            """窗口前历史段 (warmup 落点), 不足则取全部可用。
 
-        def _fit_params(train_data: pd.DataFrame, history) -> dict:
+            长度按**参数所需**的指标预热 (审计 M4): 写死 60 根时,
+            `ma_slow` > 60 的参数在窗口内指标全 NaN → 信号恒 0 →
+            该窗口静默失效 (测不出任何东西, 也不报错)。
+            """
+            need = required_warmup_bars(p if p is not None else params)
+            return data.iloc[max(0, start - need):start]
+
+        def _fit_params(train_data: pd.DataFrame, train_start: int) -> dict:
             best_params, best_sharpe = params, -np.inf
             names = list(param_space.keys())
             for combo in itertools.product(*param_space.values()):
                 candidate = {**params, **dict(zip(names, combo))}
-                m = self.backtest(train_data, candidate, history=history)
+                # 审计 M4: 历史段长度按**候选参数**所需 (候选的指标周期可能
+                # 比基准参数更长 → 预热不足会让候选静默失效)
+                m = self.backtest(train_data, candidate,
+                                  history=_history(train_start, candidate))
                 if m.sharpe_ratio > best_sharpe:
                     best_params, best_sharpe = candidate, m.sharpe_ratio
             return best_params
@@ -881,7 +919,7 @@ class VectorizedBacktester:
             if param_space:
                 train_start = idx - train_days
                 train_data = data.iloc[train_start:idx]
-                fitted = _fit_params(train_data, _history(train_start))
+                fitted = _fit_params(train_data, train_start)
             else:
                 fitted = params
             metrics = self.backtest(test_data, fitted, history=_history(idx))

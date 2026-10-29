@@ -1121,8 +1121,11 @@ class TestTradeFilterMetricsConsistency:
         labels = pd.Series(['BULL'] * 200 + ['SIDEWAYS'] * 100, dtype=object)
 
         class _Stub:
-            def backtest(self, d, p):
+            def backtest(self, d, p, **kw):
                 assert len(d) < len(data)  # 确实按窗口切片后回测
+                # 审计 M4: 窗口前历史段 (指标预热) 必须传入 —— 否则窗口内
+                # 指标全是 NaN → 信号恒 0 → 该窗静默失效
+                assert kw.get('history') is not None
                 return BacktestMetrics(total_return=20.0, num_trades=5,
                                        sharpe_ratio=1.2, max_drawdown=8.0,
                                        win_rate=60.0)
