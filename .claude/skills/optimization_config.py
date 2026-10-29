@@ -65,6 +65,11 @@ class FitnessConfig:
     w_return: float = 0.25
     w_sharpe: float = 0.20
     w_drawdown: float = 0.15
+    # 审计 M5: 逐股回测失败 → 该股不参与适应度 → 参数组可能只在**更少样本**
+    # 上被评估 (旧实现静默 except: continue, 无失败计数也无惩罚)。现在
+    # 失败率 > (1 - min_success_rate) 的参数组**直接归零** (不可用),
+    # 介于两者之间按 success_rate 比例打折。0 = 关闭硬门槛 (仅比例打折)。
+    min_success_rate: float = 0.50
 
 
 @dataclass

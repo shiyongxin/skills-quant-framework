@@ -199,7 +199,13 @@ class TestOptimizerInjection:
         ev = FitnessEvaluator(_SpyBacktester())
         fitness, details = ev.evaluate({'rsi_period': 7}, {'600000': None})
         assert seen == {'rsi_period': 7}  # 中间层不删键 → 注入的开关可直达引擎
-        assert fitness == 0.0 and details == {}
+        # 无 IS 窗口 → 无适应度 (0.0); details 仍带"评估覆盖"记账
+        # (审计 M5: 旧实现返回空 details, 失败/覆盖完全不可见)
+        assert fitness == 0.0
+        assert details['evaluation_available'] is False
+        assert details['n_stocks_evaluated'] == 1
+        assert details['n_stocks_failed'] == 0
+        assert 'is_metrics' not in details
 
     def test_global_stage_injects_flag(self):
         from optimization_engine import OptimizationEngine

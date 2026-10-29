@@ -62,6 +62,13 @@ class IndicatorSystem:
     # 随机基线分位数、Top-k 参数离散度、bootstrap CI。只报告, 不参与选择
     robustness: dict = field(default_factory=dict)
 
+    # 评估覆盖证据 —— 审计 M5: 逐股回测失败的股票不参与适应度 → 这套参数
+    # 到底在多少只股票上被真正评估过 (失败既不可见也不受罚 = 偏差)
+    n_stocks_total: int = 0
+    n_stocks_evaluated: int = 0
+    n_stocks_failed: int = 0
+    evaluation_success_rate: float = 1.0
+
 
 @dataclass
 class Individual:
@@ -106,6 +113,44 @@ def split_is_oos(windows: list, oos_ratio: float) -> tuple:
     n_oos = int(round(n * oos_ratio))
     n_oos = max(1, min(n - 1, n_oos))
     return list(windows[:n - n_oos]), list(windows[n - n_oos:])
+
+
+def aggregate_coverage(regime_coverage: dict) -> dict:
+    """跨体制聚合评估覆盖证据 (审计 M5)。
+
+    稳健模式对每个体制各评估一遍 → 失败是**按体制**分别发生的, 汇总时
+    求和 (总回测股次 / 总失败股次), 成功率按总量重算 (不是各体制成功率的
+    平均 —— 后者会让"小样本体制"与"大样本体制"等权, 掩盖真实覆盖)。
+    """
+    total = sum(int(v.get('n_stocks_total', 0) or 0)
+                for v in (regime_coverage or {}).values())
+    evaluated = sum(int(v.get('n_stocks_evaluated', 0) or 0)
+                    for v in (regime_coverage or {}).values())
+    failed = sum(int(v.get('n_stocks_failed', 0) or 0)
+                 for v in (regime_coverage or {}).values())
+    ok = max(evaluated - failed, 0)
+    return {
+        'n_stocks_total': total,
+        'n_stocks_evaluated': evaluated,
+        'n_stocks_failed': failed,
+        'success_rate': (ok / evaluated) if evaluated else 1.0,
+        'failure_rate': (failed / evaluated) if evaluated else 0.0,
+    }
+
+
+def evaluation_coverage_fields(fitness_details: dict) -> dict:
+    """从 fitness_details 提取"评估覆盖"证据 (审计 M5)。
+
+    逐股回测失败 → 该股不参与适应度 → 参数组可能只在**更少样本**上被评估;
+    这些字段让覆盖度**可见** (与 confidence/robustness 同款自证)。
+    """
+    d = fitness_details or {}
+    return {
+        'n_stocks_total': int(d.get('n_stocks_total', 0) or 0),
+        'n_stocks_evaluated': int(d.get('n_stocks_evaluated', 0) or 0),
+        'n_stocks_failed': int(d.get('n_stocks_failed', 0) or 0),
+        'evaluation_success_rate': float(d.get('success_rate', 1.0) or 0.0),
+    }
 
 
 def oos_fields(fitness_details: dict) -> dict:
@@ -166,7 +211,8 @@ class FitnessEvaluator:
             最大回撤限制(%) — None 时取 FitnessConfig 默认 (25.0)
         fitness_config : FitnessConfig or None
             适应度权重来源 (w_target_rate/w_return/w_sharpe/w_drawdown) —
-            旧实现这4个权重硬编码于 _compute_fitness, 配置字段恒死参数
+            旧实现这4个权重硬编码于 _compute_fitness, 配置字段恒死参数;
+            另含 min_success_rate (审计 M5: 逐股回测失败的硬门槛)
         walk_forward_config : WalkForwardConfig or None
             Walk-Forward 窗口 (train/test/step_days) — 旧实现硬编码于
             evaluate() (审计 E-P1 接线: 配置成为真相源)
@@ -177,6 +223,8 @@ class FitnessEvaluator:
         cfg = fitness_config or FitnessConfig()
         self.backtester = backtester or VectorizedBacktester()
         self.walk_forward_config = walk_forward_config or WalkForwardConfig()
+        # 审计 M5: 逐股回测失败的硬门槛 (成功率低于此值 → 参数组不可用)
+        self.min_success_rate = float(getattr(cfg, 'min_success_rate', 0.5))
         self.target_return = cfg.target_return if target_return is None else target_return
         self.max_drawdown_limit = cfg.max_drawdown_limit if max_drawdown_limit is None else max_drawdown_limit
         self.weights = {
@@ -206,8 +254,14 @@ class FitnessEvaluator:
         return_is_metrics : bool
             True 时 details 额外携带 'is_metrics' (IS 窗口的原始指标对象
             列表) — 审计 H10 bootstrap 重采样用; GA 路径不传 (不进 details,
-            零额外开销)。注: 失败路径 (无 IS 窗口) 恒返回空 details,
-            无该键 → 调用方如实标记不可用。
+            零额外开销)。注: 失败路径 (无 IS 窗口) **不含** 'is_metrics'
+            键 → 调用方如实标记不可用。
+
+        审计 M5: 逐股回测失败不再静默 (`except Exception: continue` →
+        失败既不可见也不受罚 → 参数组可能只在更少样本上被评估)。现在逐股
+        记账 (n_stocks_failed / success_rate / failures), 适应度按
+        `success_rate` 打折, 成功率低于 `min_success_rate` 直接归零; 计数与
+        失败清单进 details (并由 save_results 落盘)。
 
         Returns:
         --------
@@ -222,20 +276,41 @@ class FitnessEvaluator:
         """
         is_metrics = []
         oos_metrics = []
+        # 审计 M5: 逐股回测失败的记账 (旧实现 `except Exception: continue` →
+        # 失败既不可见也不受罚 → 参数组可能只在**更少样本**上被评估, 且
+        # 崩溃型参数组因"幸存股票恰好表现好"而胜出)
+        n_total = len(stock_data)
+        n_attempted = 0          # 真正发起过回测的股票数
+        n_failed_stocks = 0      # 至少失败一次的股票数
+        n_failed_events = 0      # 失败事件总数 (一只股票可失败多个窗口)
+        n_skipped = 0            # 体制数据不足 (不适用, 非失败)
+        failures = []
 
         for symbol, data in stock_data.items():
+            stock_failed = False
             try:
                 if target_regime and regime_labels and symbol in regime_labels:
                     # 按体制过滤数据
                     labels = regime_labels[symbol]
                     mask = labels == target_regime
                     if mask.sum() < 60:
+                        # 该股体制数据不足 = **不适用** (数据驱动, 非参数驱动)
+                        # → 不计失败, 但计数可见
+                        n_skipped += 1
                         continue
+                    n_attempted += 1
                     # 使用连续的体制时段进行回测
-                    windows = self._backtest_regime_windows(
+                    windows, sub_failures = self._backtest_regime_windows(
                         data, params, labels, target_regime
                     )
+                    if sub_failures:
+                        stock_failed = True
+                        n_failed_events += len(sub_failures)
+                        for f in sub_failures:
+                            f['symbol'] = symbol
+                        failures.extend(sub_failures)
                 else:
+                    n_attempted += 1
                     # Walk-Forward回测 (窗口来自 walk_forward_config, 审计 E-P1 接线)
                     wf = self.walk_forward_config
                     windows = self.backtester.walk_forward(
@@ -247,11 +322,37 @@ class FitnessEvaluator:
                     windows, self.walk_forward_config.oos_ratio)
                 is_metrics.extend(is_windows)
                 oos_metrics.extend(oos_windows)
-            except Exception:
-                continue
+            except Exception as e:
+                # 审计 M5: 不再静默丢弃 —— 记账 (供惩罚与落盘)
+                stock_failed = True
+                n_failed_events += 1
+                failures.append({'symbol': symbol,
+                                 'error': type(e).__name__,
+                                 'message': str(e)[:200]})
+            if stock_failed:
+                n_failed_stocks += 1
+
+        n_ok = max(n_attempted - n_failed_stocks, 0)
+        success_rate = (n_ok / n_attempted) if n_attempted else 1.0
+        coverage = {
+            'n_stocks_total': n_total,
+            'n_stocks_evaluated': n_attempted,
+            'n_stocks_failed': n_failed_stocks,
+            'n_failed_events': n_failed_events,
+            'n_stocks_skipped': n_skipped,
+            'success_rate': success_rate,
+            'failure_rate': (1.0 - success_rate) if n_attempted else 0.0,
+            'failures': failures[:20],
+        }
 
         if not is_metrics:
-            return 0.0, {}
+            # 无 IS 窗口 → 无适应度 (旧实现返回 0.0, {}); 现在带上失败记账
+            # (审计 M5: 失败不能静默 —— 无证据本身就是结论的一部分)
+            coverage['evaluation_available'] = False
+            coverage['fitness_before_penalty'] = 0.0
+            coverage['penalty_factor'] = success_rate
+            coverage['penalty_mode'] = 'no_evidence'
+            return 0.0, coverage
 
         fitness, details = self._compute_fitness(is_metrics)
         details['is_windows'] = len(is_metrics)
@@ -260,6 +361,22 @@ class FitnessEvaluator:
         # 携带, GA 路径不传 → 零额外开销
         if return_is_metrics:
             details['is_metrics'] = is_metrics
+
+        # 审计 M5: 失败惩罚 —— 参数组只在更少样本上被评估时, 不得"不受罚"
+        coverage['evaluation_available'] = True
+        details.update(coverage)
+        details['fitness_before_penalty'] = fitness
+        details['penalty_factor'] = success_rate
+        if success_rate < self.min_success_rate:
+            # 失败比例过高 → 该参数组不可用 (不能靠"只在能跑通的股票上表现好"
+            # 拿到高分); 归零而不是打折, 避免"崩一半"的参数组挤掉"完整但平庸"
+            # 的参数组
+            details['penalty_mode'] = 'gated'
+            fitness = 0.0
+        else:
+            details['penalty_mode'] = ('scaled' if success_rate < 1.0
+                                      else 'none')
+            fitness = fitness * success_rate
         return fitness, details
 
     @staticmethod
@@ -331,8 +448,12 @@ class FitnessEvaluator:
         混合策略:
         - 长窗口体制(BULL/BEAR/SIDEWAYS): 按连续窗口切割回测
         - 短窗口体制(CRASH/RECOVERY): 全量回测后按交易入口过滤
+
+        审计 M5: 返回 `(metrics_list, failures)` —— 体制窗内的回测失败不再
+        静默丢弃, 逐窗记账并向上冒泡 (旧实现 `except Exception: continue`)。
         """
         metrics_list = []
+        failures = []
 
         # 找出连续的体制时段
         in_regime = labels == target_regime
@@ -350,7 +471,8 @@ class FitnessEvaluator:
 
         # 短窗口体制: 全量回测 + 交易入口过滤
         if max_consec < 15 or regime_total_days < 60:
-            return self._backtest_by_trade_filter(data, params, labels, target_regime)
+            return self._backtest_by_trade_filter(data, params, labels,
+                                                  target_regime)
 
         # 长窗口体制: 按连续窗口切割
         starts = []
@@ -374,10 +496,14 @@ class FitnessEvaluator:
                 metrics = self.backtester.backtest(window_data, params)
                 if metrics.num_trades > 0:
                     metrics_list.append(metrics)
-            except Exception:
+            except Exception as e:
+                # 审计 M5: 记账而非静默 continue (失败数进入上层惩罚)
+                failures.append({'error': type(e).__name__,
+                                 'message': str(e)[:200],
+                                 'window': [int(start), int(end)]})
                 continue
 
-        return metrics_list
+        return metrics_list, failures
 
     def _backtest_by_trade_filter(self, data, params, labels, target_regime):
         """
@@ -388,14 +514,17 @@ class FitnessEvaluator:
         2. 检查入场日的体制标签
         3. 仅保留入场时处于目标体制的交易
         4. 用过滤后的交易计算指标
+
+        审计 M5: 返回 `(metrics_list, failures)` —— 整股回测失败不再静默
+        返回空列表 (旧实现), 失败被记账并进入上层惩罚。
         """
         try:
             metrics, trade_details = self.backtester.backtest_with_details(data, params)
-        except Exception:
-            return []
+        except Exception as e:
+            return [], [{'error': type(e).__name__, 'message': str(e)[:200]}]
 
         if not trade_details:
-            return []
+            return [], []
 
         # 按入口过滤交易
         filtered_trades = []
@@ -411,8 +540,8 @@ class FitnessEvaluator:
         # 从过滤后的交易计算指标
         filtered_metrics = self._compute_metrics_from_trades(filtered_trades, data, params)
         if filtered_metrics and filtered_metrics.num_trades > 0:
-            return [filtered_metrics]
-        return []
+            return [filtered_metrics], []
+        return [], []
 
     def _compute_metrics_from_trades(self, trades, data, params):
         """从过滤后的交易列表计算 BacktestMetrics（审计 E-P1: 调用共享
@@ -997,6 +1126,7 @@ class OptimizationEngine:
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
             **oos_fields(best.fitness_details),
+            **evaluation_coverage_fields(best.fitness_details),
             robustness=robustness,
         )
 
@@ -1123,6 +1253,7 @@ class OptimizationEngine:
                 median_holding_days=best.fitness_details.get('avg_holding_days', 0),
                 num_trades=best.fitness_details.get('avg_trades', 0),
                 **oos_fields(best.fitness_details),
+                **evaluation_coverage_fields(best.fitness_details),
                 robustness=robustness,
             )
 
@@ -1208,10 +1339,14 @@ class OptimizationEngine:
                 regime_fitnesses = {}
                 regime_oos = {}
                 regime_metrics = {}
+                # 审计 M5: 跨体制的失败记账 (各体制分别评估 → 失败数按体制求和)
+                regime_coverage = {}
                 for regime in all_regimes:
                     fitness_r, details_r = self.evaluator.evaluate(
                         params, sample_data, self.regime_labels, regime,
                         return_is_metrics=want_metrics, **kwargs)
+                    regime_coverage[regime] = evaluation_coverage_fields(
+                        details_r)
                     # 仅记录有样本的体制
                     if details_r.get('sample_count', 0) > 0:
                         regime_fitnesses[regime] = fitness_r
@@ -1224,7 +1359,12 @@ class OptimizationEngine:
                                 details_r.get('is_metrics') or [])
 
                 if not regime_fitnesses:
-                    fitness, details = 0.0, {}
+                    # 审计 M5: 全体制无样本 → 失败记账仍须可见 (不静默)
+                    fitness, details = 0.0, {
+                        **aggregate_coverage(regime_coverage),
+                        'evaluation_available': False,
+                        'regime_coverage': regime_coverage,
+                    }
                 else:
                     # 稳健适应度 = 0.7*最差体制 + 0.3*平均 (H10: 提炼为
                     # _robust_combine, bootstrap 重采样走同一口径)
@@ -1239,6 +1379,9 @@ class OptimizationEngine:
                                             if r not in regime_fitnesses],
                         # 审计 H1: 跨体制汇总的样本外证据 (IS/OOS 分列)
                         'regime_oos': regime_oos,
+                        # 审计 M5: 跨体制聚合的失败/覆盖记账
+                        **aggregate_coverage(regime_coverage),
+                        'regime_coverage': regime_coverage,
                     }
                     # H1 遗留 bug 修复: 原写 self._aggregate_oos, 但该方法在
                     # FitnessEvaluator 上 (闭包内 self=Engine → 有体制标签时
@@ -1291,6 +1434,7 @@ class OptimizationEngine:
             median_holding_days=best.fitness_details.get('avg_holding_days', 0),
             num_trades=best.fitness_details.get('avg_trades', 0),
             **oos_fields(best.fitness_details),
+            **evaluation_coverage_fields(best.fitness_details),
             robustness=robustness,
         )
 
@@ -1707,6 +1851,14 @@ class OptimizationEngine:
                   f"中位回撤 {system.oos_median_max_drawdown:.1f}%")
         else:
             print("  [样本外 OOS] 不可用 (窗口数不足, 无法划分留出段)")
+        # 审计 M5: 评估覆盖 (逐股回测失败的股票不参与适应度)
+        if system.n_stocks_evaluated:
+            cov = (f"评估 {system.n_stocks_evaluated}/{system.n_stocks_total} 只"
+                   f" | 失败 {system.n_stocks_failed} 只"
+                   f" | 成功率 {system.evaluation_success_rate:.1%}")
+            print(f"  [评估覆盖] {cov}")
+        else:
+            print("  [评估覆盖] 不可用 (无股票被成功评估)")
         # 审计 H10: 多重检验/稳健性证据 (只报告, 不参与选择)
         rb = getattr(system, 'robustness', None) or {}
         if rb:
@@ -1795,6 +1947,18 @@ class OptimizationEngine:
                          '试验次数 = 参与取最大的评估次数; bootstrap 回答'
                          '"窗口抽样噪声", 不能替代 OOS 外推证据'),
             },
+            # 审计 M5: 逐股回测失败的口径 (计数 + 惩罚规则)
+            'failure_policy': {
+                'min_success_rate': float(getattr(
+                    self.evaluator, 'min_success_rate', 0.5)),
+                'penalty': 'fitness *= success_rate (成功率 = 成功回测股数/'
+                           '发起回测股数); 成功率 < min_success_rate → 归零',
+                'note': ('逐股回测失败不再静默丢弃 (旧实现 except: continue): '
+                         '失败股数/失败率落盘, 且适应度按成功率打折 —— '
+                         '参数组不得靠"只在能跑通的股票上表现好"取胜; '
+                         '体制数据不足(不适用)不计失败, 见 '
+                         'systems[].evaluation'),
+            },
             # 审计 H2: confidence 口径 (证据派生, 非统计校准概率)
             'confidence_policy': {
                 'formula': 'clamp01(fitness)',
@@ -1833,6 +1997,13 @@ class OptimizationEngine:
                 },
                 # 审计 H10: 稳健性/多重检验证据 (只报告, 不参与选择)
                 'robustness': system.robustness or {},
+                # 审计 M5: 评估覆盖证据 (在多少只股票上真正评估过)
+                'evaluation': {
+                    'n_stocks_total': system.n_stocks_total,
+                    'n_stocks_evaluated': system.n_stocks_evaluated,
+                    'n_stocks_failed': system.n_stocks_failed,
+                    'success_rate': system.evaluation_success_rate,
+                },
                 'regime': result.regime,
                 'generations_run': result.generations_run,
                 'convergence_gen': result.convergence_gen,
