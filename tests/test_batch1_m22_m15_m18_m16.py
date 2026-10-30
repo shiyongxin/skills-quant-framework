@@ -243,7 +243,9 @@ class TestM18FetchRouting:
             seen['bj'] = (symbol, adjust)
             return 'BJ-SENTINEL'
 
-        monkeypatch.setattr(sina_daily, '_fetch_bj_daily', fake_bj)
+        # 实现名 2026-10-30 由 _fetch_bj_daily 改为 _fetch_klc_direct
+        # (审计 D1: 该直连路径同时服务退市 sh/sz 回退); 路由语义不变
+        monkeypatch.setattr(sina_daily, '_fetch_klc_direct', fake_bj)
         out = sina_daily.fetch_daily('bj920002', '20240101', '20240201',
                                      adjust='qfq')
         assert out == 'BJ-SENTINEL'

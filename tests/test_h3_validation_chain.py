@@ -270,7 +270,10 @@ class TestOOSIsolation:
         def boom(min_history_days=5000, min_rows=2000, as_of=None):
             raise ValueError('缓存数据不覆盖 as_of=... → 拒绝部分覆盖的股票池')
 
-        v.data_manager.get_universe = boom
+        # 审计 D1 后 per_pick 池改经 get_universe_meta 取 (池 + 幸存者
+        # 偏差证据一体; 真实数据层的 get_universe_meta 内部即调
+        # get_universe) → 覆盖失败在该入口抛, 打桩点随之迁移
+        v.data_manager.get_universe_meta = boom
         report = v.validate(n_dates=2, holding_days_list=[20])
         # 没有崩溃, 且跳过原因被记录 (不静默)
         assert 'skipped_dates' in report.universe_meta
@@ -365,6 +368,54 @@ class TestPerPickUniverse:
         # 每个 pick 日期各取一次池 (as_of = 该 pick 日期)
         assert len(v.data_manager.universe_calls) >= 1
         assert all(c is not None for c in v.data_manager.universe_calls)
+        # 幸存者偏差标记来自各日期证据的聚合 (D1: 不再硬编码) ——
+        # 测试桩 get_universe_meta 返回 True + note '测试桩'
+        assert report.universe_meta['survivorship_bias'] is True
+        assert report.universe_meta['survivorship_note'] == '测试桩'
+        assert report.universe_meta['n_pools_evidenced'] == 2
+
+    def test_per_pick_false_evidence_aggregates(self, tmp_path, monkeypatch):
+        """各日期证据全 False → 聚合 False (退市股补齐后不再反向失实)"""
+        _patch_signal(monkeypatch)
+        v = _validator(tmp_path)
+        v._param_fit_range = {'known': True, 'data_start': '2022-01-03',
+                              'data_end': '2022-06-30', 'note': ''}
+        orig = v.data_manager.get_universe_meta
+
+        def false_meta(**kw):
+            meta = orig(**kw)
+            meta['survivorship_bias'] = False
+            meta['survivorship_note'] = '证据: 清单内退市股已全部补齐'
+            return meta
+        v.data_manager.get_universe_meta = false_meta
+        report = v.validate(n_dates=2, holding_days_list=[20])
+        assert report.universe_meta['survivorship_bias'] is False
+        assert '已全部补齐' in report.universe_meta['survivorship_note']
+
+    def test_per_pick_mixed_evidence_stays_conservative(self, tmp_path,
+                                                        monkeypatch):
+        """混合 (任一 True) → 聚合保守 True"""
+        _patch_signal(monkeypatch)
+        v = _validator(tmp_path)
+        v._param_fit_range = {'known': True, 'data_start': '2022-01-03',
+                              'data_end': '2022-06-30', 'note': ''}
+        orig = v.data_manager.get_universe_meta
+        state = {'n': 0}
+
+        def mixed_meta(**kw):
+            meta = orig(**kw)
+            state['n'] += 1
+            if state['n'] == 1:
+                meta['survivorship_bias'] = False
+                meta['survivorship_note'] = '第一日期已补齐'
+            else:
+                meta['survivorship_bias'] = True
+                meta['survivorship_note'] = '第二日期仍缺 3 只'
+            return meta
+        v.data_manager.get_universe_meta = mixed_meta
+        report = v.validate(n_dates=2, holding_days_list=[20])
+        assert report.universe_meta['survivorship_bias'] is True
+        assert '仍缺' in report.universe_meta['survivorship_note']
 
     def test_single_mode_uses_one_pool(self, tmp_path, monkeypatch):
         _patch_signal(monkeypatch)

@@ -50,6 +50,7 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 | 共享数据层 (M20) | 取数一律走 `HistoricalDataManager.get_daily_result` (复权维度 + 参考日 + FetchResult + 交易日历窗口); 禁各模块自行取数/用 wall clock 划窗口; 缓存键须含口径维度 | `test_m20_shared_data_layer.py` |
 | 窗口预热 (M4) | 预热长度按**参数** (`required_warmup_bars`), 不得写死; 窗口比 `min_holding_days` 短 → 跳过并记账 (`regime_window_stats`) | `test_m4_regime_warmup.py` |
 | 部署包 (批次 4) | 副本 = 构建产物; 打包脚本必须在主链且**被 git 跟踪** | `test_package_parity.py` |
+| 幸存者偏差证据 (D1) | `survivorship_bias` 只由四条证据得出 (清单可用/在范围退市股全部缓存/≤90天新鲜/参考日≥覆盖起点且沪深记录齐, 任一不满足保守 True); akshare 回退**仅限**股本步骤确定性崩溃 (demjson), 网络错误不得回退 | `test_delisted_stocks.py` |
 
 ## JS runtime gate (V8)
 
@@ -79,7 +80,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **940 offline tests** (940 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **971 offline tests** (971 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -95,6 +96,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 | 源码卫生 + 可选依赖降级契约 | `test_source_hygiene.py` `test_optional_deps.py` |
 | 部署包一致性 (批次 4) | `test_package_parity.py` |
 | 工程基座 (L1/L2/L3/L5/L9/L10/L11) | `test_project_metadata.py` |
+| 退市股清单 + 幸存者偏差证据 (D1) | `test_delisted_stocks.py` |
 | 其余 | `test_b_report_p2.py` `test_e2e_regression.py` `test_execution_model.py` `test_factor_library.py` `test_indicator_skill_p0.py` `test_js_runtime.py` `test_ml_predictor_timeseries.py` `test_reversal_unification.py` `test_risk_wiring.py` `test_stage1_regressions.py` `test_stage2_fix_regressions.py` `test_web_presentation_p2.py` |
 
   → 逐条修复的**证据 / 复验置信度 / 归因**在台账 `docs/OPEN_ITEMS_PLAN_2026-10-25.md` §2/§3/§4/§5.1 (本文不重复)。
@@ -106,7 +108,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 **台账 `docs/OPEN_ITEMS_PLAN_2026-10-25.md` 是审计 backlog 的唯一真相源** (逐条证据 + 复验置信度 + 归因 + 对应门禁)。批次 1 之前的已修项见台账 §9 附录; 提交级细节见 `git log --oneline`。
 
-**已收口**: 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
+**已收口**: **D1 退市股数据基建 (幸存者偏差由「只能标记」变「可消除」, 2026-10-30, 台账 §5.3)**; 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
 
 **仍开** (完整条目与证据见台账 §3/§5.2/§5.3/§6):
 
@@ -114,7 +116,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 - **复权默认口径待产品决策**: 全仓默认 `adjust=''` (不复权) → 含除权跳空 (优化器自身也用不复权, 回测收益口径受影响)。M20 已把**维度**打通 (可按口径取数/缓存分键), 但"默认用哪个口径"尚未定 —— 建议单独拍板。
 - **批次 4.2 工程基座已收口** (2026-10-29: L1/L2/L3/L5/L9/L10/L11 已修 + 门禁 `test_project_metadata.py`; L4/L5 的旧证据已过时)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。
-- **幸存者偏差无法本地消除**: 退市股历史行情本地缺失 → 只能标记 (`survivorship_bias=True`); 消除需外部数据源 (台账 §5.3)。
+- **幸存者偏差: D1 基建已落地 (2026-10-30)**: 退市清单 (`delisted refresh`) + klc 直连回退 + **四条证据规则** (`_universe_meta` 判 `survivorship_bias=False`) + CLI 补数 (`delisted fetch`); 本地已补 **337/337** → meta 可判 False。残余如实: 北交所退市无名录接口、清单覆盖起点 沪2001/深1999 (更早参考日仍保守 True)、清单需 90 天内刷新、B股 30 只在股票池范围外 (台账 §5.3)。
 - **线上历史数据批量重取**: 除权跳空只标记不改写, 需按复权口径重新取数 (依赖网络与磁盘; `data_cleaner.py` 已就位)。
 - `technical_analyzer` signals 缺 `shift(1)` 保护 (advisory-only, 已文档化)。
 

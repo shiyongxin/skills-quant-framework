@@ -633,23 +633,28 @@ class HistoricalBacktestValidator:
                                        '幸存者偏差本引擎未核查 (不假装知道)'),
             }
         elif universe_mode == 'per_pick':
+            # 幸存者偏差标记改走数据层证据 (审计 D1): 每个 pick 日期取
+            # get_universe_meta → 池 + 该日期的偏差证据, 再**保守聚合**
+            # (任一 True → True; 全 False → False; 否则 None 未核查) ——
+            # 旧实现硬编码 True, 在退市股行情补齐后会反向失实 (声明的
+            # 偏差实际已消除)。
             self._universe_meta = {
                 'source': 'point_in_time_per_pick',
                 'mode': 'per_pick',
-                'survivorship_bias': True,
-                'survivorship_note': ('本地缓存仅含当前在市股票; 当时已退市的'
-                                       '股票不在池内 → 股票池仍带幸存者偏差'
-                                       ' (无法用本地数据消除, 只能标记)'),
                 'pools': {},
             }
+            collected = []   # [(bias, note)] 每个成功取池的 pick 日期
             for d in pick_dates:
                 try:
-                    pool = self.data_manager.get_universe(
+                    meta_d = self.data_manager.get_universe_meta(
                         min_history_days=self.UNIVERSE_MIN_HISTORY_DAYS,
                         min_rows=self.UNIVERSE_MIN_ROWS, as_of=d)
+                    pool = meta_d['universe']
                 except (AttributeError, TypeError):
+                    # 旧数据层无 get_universe_meta → 池照取, 口径如实不核查
                     pool = self.data_manager.get_universe(
                         min_rows=self.UNIVERSE_MIN_ROWS)
+                    meta_d = None
                 except ValueError as e:
                     # 缓存不覆盖该日期 → 该 pick **无法用点时池**评估
                     # (H4 的严格口径) → 如实跳过该日期并记录原因,
@@ -660,6 +665,23 @@ class HistoricalBacktestValidator:
                     continue
                 pick_pools[d] = pool
                 self._universe_meta['pools'][d] = len(pool)
+                collected.append(
+                    (meta_d.get('survivorship_bias'),
+                     meta_d.get('survivorship_note')) if meta_d else (None, None))
+            if any(b is True for b, _ in collected):
+                agg = True
+                note = next((n for b, n in collected
+                             if b is True and n), None)
+            elif collected and all(b is False for b, _ in collected):
+                agg = False
+                note = next((n for _, n in collected if n), None)
+            else:
+                agg, note = None, None
+            self._universe_meta['survivorship_bias'] = agg
+            self._universe_meta['survivorship_note'] = (
+                note or ('各 pick 日期的股票池口径未核查 (数据层不提供 '
+                         'get_universe_meta) → 不假装知道'))
+            self._universe_meta['n_pools_evidenced'] = len(collected)
         else:
             # 审计 H4: point-in-time 股票池 + 幸存者偏差如实标记
             try:

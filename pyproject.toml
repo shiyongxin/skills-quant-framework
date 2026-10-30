@@ -33,7 +33,7 @@ dev = ["pytest>=7.0"]
 package-dir = {"" = ".claude/skills"}
 py-modules = [
     "advanced_indicators", "backtest_framework", "chart_visualizer", "daily_signal_generator",
-    "data_cleaner", "execution_model", "factor_library", "historical_backtest_validator",
+    "data_cleaner", "delisted_stocks", "execution_model", "factor_library", "historical_backtest_validator",
     "historical_data_manager", "indicator_system_report", "js_runtime", "long_term_selector",
     "market_regime_classifier", "ml_predictor", "multi_factor_selection", "multi_stock_backtester",
     "optimization_config", "optimization_engine", "optimized_params", "parameter_space",

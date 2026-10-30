@@ -11,16 +11,24 @@
    (本仓库股票池 stock_list.csv 中北交所代码为 920xxx 新码段, 共 315 只;
    4/8 为审计记录的旧码段, 一并覆盖。)
 
-2. **bj 取数路径**: `ak.stock_zh_a_daily` 对 bj 代码**不可用** —— 主行情
-   `hisdata_klc2` 有数据, 但 akshare 紧接着调 `getAmountBySymbol` 补
-   outstanding_share, 该接口对 bj 返回 `(null)`, demjson 解码处抛
-   JSONDecodeError (实测 bj430047/bj836247, akshare 1.18.64)。备选源实测:
-   腾讯 fqkline 对 bj 返回 `day:[]` (无历史), 东财 push2his 对本机连接被重置
-   —— 当前可用的只有新浪 klc 直连, 故 bj 单独解码, 输出列与
-   `ak.stock_zh_a_daily` 对齐 (outstanding_share/turnover 置 NaN: 补充接口
-   对 bj 不可用, 不拿 0 冒充)。
+2. **klc 直连路径** (`_fetch_klc_direct`, bj + 退市 sh/sz 回退):
+   `ak.stock_zh_a_daily` 对两类代码**不可用** —— 主行情 `hisdata_klc2` 有
+   数据, 但 akshare 紧接着调 `getAmountBySymbol` 补 outstanding_share, 该
+   接口返回 `(null)`, demjson 解码处抛 JSONDecodeError (akshare 1.18.64):
+   - **bj** (实测 bj430047/bj836247): 补充接口本就不支持北交所;
+   - **退市 sh/sz** (实测 sz000004/sh600625 等 6 样本, 2026-10-30): 补充
+     接口对退市股同样返回 `(null)` —— 同一根因。而 klc 主行情对退市股有
+     **完整历史含 amount**, qfq/hfq 因子端点亦可用 (见 delisted_stocks)。
 
-sh/sz 路径原样透传 `ak.stock_zh_a_daily`, 行为与改动前一致。
+   备选源实测: 腾讯 fqkline 对 bj 返回 `day:[]`; 东财 push2his 对本机连接
+   被重置; 网易 chddata 502 → 当前可用的只有新浪 klc 直连, 故单独解码,
+   输出列与 `ak.stock_zh_a_daily` 对齐 (outstanding_share/turnover 置
+   NaN: 股本补充接口对这些代码不可用, 不拿 0 冒充)。
+
+sh/sz 在市代码: 先走 `ak.stock_zh_a_daily` (行为与改动前一致), **仅当其
+因股本步骤确定性崩溃** (demjson 解 `(null)`, 见 `_is_amount_step_failure`)
+时回退 klc 直连 —— 退市股由回退路径透明救回 (审计 D1); 网络类等其他错误
+原样上抛不回退 (回退不得掩盖根因), 在市代码正常情况下零改动。
 """
 
 import json
@@ -68,21 +76,65 @@ def fetch_daily(symbol: str, start_date, end_date, adjust: str = "") -> pd.DataF
     输出列与 `ak.stock_zh_a_daily` 对齐:
     date, open, high, low, close, volume, amount, outstanding_share, turnover
 
-    - sh/sz: 透传 `ak.stock_zh_a_daily` (行为与改动前一致)
-    - bj: 新浪 klc 直连 (见模块 docstring; akshare 对 bj 在 amount 步骤崩溃)
+    路由 (审计 D1):
+
+    - bj: 新浪 klc 直连 (见模块 docstring; akshare 对 bj 在股本步骤崩溃)
+    - sh/sz: 先走 `ak.stock_zh_a_daily` (在市代码行为与改动前一致),
+      **仅当其因股本步骤确定性崩溃时**回退 klc 直连 (`_is_amount_step_
+      failure`: demjson 解 `getAmountBySymbol` 对退市股/bj 返回的
+      `(null)` → "No value to decode"; 与 bj 同根因) —— 这是已知的结构性
+      失败, 换直连即可取到数据 (klc 主行情对退市股有完整历史)。
+      **其余错误 (网络/参数等) 原样上抛, 不回退** —— 否则回退会把根因
+      掩盖成"直连也失败"的合并错误, 调用方拿不到真实原因。
+      回退路径的 outstanding_share/turnover 为 NaN (股本接口本就不可用),
+      amount 仍来自 klc, 不拿 0 冒充。
     """
     if str(symbol).startswith("bj"):
-        return _fetch_bj_daily(symbol, start_date, end_date, adjust)
-    return ak.stock_zh_a_daily(symbol=symbol, start_date=start_date,
-                               end_date=end_date, adjust=adjust)
+        return _fetch_klc_direct(symbol, start_date, end_date, adjust)
+    try:
+        return ak.stock_zh_a_daily(symbol=symbol, start_date=start_date,
+                                   end_date=end_date, adjust=adjust)
+    except Exception as ak_err:
+        if not _is_amount_step_failure(ak_err):
+            raise   # 非股本步骤的确定性崩溃 → 根因原样上抛 (不掩盖)
+        try:
+            df = _fetch_klc_direct(symbol, start_date, end_date, adjust)
+        except Exception as direct_err:
+            raise RuntimeError(
+                f'{symbol} 日线取数失败: akshare 股本步骤崩溃后 klc 直连也'
+                f'失败: {type(direct_err).__name__}: {direct_err}'
+            ) from ak_err
+        print(f"[INFO] {symbol} akshare 股本步骤崩溃 → 已回退新浪 klc 直连 "
+              f"(demjson: {str(ak_err)[:50]})")
+        return df
+
+
+def _is_amount_step_failure(err: BaseException) -> bool:
+    """akshare 是否死于**股本步骤**的确定性崩溃 (demjson 解 `(null)`)
+
+    `ak.stock_zh_a_daily` 主行情 (klc) 拿到数据后, 紧接着调
+    `getAmountBySymbol` 补 outstanding_share —— 该接口对 **bj** 与
+    **退市 sh/sz** 返回 `(null)`, vendored demjson 解空串抛
+    `JSONDecodeError: No value to decode` (模块 akshare.utils.demjson,
+    实测 bj430047 / sz000004 / sh600625)。这是结构性失败 (换直连即解),
+    与网络类瞬时错误必须区分开 (后者不得回退, 见 fetch_daily docstring)。
+    """
+    t = type(err)
+    return (t.__name__ == 'JSONDecodeError'
+            and 'demjson' in getattr(t, '__module__', ''))
 
 
 # ===========================================================================
-# bj 路径: 新浪 klc 直连
+# klc 直连路径 (bj + 退市 sh/sz 回退)
 # ===========================================================================
 
-def _fetch_bj_daily(symbol: str, start_date, end_date, adjust: str = "") -> pd.DataFrame:
-    """北交所日线: 解密新浪 klc 数据 (akshare 对 bj 不可用, 见模块 docstring)"""
+def _fetch_klc_direct(symbol: str, start_date, end_date, adjust: str = "") -> pd.DataFrame:
+    """新浪 klc 直连日线 (解密 klc 数据)
+
+    适用: bj 代码 (akshare 不支持) + 退市 sh/sz (akshare 在股本步骤崩溃)。
+    根因与实测见模块 docstring。历史名 `_fetch_bj_daily` (审计 D1 后
+    扩展用途, 2026-10-30 改名)。
+    """
     text = _http_get(_KLC_URL.format(symbol))
     payload = _extract_js_payload(text)
     rows = _decode_klc(payload)

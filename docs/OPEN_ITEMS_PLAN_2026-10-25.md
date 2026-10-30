@@ -3,7 +3,7 @@
 > **生成日期**: 2026-10-25（星期日）
 > **代码基线**: `e9ea505` — 死代码清理 + 依赖契约修正 (ml_predictor.FeatureEngineer) + 源码卫生门禁
 > **测试基线**: 531 passed / 0 skipped（装齐 `pyarrow` + `matplotlib`）
-> **最近更新**: 2026-10-29 — **批次 4.2 工程基座已收口 (8 条: 6 条属实 / 2 条已过时)**: L1 (两套参数空间并存 → 网格改派生自 ParameterSpace, `sell_threshold` 符号冲突消解) / L2 (硬编码路径 → 从 `__file__` 推导 + 技能目录发现 + 修"打包把自身打进去"的卡死 bug) / L3 (新增 pyproject.toml + CI 工作流; pytest 配置仍只留 pytest.ini 一处) / L5 (`.claude/skills/test_tool.py` → `smoke_test_tool.py` + import 安全) / L9 (同名配置类硬改名) / L10 (VWAP 文档如实化) / L11 (体制统一为字符串); L4/L5 的旧证据已过时 (L4 只剩 1 处且在 gitignored 遗留脚本里); 门禁 `tests/test_project_metadata.py` 26 用例; 测试基线 914 → **940**; 同日早些 **M4 已修 (批次2 全部收口)** + **M20/M5/M19 已修** + **文档去重**; **2026-10-29** — **M4 已修 (短体制窗口冷启动 + 短窗出场失效)**: 复验订正 (审计写的 `min_hold_end` 全仓不存在, 真身是 `min_holding_days`; 且冷启动影响 `walk_forward` 主路径, 不止体制窗) → 新增参数驱动的 `required_warmup_bars()` (默认参数 → 60 逐位不变), walk_forward 与连续体制窗均按参数所需取历史段, 过短体制窗跳过并记账; 实测 ma_slow=120 时窗口交易数 [0,1,0,1,0]→[1,1,1,1,0] (40 根窗) —— 旧实现**整窗静默失效**; 测试基线 903 → **914**; 同日早些 **M20 / M5 / M19 已修** + **文档去重**; **2026-10-29** — **M20 已修 (两个选择器绕过共享数据层)**: 复验订正 (M18 已把它们改到取数层, 但仍绕过 `historical_data_manager`) → 数据层新增 `get_daily_result()` (复权维度 + 参考日 + FetchResult + 交易日历窗口), 两个选择器改走该入口, 缓存键含口径维度; 失败可见 + 无日历降级如实标记; **默认复权口径仍为不复权** (与全仓默认一致, 不改数值) —— "默认用哪个口径"是产品决策 (优化器自身也用不复权), 建议单独议; 测试基线 883 → **903**; 同日早些 **M5 已修** + **M19 已修** + **文档去重**; **2026-10-29** — **M5 已修 (优化器逐股回测失败静默丢弃)**: 复验发现静默 `except` 实为 **3 处** (逐股 walk-forward / 体制逐窗 / 短体制整股), 且"失败"与"体制数据不足(不适用)"被混为一谈 → 逐股记账 + 比例惩罚 (`fitness *= success_rate`) + 硬门槛 (`min_success_rate` 默认 0.5, 低于则归零) + 证据落盘 (`failure_policy` / `systems[].evaluation` / 控制台 `[评估覆盖]`); **零失败时适应度逐位不变** (黄金值 0.1775) → 门禁 17 用例; 测试基线 866 → **883**; 同日早些 **M19 已修** (日线列名标准化 + 涨跌幅派生收口) + **文档去重**; **2026-10-29** — **M19 已修 (日线列名标准化 + 涨跌幅派生收口)**: 复验发现审计严重低估 —— 实测 **9 份列名映射副本 + 6 处涨跌幅派生块** (审计只记 4 处), 且映射已漂移 (3 份含 `成交额` / 6 份不含) → 新建 `core/dataframe.py` 作唯一真相源, 9 站点全部改调, 行为逐位保持 (黄金快照未动); 测试基线 842 → **866**; 同日早些 **文档去重** + 删除 1 个重复测试文件; **2026-10-29** — **文档去重**: `AGENTS.md` 与本文档的重复内容已压缩 (`AGENTS.md` 只留"契约清单 + 指针", 逐条叙事全部留在本文档; 批次 1 之前的已修清单搬入 §9 附录); 同时删除 1 个重复测试文件 (`tests/test_h4_universe_point_in_time.py` = `test_h4_point_in_time_universe.py` 的遗留草稿, 断言为其子集) → 测试基线 861 → **842**; **2026-10-26** — 批次 3 首条 **H1 已修（优化器真样本外验证）**：新增 `optimization_engine.split_is_oos()`，walk-forward 窗口按时间顺序切成 IS（选择用）/ OOS（仅报告）；**适应度只由 IS 窗口计算**，末尾 30% 窗口（`WalkForwardConfig.oos_ratio`）留作样本外，其指标只进 `details['oos']` 与 `systems[].oos` 落盘，**从不参与参数选择** —— 切断"样本外窗口实为样本内"的选择偏差；IS/OOS 两套指标在 IndicatorSystem 字段、控制台摘要、落盘 manifest 三处分列；窗口数不足时如实标记 `available=False`；测试基线 641 → **662**；同日早些 **M1 已修（残余指标口径分歧）**：新增 `core/metrics.win_rate` / `consecutive_streaks` / `max_consecutive_true` 三个单一真相源，引擎 A/B/D 全部改调；A 的连胜/连亏由**日频净值**口径改为**交易序列**口径（与 B 一致，旧日频口径另存为 `max_consecutive_up_days`/`max_consecutive_down_days` 诚实字段），B 补 `max_consecutive_wins` 字段并修掉"连亏统计其实是亏损起始点间隔"的 bug；**引擎 A/B 收益/夏普/回撤/盈亏比等黄金主断言逐位不变**（只改报告字段口径）；测试基线 629 → **641**；同日早些 **H7 已修（回测引擎无流动性/容量约束）**：新增 `execution_model.bar_turnover_amount()` + `capacity_limit_notional()` 共享助手，A 引擎 `PositionConfig.max_volume_participation`（默认 5%）按 当日成交额×占比 截断买入股数，B 引擎 `params['max_volume_participation']` + `params['capital']` 支持逐笔部分成交（`metrics_from_trades` 支持逐笔仓位比例数组，全部相等时走标量路径 → 逐位兼容旧版）；**引擎 A 黄金快照已重评**（ret 20.03%→20.62%、Sharpe 0.810→0.838、MDD 14.19%→14.00%，归因：10 笔买入中 3 笔落在低量日被截断；关闭约束时逐位复现旧值），引擎 B 黄金不变；测试基线 618 → **629**；同日早些 **H9 已修（引擎 A walk-forward）**：测试窗口带预热（`run(warmup_data=)`，策略可见窗口前历史但账户空仓起步）+ 各窗口 OOS 净值曲线拼接（`_stitch_oos_equity`，OOS 总收益 = 各窗逐段复利），实测裸切片 OOS 仅 6 笔 → 带预热 12 笔；测试基线 611 → **618**；同日早些 **H8 已修（引擎 B 三处结构性偏差）**：持仓状态机（重叠买讯不再切出 0 持仓日伪交易）/ `min_holding_days` 默认 20→0（锁定期不再屏蔽退出）/ warmup 跨窗口继承（`backtest(history=)`，OOS 窗口不再被吃前 1/3）；**黄金快照已重评**（引擎 B ret 8.24→12.99、Sharpe 0.707→1.431、MDD 6.52→2.76，归因证明见下表），测试基线 602 → **611**；此前同日批次 1 全部清账（L12 收口 602、M22+M15+M18+M16 599、M2+M3+M9 560、L6+L7+L8 553、M12+M13+M17+M14 2026-10-25 531）
+> **最近更新**: 2026-10-30 — **D1 退市股数据基建已落地 (§5.3, 幸存者偏差由「只能标记」变「可消除」)**: 动手前台账两项前置确认实测全过 —— 新浪 klc 直连对退市股 6/6 样本可用 (qfq/hfq 因子端点亦 6/6); 沪深退市名录 367 只 (A股 337 / B股 30; 沪 2001-04-25 起 / 深 1999-07-12 起; 北交所无公开名录接口) —— **台账原判「无法本地数据消除」被实测推翻**。落地 5 件: ①新模块 `delisted_stocks.py` (清单获取**全成功才落盘** + 离线 registry, 缺文件=`available=False` 「没查过≠没有」 + 覆盖起点=各交易所最早记录的**最晚者**) ②`sina_daily` 回退**收窄**到 akshare 股本步骤确定性崩溃 (demjson 解 `(null)`, 与 bj 同根因; `_fetch_bj_daily`→`_fetch_klc_direct` 改名; 网络类错误原样上抛不回退 —— 回退曾把「网络失败」救活成成功, `test_get_quote_result_reports_failure` 抓住后收窄) ③`_universe_meta` 幸存者偏差**四条证据规则** (清单可用/在范围退市股全部缓存/≤90天新鲜/参考日≥覆盖起点且沪深记录齐; 任一不满足保守 True, 全满足 False+证据落 `delisted_registry`) ④per_pick 分支保守聚合 (不再硬编码 True —— 否则补齐后**反向失实**) ⑤CLI `delisted {refresh,status,fetch}` (只取缺失/失败旧清单不动/rc 证据化; 分派独立成模块级 `_run_delisted_command` 注入式测试)。**本地补数已实跑**: refresh 367 只 → fetch 批量 335 成功 0 失败 (akshare 全线崩 → 自动回退全通) → **337/337 全部在缓存**; 真实 meta `as_of=2026-06-30` → bias **False** + 全证据, `as_of=1999-06-30` → 保守 True (早于覆盖起点); 门禁 `tests/test_delisted_stocks.py` 29 用例 + h3 per_pick 聚合 2 新用例+1 扩展; 测试基线 940 → **971**; 同日早些 **批次 4.2 工程基座已收口 (8 条: 6 条属实 / 2 条已过时)**: L1 (两套参数空间并存 → 网格改派生自 ParameterSpace, `sell_threshold` 符号冲突消解) / L2 (硬编码路径 → 从 `__file__` 推导 + 技能目录发现 + 修"打包把自身打进去"的卡死 bug) / L3 (新增 pyproject.toml + CI 工作流; pytest 配置仍只留 pytest.ini 一处) / L5 (`.claude/skills/test_tool.py` → `smoke_test_tool.py` + import 安全) / L9 (同名配置类硬改名) / L10 (VWAP 文档如实化) / L11 (体制统一为字符串); L4/L5 的旧证据已过时 (L4 只剩 1 处且在 gitignored 遗留脚本里); 门禁 `tests/test_project_metadata.py` 26 用例; 测试基线 914 → **940**; 同日早些 **M4 已修 (批次2 全部收口)** + **M20/M5/M19 已修** + **文档去重**; **2026-10-29** — **M4 已修 (短体制窗口冷启动 + 短窗出场失效)**: 复验订正 (审计写的 `min_hold_end` 全仓不存在, 真身是 `min_holding_days`; 且冷启动影响 `walk_forward` 主路径, 不止体制窗) → 新增参数驱动的 `required_warmup_bars()` (默认参数 → 60 逐位不变), walk_forward 与连续体制窗均按参数所需取历史段, 过短体制窗跳过并记账; 实测 ma_slow=120 时窗口交易数 [0,1,0,1,0]→[1,1,1,1,0] (40 根窗) —— 旧实现**整窗静默失效**; 测试基线 903 → **914**; 同日早些 **M20 / M5 / M19 已修** + **文档去重**; **2026-10-29** — **M20 已修 (两个选择器绕过共享数据层)**: 复验订正 (M18 已把它们改到取数层, 但仍绕过 `historical_data_manager`) → 数据层新增 `get_daily_result()` (复权维度 + 参考日 + FetchResult + 交易日历窗口), 两个选择器改走该入口, 缓存键含口径维度; 失败可见 + 无日历降级如实标记; **默认复权口径仍为不复权** (与全仓默认一致, 不改数值) —— "默认用哪个口径"是产品决策 (优化器自身也用不复权), 建议单独议; 测试基线 883 → **903**; 同日早些 **M5 已修** + **M19 已修** + **文档去重**; **2026-10-29** — **M5 已修 (优化器逐股回测失败静默丢弃)**: 复验发现静默 `except` 实为 **3 处** (逐股 walk-forward / 体制逐窗 / 短体制整股), 且"失败"与"体制数据不足(不适用)"被混为一谈 → 逐股记账 + 比例惩罚 (`fitness *= success_rate`) + 硬门槛 (`min_success_rate` 默认 0.5, 低于则归零) + 证据落盘 (`failure_policy` / `systems[].evaluation` / 控制台 `[评估覆盖]`); **零失败时适应度逐位不变** (黄金值 0.1775) → 门禁 17 用例; 测试基线 866 → **883**; 同日早些 **M19 已修** (日线列名标准化 + 涨跌幅派生收口) + **文档去重**; **2026-10-29** — **M19 已修 (日线列名标准化 + 涨跌幅派生收口)**: 复验发现审计严重低估 —— 实测 **9 份列名映射副本 + 6 处涨跌幅派生块** (审计只记 4 处), 且映射已漂移 (3 份含 `成交额` / 6 份不含) → 新建 `core/dataframe.py` 作唯一真相源, 9 站点全部改调, 行为逐位保持 (黄金快照未动); 测试基线 842 → **866**; 同日早些 **文档去重** + 删除 1 个重复测试文件; **2026-10-29** — **文档去重**: `AGENTS.md` 与本文档的重复内容已压缩 (`AGENTS.md` 只留"契约清单 + 指针", 逐条叙事全部留在本文档; 批次 1 之前的已修清单搬入 §9 附录); 同时删除 1 个重复测试文件 (`tests/test_h4_universe_point_in_time.py` = `test_h4_point_in_time_universe.py` 的遗留草稿, 断言为其子集) → 测试基线 861 → **842**; **2026-10-26** — 批次 3 首条 **H1 已修（优化器真样本外验证）**：新增 `optimization_engine.split_is_oos()`，walk-forward 窗口按时间顺序切成 IS（选择用）/ OOS（仅报告）；**适应度只由 IS 窗口计算**，末尾 30% 窗口（`WalkForwardConfig.oos_ratio`）留作样本外，其指标只进 `details['oos']` 与 `systems[].oos` 落盘，**从不参与参数选择** —— 切断"样本外窗口实为样本内"的选择偏差；IS/OOS 两套指标在 IndicatorSystem 字段、控制台摘要、落盘 manifest 三处分列；窗口数不足时如实标记 `available=False`；测试基线 641 → **662**；同日早些 **M1 已修（残余指标口径分歧）**：新增 `core/metrics.win_rate` / `consecutive_streaks` / `max_consecutive_true` 三个单一真相源，引擎 A/B/D 全部改调；A 的连胜/连亏由**日频净值**口径改为**交易序列**口径（与 B 一致，旧日频口径另存为 `max_consecutive_up_days`/`max_consecutive_down_days` 诚实字段），B 补 `max_consecutive_wins` 字段并修掉"连亏统计其实是亏损起始点间隔"的 bug；**引擎 A/B 收益/夏普/回撤/盈亏比等黄金主断言逐位不变**（只改报告字段口径）；测试基线 629 → **641**；同日早些 **H7 已修（回测引擎无流动性/容量约束）**：新增 `execution_model.bar_turnover_amount()` + `capacity_limit_notional()` 共享助手，A 引擎 `PositionConfig.max_volume_participation`（默认 5%）按 当日成交额×占比 截断买入股数，B 引擎 `params['max_volume_participation']` + `params['capital']` 支持逐笔部分成交（`metrics_from_trades` 支持逐笔仓位比例数组，全部相等时走标量路径 → 逐位兼容旧版）；**引擎 A 黄金快照已重评**（ret 20.03%→20.62%、Sharpe 0.810→0.838、MDD 14.19%→14.00%，归因：10 笔买入中 3 笔落在低量日被截断；关闭约束时逐位复现旧值），引擎 B 黄金不变；测试基线 618 → **629**；同日早些 **H9 已修（引擎 A walk-forward）**：测试窗口带预热（`run(warmup_data=)`，策略可见窗口前历史但账户空仓起步）+ 各窗口 OOS 净值曲线拼接（`_stitch_oos_equity`，OOS 总收益 = 各窗逐段复利），实测裸切片 OOS 仅 6 笔 → 带预热 12 笔；测试基线 611 → **618**；同日早些 **H8 已修（引擎 B 三处结构性偏差）**：持仓状态机（重叠买讯不再切出 0 持仓日伪交易）/ `min_holding_days` 默认 20→0（锁定期不再屏蔽退出）/ warmup 跨窗口继承（`backtest(history=)`，OOS 窗口不再被吃前 1/3）；**黄金快照已重评**（引擎 B ret 8.24→12.99、Sharpe 0.707→1.431、MDD 6.52→2.76，归因证明见下表），测试基线 602 → **611**；此前同日批次 1 全部清账（L12 收口 602、M22+M15+M18+M16 599、M2+M3+M9 560、L6+L7+L8 553、M12+M13+M17+M14 2026-10-25 531）
 > **来源**: 外部深度审计 7 份报告 `skills-quant-framework-analysis-extracted/analysis/`（基线 `14b2f59`）逐条对照当前代码复核
 > **性质**: 这不是"新 bug 报告"，而是**审计 backlog 的清理台账** —— 记录哪些已修、哪些还没动、哪些需要产品决策
 
@@ -202,6 +202,8 @@
 
 **根本限制（如实保留）**：本地缓存只含当前在市的股票，**退市股的历史行情本地没有** → 幸存者偏差**无法用本地数据消除**，本批做的是"消除前视 + 消除不可复现 + 把残余偏差显式标记出来"。要把偏差真正压到 0，需要补齐退市股历史行情（外部数据源），属批次 4 的数据基建范畴。
 
+> **→ 2026-10-30：该限制已解除（D1 落地，见 §5.3）**：退市清单 + klc 直连回退 + 四条证据规则 + CLI 补数已实现，本地 337/337 已补齐 → `survivorship_bias` 可判 `False`；上段「无法消除」的描述保留为当时的如实判断。
+
 **H3 修复明细（2026-10-26，验证链重做）**（用户 2026-10-26 拍板：① 段1 默认严格"无样本外日期 → 不出验证结论"；② 段2 每-pick 点时池默认开；③ 产出出口 CLI + web 都要）：
 
 | 环节 | 做法 |
@@ -265,13 +267,39 @@
 
 > **门禁**: `tests/test_project_metadata.py` **26 用例** (pyproject 存在且 TOML 合法 + `py-modules` 与磁盘一致 + `core` 包声明 + **不得再写 pytest 段** + CI 工作流存在且跑离线套件; 策略网格必须派生自 `ParameterSpace` (名字/范围/默认值/符号) + 不得手写网格; 不得出现他人机器绝对路径 (代码字符串级, docstring 不计); skills 目录不得有匹配 `test_*.py` 的脚本 + 冒烟脚本 import 安全 (只允许 `__main__` 守卫) + 禁裸 `exit()`; `OptimizationConfig` 全仓只许一处定义; VWAP docstring 不得宣称单日 + core 累积语义锁定; 体制表示统一字符串)。
 
-### 5.3 数据基建 —— 退市股历史行情（消除幸存者偏差的前提）⚠️
+### 5.3 数据基建 —— 退市股历史行情（消除幸存者偏差的前提）✅ 已落地 (2026-10-30)
 
 | # | 问题 | 证据 | 备注 |
 |---|---|---|---|
-| **D1** | 本地缓存只含**当前在市**股票 → 任何 `as_of` 口径的股票池**都仍带幸存者偏差**（当时已退市的股票根本不在池内） | §4 H4 修复明细的"根本限制"段 + `get_universe_meta()` 的 `survivorship_bias=True` 标记 | **无法用本地数据消除**，只能标记。消除需补齐退市股历史行情（外部数据源：交易所历史文件 / 第三方归档）。**动手前先确认数据源可得性与复权口径** —— 否则做出来是"看起来无偏"的新坑 |
+| ~~**D1**~~ | ~~本地缓存只含**当前在市**股票 → 任何 `as_of` 口径的股票池**都仍带幸存者偏差**~~ | §4 H4 修复明细的"根本限制"段 + `get_universe_meta()` 的 `survivorship_bias=True` 标记 | **✅ 已消除（基建落地 + 本地补数完成）**：台账原判"无法用本地数据消除"被 2026-10-30 实测**推翻**（新浪 klc 直连对退市股可用），见下方落地明细 |
 
-> 现状：H4 已把偏差**显式化**（`survivorship_bias=True` + `universe_meta` 落盘），D1 是把标记变成事实的前置条件。
+**动手前台账要求的两项前置确认（2026-10-30 实测）**：
+
+| 项 | 实测结论 |
+|---|---|
+| 数据源可得性 | ✅ 新浪 klc 直连（`sina_daily._fetch_klc_direct`）对退市股**可用**：6 样本（2001/2017/2020/2024/2025/2026 退市，沪深各 3）全部有完整历史且含 amount；qfq/hfq 因子端点亦 6/6。名录：`ak.stock_info_sh_delist`（沪，2001-04-25 起）+ `ak.stock_info_sz_delist`（深，1999-07-12 起）→ 去重 **367 只**（A股 337 / B股 30）。备选源：腾讯 fqkline 有数据（列口径不同）；东财 push2his 本机连接被重置；网易 chddata 502。**akshare 根因**：`stock_zh_a_daily` 主行情 klc 有数据，随后 `getAmountBySymbol` 对退市股返回 `(null)` → vendored demjson 解码崩溃（与 bj 取数同根因） |
+| 复权口径 | ✅ 可取：klc + qfq/hfq 因子端点都可用 → 与全仓默认一致走 `adjust=''`（不复权）起步、复权维度照常分文件（P0-4）；"默认用哪个口径"仍是独立产品决策（§3 M20 注） |
+
+**落地明细**：
+
+| # | 内容 |
+|---|---|
+| D1-1 清单基建 | 新建 `.claude/skills/delisted_stocks.py`：`fetch_delisted_list`（两市名录**全成功才落盘** —— 半份清单会让 False 声明建立在缺失数据上）+ `DelistedRegistry`（离线 load；缺文件 = `available=False` "没查过 ≠ 没有"）+ `normalize/write`（6位码/去重/退市日期缺失剔除/B股 `in_scope=False`）+ `stats()`（**覆盖起点 = 各交易所最早退市记录的最晚者** —— 取 min 会对另一市空白期误发 False 声明；age/fresh）。清单缓存 `stock_data/delisted/delisted_list.csv`（gitignored 数据缓存） |
+| D1-2 取数回退 | `sina_daily._fetch_bj_daily` → `_fetch_klc_direct`（改名：该直连路径现在同时服务退市 sh/sz）；`fetch_daily` 对 sh/sz **仅当 akshare 因股本步骤确定性崩溃**（`_is_amount_step_failure`：vendored demjson JSONDecodeError "No value to decode"）时回退直连，**网络类错误原样上抛不回退**（回退曾把"网络失败"救活成成功 → `test_get_quote_result_reports_failure` 抓住后收窄到唯一确定性根因） |
+| D1-3 证据化标记 | `_universe_meta` 的 `survivorship_bias` 由硬编码 True 改为**四条证据规则**（任一不满足保守 True）：①清单可用 ②清单内在范围退市股全部缓存 ③清单刷新 ≤90 天（`REGISTRY_MAX_AGE_DAYS`）④参考日 ≥ 覆盖起点且沪深两市记录齐。全满足 → **False** + 证据明细落 `delisted_registry` 键；残余限制写进 note（B股 30 只范围外、北交所无公开名录接口） |
+| D1-4 per_pick 聚合 | `historical_backtest_validator` per_pick 分支由硬编码 True 改走 `get_universe_meta(as_of=d)` 逐日期取证据后**保守聚合**（任一 True→True；全 False→False；否则 None 未核查）—— 否则退市股补齐后报告**反向失实**（已消除的偏差仍标 True） |
+| D1-5 CLI 补数 | `historical_data_manager.py delisted {refresh,status,fetch}`：refresh 联网刷新（全成功才落盘，失败旧清单原样）；status 打证据+缺口（缺则 rc=1）；fetch **只取缺失**的在范围退市股（已入库不重取 —— 退市股数据不会变；`--include-b` 放开 B股；仍缺 rc=1）。分派独立为模块级 `_run_delisted_command(args, manager, fetcher=)`（注入式测试，不碰仓库默认 data_dir —— 测试隔离红线） |
+
+**实测闭环（2026-10-30，真实数据）**：
+- `delisted refresh` → 367 只落盘（sh 155 / sz 212，覆盖 2001-04-25 ~ 2026-10-28）
+- `delisted fetch` 批量 335 只 → **成功 335 / 失败 0**（akshare 对退市股全线股本崩溃 → 自动回退 klc 直连全通）；连同已缓存 2 只 = **337/337**
+- `delisted status` → rc=0（"缓存补齐 337/337"）
+- `get_universe_meta(as_of='2026-06-30')` → `survivorship_bias=**False**` + 全证据（清单 367/在范围 337/补齐 337/刷新 0 天前/覆盖起点 2001-04-25）；`as_of='1999-06-30'` → 保守 True（参考日早于覆盖起点）
+
+**门禁**：`tests/test_delisted_stocks.py` **29 用例**（清单归一化/落盘读回不刷新 fetched_at/缺文件不可用/覆盖起点取 max/刷新全成全败；路由回退四态 + `_is_amount_step_failure` 分类；四规则各一条 + B股不阻塞 False + 单市清单保守；CLI 七态；接线源码断言）+ `test_h3_validation_chain` per_pick 聚合 2 新用例 + 1 扩展断言。测试基线 940 → **971**。
+
+**已知残余（如实）**：北交所退市无公开名录接口（清单仅覆盖沪深）；名录起点沪 2001 / 深 1999 → 参考日早于覆盖起点的池子仍标 True；清单 90 天未刷新不发 False；B股 30 只不在框架股票池范围（`stock_list.csv` 不含 900/200 前缀）。
+
 
 ---
 
@@ -281,11 +309,12 @@
 
 | AGENTS.md 摘要条目 | 本文档对应 | 状态 |
 |---|---|---|
-| 批次 2 余量 (M5 / M4 / M19 / M20) | §3 | **仍开**；M5/M4 标 ⚠️（动手前先复验，审计基线距今 30+ 提交） |
-| 批次 4.2 工程基座 (L1/L2/L3/L4/L5/L9/L10/L11) | §5.2 | **仍开** |
+| ~~批次 2 余量 (M5 / M4 / M19 / M20)~~ | §3 | **✅ 已收口（2026-10-29，批次 2 全部清账）** |
+| ~~批次 4.2 工程基座 (L1/L2/L3/L4/L5/L9/L10/L11)~~ | §5.2 | **✅ 已收口（2026-10-29，6 条属实 / 2 条已过时）** |
 | 停牌建模根本限制（无指数数据即无日历） | §4 H5 | **部分收口**（引擎侧已落地：`core/suspension.py` + 4 引擎接线），但**无日历 = 不建模**（`suspension_modeled=False`）—— 日历来源仍依赖指数数据/本地缓存 |
-| 幸存者偏差无法本地消除 | §4 H4 根本限制 + §5.3 D1 | **仍开**（H4 已把偏差显式标记；消除需外部数据源） |
+| ~~幸存者偏差无法本地消除~~ | §4 H4 根本限制 + §5.3 D1 | **✅ 已收口（2026-10-30 D1）**：清单+回退+四条证据规则+CLI 补数落地，本地 337/337 已补齐 → meta 可判 False；残余：北交所名录缺失 / 覆盖起点 1999-2001 / 清单 90 天新鲜度 / B股范围外 |
 | 线上历史数据批量重取（除权跳空只标记不改写） | — | **仍开**。依赖网络与磁盘；`data_cleaner.py` 已就位 |
+| 复权默认口径待产品决策 | §3 M20 注 | **仍开**（产品决策：全仓默认 `adjust=''` 不复权；M20 已打通维度，待单独拍板） |
 | `technical_analyzer` signals 缺 `shift(1)` | ⚠️ B L3/L4（`position_analyzer` 连声明都没有） | **仍开**（advisory-only，已文档化） |
 
 > 批次 1 之前的已修项（原 `AGENTS.md` 的 "Fixed" 长清单）已搬入 §9 附录。

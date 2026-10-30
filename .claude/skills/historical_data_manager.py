@@ -36,6 +36,8 @@ from core.dataframe import (standardize_daily_frame,
                             standardize_ohlcv_columns)
 from core.fetch_result import FetchResult
 from sina_daily import fetch_daily, format_symbol
+from delisted_stocks import (DelistedRegistry, REGISTRY_MAX_AGE_DAYS,
+                            default_registry_path)
 from stock_list_manager import get_stock_name as _lookup_stock_name
 from js_runtime import js_guard
 
@@ -760,8 +762,33 @@ class HistoricalDataManager:
                 latest = d
         return latest
 
+    def delisted_registry(self) -> DelistedRegistry:
+        """退市清单 (本 manager 的 data_dir 下)
+
+        每次现读, **不设读缓存**: 清单是数据缓存, 缓存读侧对象会让
+        `delisted refresh` 后仍读到旧清单 (新鲜度证据失效)。
+        """
+        return DelistedRegistry.load(default_registry_path(self.data_dir))
+
     def _universe_meta(self, as_of=None) -> dict:
-        """股票池口径元数据 (幸存者偏差如实标记) —— 审计 H4。"""
+        """股票池口径元数据 (幸存者偏差**由证据得出**) —— 审计 H4 + D1。
+
+        H4 阶段此处是硬编码 True (退市股行情缺位 → 只能标记); D1 补齐
+        退市清单基建后, 标记改按 **四条证据规则**推导 —— 任一不满足即
+        保守保持 True, 全部满足才允许 False:
+
+        ① **清单可用**: 没刷新过退市清单 → "没查过" ≠ "没有偏差"
+        ② **补齐**: 缓存含清单内**全部在范围**退市股 (B股 900/200 不在
+           框架股票池范围, 见 delisted_stocks)
+        ③ **新鲜**: 清单刷新于 REGISTRY_MAX_AGE_DAYS 内 —— 过期则期间
+           可能已有新退市股未入清单, 不足以支撑"偏差已消除"
+        ④ **覆盖**: 参考日 ≥ 各交易所最早退市记录的**最晚者**, 且沪深
+           两市均有记录 —— 早于清单覆盖起点的参考日, 当时更早的退市
+           记录未知 (北交所无公开名录接口, 残余限制写进 note)
+
+        元数据键 `delisted_registry` 落全部证据 (清单统计 + 缓存补齐数)
+        → 报告/落盘可复核, 不是口头声明。
+        """
         stocks = self.metadata.get("stocks", {})
         firsts, lasts = [], []
         for info in stocks.values():
@@ -774,18 +801,69 @@ class HistoricalDataManager:
                 except (ValueError, TypeError):
                     continue
         ref = self._reference_date(as_of)
+
+        reg = self.delisted_registry()
+        st = reg.stats()
+        in_scope_codes = reg.codes(in_scope=True)
+        n_scope = len(in_scope_codes)
+        n_done = sum(1 for c in in_scope_codes if c in stocks)
+
+        # ---- 四条证据规则 (任一不满足 → 保守 True) ----
+        by_ex = st.get('coverage_start_by_exchange') or {}
+        both_exchanges = {'sh', 'sz'} <= set(by_ex)
+        coverage_start = (pd.Timestamp(st['coverage_start']).date()
+                          if st.get('coverage_start') else None)
+
+        if not st['available'] or n_scope == 0:
+            bias = True
+            note = ('本地缓存未含退市股行情 (退市清单未刷新或为空) → '
+                    '当时已退市的股票不在池内 → 股票池带幸存者偏差; '
+                    '清单缺失 = 没查过, 不等于没有偏差 '
+                    '(刷新清单: historical_data_manager.py delisted refresh)')
+        elif n_done < n_scope:
+            bias = True
+            note = (f'本地缓存已补 {n_done}/{n_scope} 只在范围退市股行情, '
+                    f'仍缺 {n_scope - n_done} 只 → 池内仍缺当时已退市股票 '
+                    f'→ 幸存者偏差仍开 (补齐: historical_data_manager.py '
+                    f'delisted fetch)')
+        elif not st['fresh']:
+            bias = True
+            note = (f'退市清单已 {st["age_days"]} 天未刷新 '
+                    f'(新鲜度门槛 {REGISTRY_MAX_AGE_DAYS} 天) → 期间可能有'
+                    f'新退市股未入清单 → 不足以声明偏差已消除 '
+                    f'(刷新: historical_data_manager.py delisted refresh)')
+        elif ref is None or not both_exchanges:
+            bias = True
+            miss = sorted({'sh', 'sz'} - set(by_ex))
+            why = ('参考日不可得' if ref is None
+                   else f'清单缺 {"/".join(miss)} 市退市记录')
+            note = (f'{why} → 无法验证覆盖完整性 → 保守保持幸存者偏差标记'
+                    f' (清单覆盖起点 {st.get("coverage_start")})')
+        elif ref < coverage_start:
+            bias = True
+            note = (f'清单覆盖的退市记录始于 {coverage_start} (各交易所最早'
+                    f'记录的最晚者); 参考日 {ref} 早于该起点 → 早期退市'
+                    f'记录未知 → 残余幸存者偏差')
+        else:
+            bias = False
+            note = (f'本地缓存含全部 {n_scope} 只在范围退市股行情 '
+                    f'(清单: {st.get("exchanges")}, 退市记录覆盖 '
+                    f'{coverage_start} ~ {st.get("coverage_end")}, 刷新于 '
+                    f'{st.get("fetched_at")}) → 点时股票池含当时已退市股票 '
+                    f'→ 幸存者偏差已消除; 范围外残余: B股 '
+                    f'{st.get("n_out_of_scope", 0)} 只 (框架股票池不含), '
+                    f'北交所无公开退市名录接口')
+
         return {
             'as_of': str(ref) if ref else None,
             'n_cached_stocks': len(stocks),
             'data_range': [str(min(firsts)) if firsts else None,
                            str(max(lasts)) if lasts else None],
-            # 幸存者偏差: 本地缓存只含**当前在市**的股票 → 任何 as_of 口径
-            # 的股票池都缺"当时已退市"的股票 → 历史回测的收益被系统性高估。
-            # 不可消除 (需退市股历史行情), 只能**如实标记**。
-            'survivorship_bias': True,
-            'survivorship_note': ('本地缓存仅含当前在市股票; 当时已退市的'
-                                   '股票不在池内 → 股票池仍带幸存者偏差'
-                                   ' (无法用本地数据消除, 只能标记)'),
+            'survivorship_bias': bias,
+            'survivorship_note': note,
+            # 证据落盘 (清单统计 + 补齐数) → 声明可复核 (审计 D1)
+            'delisted_registry': {**st, 'n_cached_in_scope': n_done,
+                                  'n_in_scope': n_scope},
         }
 
     def get_universe(self, min_history_days: int = 5000,
@@ -968,6 +1046,104 @@ class HistoricalDataManager:
         return name if name else str(symbol)
 
 
+def _delisted_coverage(reg: DelistedRegistry, manager: "HistoricalDataManager"):
+    """清单内**尚未缓存**的在范围退市股 (审计 D1 的补齐口径)"""
+    codes = reg.codes(in_scope=True)
+    cached = manager.metadata.get("stocks", {})
+    missing = [c for c in codes if c not in cached]
+    return codes, missing
+
+
+def _run_delisted_command(args, manager, fetcher=None) -> int:
+    """`delisted` 子命令分派 —— 退市清单与历史行情 (审计 D1)
+
+    独立成模块级函数: 可注入 manager (临时目录) 与 fetcher (测试打桩),
+    不碰仓库默认 data_dir (测试隔离红线, 见 tests/conftest.py 教训)。
+
+    子命令:
+        refresh — 联网刷新退市清单 (上交所+深交所; **全成功才落盘**,
+                  半份清单会让"清单内已全部补齐"的 False 声明建立在
+                  缺失数据上)
+        status  — 清单证据 (来源/时间/覆盖) + 缓存补齐覆盖统计
+        fetch   — 补齐清单内尚未缓存的 A股退市股行情 (batch 路径;
+                  已退市数据不会变 → 已缓存的不重取)
+
+    Returns:
+        int: 退出码 —— 0 = 成功且证据齐 (status: 已补齐); 1 = 失败 /
+             缺子命令 / 证据不齐 (清单不可用、有缺股、刷新失败)
+    """
+    reg = DelistedRegistry.load(default_registry_path(manager.data_dir))
+    cmd = args.delisted_cmd   # 子命令未给时 argparse 置 None (set_defaults)
+
+    if cmd == "refresh":
+        try:
+            reg.refresh(fetcher=fetcher)
+        except Exception as e:  # noqa: BLE001 — 如实报错, 旧清单未动
+            print(f"[ERROR] 退市清单刷新失败 (旧清单未动): {e}")
+            return 1
+        st = reg.stats()
+        print(f"[OK] 退市清单已刷新 → {reg.path}")
+        print(f"     共 {st['n']} 只 (在范围 A股 {st['n_in_scope']} / "
+              f"B股 {st['n_out_of_scope']}); 退市记录 "
+              f"{st['coverage_start']} ~ {st['coverage_end']}")
+        return 0
+
+    if cmd == "status":
+        st = reg.stats()
+        print(f"清单文件: {st['path']}")
+        if not st["available"]:
+            print("[WARN] 清单不可用 (未刷新过) → 幸存者偏差保持 True "
+                  "(没查过 ≠ 没有偏差)")
+            return 1
+        codes, missing = _delisted_coverage(reg, manager)
+        print(f"刷新于: {st['fetched_at']} ({st['age_days']} 天前"
+              f"{'' if st['fresh'] else ', **已过期**'})")
+        print(f"记录: 共 {st['n']} 只 (在范围 {st['n_in_scope']} / "
+              f"B股 {st['n_out_of_scope']}); 交易所 {st['exchanges']}")
+        print(f"退市记录覆盖: {st['coverage_start']} ~ {st['coverage_end']}")
+        print(f"缓存补齐: {len(codes) - len(missing)}/{len(codes)} "
+              f"(尚缺 {len(missing)} 只)")
+        if missing:
+            head = ", ".join(missing[:10])
+            print(f"  缺: {head}{' ...' if len(missing) > 10 else ''}")
+            print("  补齐: historical_data_manager.py delisted fetch")
+        return 0 if not missing else 1
+
+    if cmd == "fetch":
+        if not reg.available:
+            print("[ERROR] 退市清单不可用 → 先跑: "
+                  "historical_data_manager.py delisted refresh")
+            return 1
+        codes = reg.codes(in_scope=None if args.include_b else True)
+        cached = manager.metadata.get("stocks", {})
+        missing = [c for c in codes if c not in cached]
+        n_b = reg.stats()["n_out_of_scope"]
+        print(f"[INFO] 清单{'全量' if args.include_b else '在范围'} "
+              f"{len(codes)} 只: 已缓存 {len(codes) - len(missing)} 只, "
+              f"本次补齐 {len(missing)} 只"
+              + (f"; B股 {n_b} 只{'已纳入' if args.include_b else '默认跳过'}"
+                 f" (框架股票池不含B股)" if n_b else ""))
+        if not missing:
+            return 0
+        manager.batch_fetch(missing, start_date=args.start,
+                            end_date=args.end, delay=args.delay,
+                            max_workers=args.workers)
+        manager._save_metadata()
+        still = [c for c in codes if c not in
+                 manager.metadata.get("stocks", {})]
+        if still:
+            print(f"[WARN] 补齐后仍缺 {len(still)} 只 (取数失败/接口无数据) "
+                  f"→ 幸存者偏差保持 True")
+            return 1
+        print(f"[OK] 清单内 {len(codes)} 只退市股行情全部在缓存 → "
+              f"幸存者偏差证据齐 (下次 meta 判定见四条规则)")
+        return 0
+
+    print("用法: historical_data_manager.py delisted "
+          "{refresh,status,fetch} (缺子命令)")
+    return 1
+
+
 def main():
     """测试入口"""
     import argparse
@@ -1005,6 +1181,25 @@ def main():
     # validate: 验证数据
     p_validate = subparsers.add_parser('validate', help='验证数据完整性')
     p_validate.add_argument('symbol', nargs='?', help='股票代码(不指定则验证全部)')
+
+    # delisted: 退市股清单与历史行情 (审计 D1)
+    p_del = subparsers.add_parser(
+        'delisted', help='退市股清单与历史行情 (审计 D1: 幸存者偏差消除前提)')
+    del_sub = p_del.add_subparsers(dest='delisted_cmd', help='子命令')
+    del_sub.add_parser('refresh',
+                       help='联网刷新退市清单 (上交所+深交所; 全成功才落盘)')
+    del_sub.add_parser('status',
+                       help='清单证据 + 缓存补齐覆盖统计')
+    p_dfetch = del_sub.add_parser(
+        'fetch', help='补齐清单内尚未缓存的 A股退市股行情')
+    p_dfetch.add_argument('--start', default='19900101',
+                          help='开始日期 (退市样本最早 1991 年)')
+    p_dfetch.add_argument('--end', default=None, help='结束日期')
+    p_dfetch.add_argument('--workers', type=int, default=4, help='并发数')
+    p_dfetch.add_argument('--delay', type=float, default=0.3,
+                          help='请求间隔(秒)')
+    p_dfetch.add_argument('--include-b', action='store_true',
+                          help='连B股一起取 (框架股票池不含B股, 默认跳过)')
 
     args = parser.parse_args()
     manager = HistoricalDataManager()
@@ -1087,6 +1282,11 @@ def main():
                     if result.get('issues'):
                         print(f"  {sym}: {', '.join(result['issues'])}")
             print(f"\n有效: {valid}, 无效: {invalid}")
+
+    elif args.command == 'delisted':
+        rc = _run_delisted_command(args, manager)
+        if rc:
+            raise SystemExit(rc)
 
     else:
         parser.print_help()
