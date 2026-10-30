@@ -27,19 +27,24 @@ class PositionAnalyzer:
         # 上次评分的"指标不可用"明细 (审计 C2: 数据不足 ≠ 技术面弱)
         self._last_score_unavailable = []
 
-    def get_stock_data(self, symbol, days=120):
+    def get_stock_data(self, symbol, days=120, adjust=''):
         """
         获取股票数据
 
         Args:
             symbol: 股票代码
             days: 获取天数
+            adjust: 复权口径 — **默认 '' 不复权**: 持仓成本 (cost_price) 是
+                真实成交价, 浮盈浮亏 = 历史现价 vs 真实成本必须同口径
+                (hfq 序列价会虚增现价 → 收益全错)。指标-only 的调用方
+                (选股打分等) 可显式传 'hfq' 走分析口径。
 
         Returns:
             DataFrame: 包含技术指标的股票数据
         """
         # 获取数据 (FetchResult: 失败携带原因, 不再静默None)
-        result = self.fetcher.get_quote_result(symbol, days=days)
+        result = self.fetcher.get_quote_result(symbol, days=days,
+                                                adjust=adjust)
         if not result.ok:
             print(f"[WARN] {symbol} 持仓分析取消: 数据获取失败 ({result.error})")
             return None

@@ -72,7 +72,7 @@ class TestCoreRSI:
             def get_quote_data(self, symbol, days=120):
                 return df.copy()
 
-            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120):
+            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120, adjust='hfq'):
                 from core.fetch_result import FetchResult
                 return FetchResult.success(df.copy(), source='test')
 

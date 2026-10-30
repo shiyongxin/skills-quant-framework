@@ -48,6 +48,7 @@ Modules import each other by **bare module name** (`from stock_data_fetcher impo
 | 日线列名/涨跌幅 (M19) | 列名映射只走 `core/dataframe.OHLCV_COLUMN_MAP`; `涨跌幅` 只能由 `ensure_change_pct` 派生 (禁直接赋值); 不消费涨跌幅的模块不补该列 | `test_m19_column_standardization.py` |
 | 评估失败可见 (M5) | 逐股回测失败必须记账 (`n_stocks_failed`/`success_rate`) + 受罚 (`fitness *= success_rate`; 成功率 < `min_success_rate` → 归零); 评估路径禁静默 `except: continue` | `test_m5_evaluation_failures.py` |
 | 共享数据层 (M20) | 取数一律走 `HistoricalDataManager.get_daily_result` (复权维度 + 参考日 + FetchResult + 交易日历窗口); 禁各模块自行取数/用 wall clock 划窗口; 缓存键须含口径维度 | `test_m20_shared_data_layer.py` |
+| 复权默认口径 (P0-4/M20 收口) | 数据入口默认 `adjust=DEFAULT_ADJUST` (`core/fetch_result`, **hfq 后复权**, 产品决策 2026-10-30); 真实价格场景 (持仓成本对比 `position_analyzer` / 实时监控 `real_time_monitor`) 必须显式 `adjust=''`; 股票池/元数据按 `_base_symbol` 剥口径标签, 补齐判定按 `_has_stock_any_adjust` (任一口径) | `test_data_adjust_dimension.py::TestDefaultHfqWiring` |
 | 窗口预热 (M4) | 预热长度按**参数** (`required_warmup_bars`), 不得写死; 窗口比 `min_holding_days` 短 → 跳过并记账 (`regime_window_stats`) | `test_m4_regime_warmup.py` |
 | 部署包 (批次 4) | 副本 = 构建产物; 打包脚本必须在主链且**被 git 跟踪** | `test_package_parity.py` |
 | 幸存者偏差证据 (D1) | `survivorship_bias` 只由四条证据得出 (清单可用/在范围退市股全部缓存/≤90天新鲜/参考日≥覆盖起点且沪深记录齐, 任一不满足保守 True); akshare 回退**仅限**股本步骤确定性崩溃 (demjson), 网络错误不得回退 | `test_delisted_stocks.py` |
@@ -80,7 +81,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **971 offline tests** (971 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **984 offline tests** (984 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -108,12 +109,11 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 **台账 `docs/OPEN_ITEMS_PLAN_2026-10-25.md` 是审计 backlog 的唯一真相源** (逐条证据 + 复验置信度 + 归因 + 对应门禁)。批次 1 之前的已修项见台账 §9 附录; 提交级细节见 `git log --oneline`。
 
-**已收口**: **D1 退市股数据基建 (幸存者偏差由「只能标记」变「可消除」, 2026-10-30, 台账 §5.3)**; 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
+**已收口**: **复权默认口径已拍板并落地 (默认 hfq 后复权, 2026-10-30, 台账 §5.4; 门禁 `TestDefaultHfqWiring` + 早退补登记, 基线 971→984)**; **D1 退市股数据基建 (幸存者偏差由「只能标记」变「可消除」, 2026-10-30, 台账 §5.3)**; 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
 
 **仍开** (完整条目与证据见台账 §3/§5.2/§5.3/§6):
 
 - **批次 2 已全部收口** (M13/M12/M17/M14/L6-L12/M2/M3/M9/M22/M15/M18/M16 → 批次1; H8/H9/H7/M1/M5/M19/M20/M4 → 批次2)。
-- **复权默认口径待产品决策**: 全仓默认 `adjust=''` (不复权) → 含除权跳空 (优化器自身也用不复权, 回测收益口径受影响)。M20 已把**维度**打通 (可按口径取数/缓存分键), 但"默认用哪个口径"尚未定 —— 建议单独拍板。
 - **批次 4.2 工程基座已收口** (2026-10-29: L1/L2/L3/L5/L9/L10/L11 已修 + 门禁 `test_project_metadata.py`; L4/L5 的旧证据已过时)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。
 - **幸存者偏差: D1 基建已落地 (2026-10-30)**: 退市清单 (`delisted refresh`) + klc 直连回退 + **四条证据规则** (`_universe_meta` 判 `survivorship_bias=False`) + CLI 补数 (`delisted fetch`); 本地已补 **337/337** → meta 可判 False。残余如实: 北交所退市无名录接口、清单覆盖起点 沪2001/深1999 (更早参考日仍保守 True)、清单需 90 天内刷新、B股 30 只在股票池范围外 (台账 §5.3)。

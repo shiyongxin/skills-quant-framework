@@ -123,9 +123,10 @@ class TestIndexNamespace:
         assert (len(loaded), len(idx)) == (5, 8), "同代码个股/指数互不覆盖"
         assert float(loaded['收盘'].iloc[0]) == 10.0     # 平安银行
         assert float(idx['收盘'].iloc[0]) == 3502.0      # 上证指数
-        assert (mgr.historical_dir / '000001.parquet').exists()
+        assert (mgr.historical_dir / '000001_hfq.parquet').exists(), \
+            '个股走默认复权口径文件名 (DEFAULT_ADJUST=hfq)'
         assert (mgr.index_dir / '000001.parquet').exists()
-        assert ('000001' in mgr.metadata['stocks']
+        assert ('000001_hfq' in mgr.metadata['stocks']
                 and '000001' in mgr.metadata['indexes'])
 
     def test_index_ignores_adjust_with_notice(self, mgr, monkeypatch,

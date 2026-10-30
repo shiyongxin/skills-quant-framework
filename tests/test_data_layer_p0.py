@@ -97,7 +97,8 @@ class TestHistoricalDataManager:
         try:
             # API 返回 None (失败)
             hdm_mod.fetch_daily = lambda **k: None
-            result = mgr.fetch_and_cache('600519', start_date='20240104')
+            result = mgr.fetch_and_cache('600519', start_date='20240104',
+                                          adjust='')  # 陈旧告警按不复权存量测
         finally:
             hdm_mod.fetch_daily = original
 
@@ -259,7 +260,7 @@ class TestFetchResultCallers:
                 return pd.DataFrame()
 
             def get_quote_result(self, symbol, start_date=None, end_date=None,
-                                 days=120):
+                                 days=120, adjust='hfq'):
                 return FetchResult.failure('network down', source='test')
 
         return _F()
@@ -276,7 +277,7 @@ class TestFetchResultCallers:
 
         class _F:
             def get_quote_result(self, symbol, start_date=None, end_date=None,
-                                 days=120):
+                                 days=120, adjust='hfq'):
                 return FetchResult.success(short_df.copy(), source='test')
 
         import technical_analyzer as ta_mod

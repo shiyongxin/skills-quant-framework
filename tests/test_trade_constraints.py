@@ -234,7 +234,7 @@ class _MapFetcher:
         return self.frames[symbol].copy()
 
     def get_quote_result(self, symbol, start_date=None, end_date=None,
-                         days=120):
+                         days=120, adjust='hfq'):
         from core.fetch_result import FetchResult
         return FetchResult.success(self.frames[symbol].copy(), source='stub')
 

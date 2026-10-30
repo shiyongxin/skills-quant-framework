@@ -20,6 +20,12 @@
 产生虚假跳空, 收益率与全部技术指标随之失真。因此复权口径进入文件名与元数据,
 不同口径互不覆盖; `load(..., adjust=...)` 只读对应口径的文件, 缺失时返回空
 DataFrame (不拿不复权数据冒充前复权)。
+
+**默认口径 = 后复权** (`DEFAULT_ADJUST='hfq'`, 产品决策 2026-10-30, 台账 §5.4):
+本层各入口 (fetch_and_cache / get_daily_result / load / batch_fetch / CLI)
+未显式给 adjust 时一律取后复权 —— 回测收益不含除权跳空、增量缓存追加永远
+正确 (后复权历史价不随分红变化)。要不复权/前复权请显式 `adjust=''/'qfq'`;
+指数无复权概念 (is_index=True 时忽略)。
 """
 
 import akshare as ak
@@ -34,7 +40,7 @@ from threading import Semaphore
 
 from core.dataframe import (standardize_daily_frame,
                             standardize_ohlcv_columns)
-from core.fetch_result import FetchResult
+from core.fetch_result import FetchResult, DEFAULT_ADJUST
 from sina_daily import fetch_daily, format_symbol
 from delisted_stocks import (DelistedRegistry, REGISTRY_MAX_AGE_DAYS,
                             default_registry_path)
@@ -145,7 +151,7 @@ class HistoricalDataManager:
 
     @staticmethod
     def _adjust_tag(adjust: str) -> str:
-        """复权口径的规范标签 (''=不复权)"""
+        """复权口径的规范标签 (''=不复权; 默认口径见 core.fetch_result.DEFAULT_ADJUST)"""
         tag = (adjust or "").strip().lower()
         return "" if tag in ("", "none", "raw", "bfq") else tag
 
@@ -240,7 +246,7 @@ class HistoricalDataManager:
             df.to_csv(csv_path, index=False, encoding='utf-8-sig')
 
     def fetch_and_cache(self, symbol: str, start_date: str = "19960101",
-                        end_date: str = None, adjust: str = "",
+                        end_date: str = None, adjust: str = DEFAULT_ADJUST,
                         is_index: bool = False,
                         _persist_metadata: bool = True) -> pd.DataFrame:
         """
@@ -255,9 +261,10 @@ class HistoricalDataManager:
         end_date : str
             结束日期，默认今天
         adjust : str
-            复权口径 — ''(不复权, 默认) / 'qfq' / 'hfq'。不同口径写不同
-            Parquet 文件, 互不覆盖 (审计 P0-4)。指数无复权概念, is_index=True
-            时被忽略
+            复权口径 — 默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品决策
+            2026-10-30); ''=不复权 / 'qfq' 需显式指定。不同口径写不同
+            Parquet 文件, 互不覆盖 (审计 P0-4)。指数无复权概念,
+            is_index=True 时被忽略
         is_index : bool
             是否指数 (审计 M12)。True 时: ① 按指数规则加前缀 (000xxx→sh,
             399xxx→sz) ② 走指数接口 stock_zh_index_daily ③ 存入独立命名空间
@@ -311,6 +318,12 @@ class HistoricalDataManager:
             if existing_df is not None:
                 last_date = pd.to_datetime(existing_df['日期'].iloc[-1])
                 print(f"[WARN] {symbol} API无新数据/失败, 返回本地旧数据(最后日期 {last_date.date()})")
+                # 文件在但键可能缺 (如被中断的批量写盘只写了 parquet 没落
+                # meta) → 本路径不登记会让 universe/validate/status 对这份
+                # 文件永久失明 → 与正常入库共用登记 (幂等)
+                self._register_local_meta(existing_df, symbol, adjust, is_index)
+                if _persist_metadata:
+                    self._save_metadata()
                 return existing_df
             return pd.DataFrame()
 
@@ -326,10 +339,26 @@ class HistoricalDataManager:
         self._save_local(combined, parquet_path, csv_path, label=symbol)
 
         # 更新元数据 (复权口径入库, 审计 P0-4; 指数单独记, 不进股票池)
+        self._register_local_meta(combined, symbol, adjust, is_index)
+        # 元数据落盘 (复权口径/日期范围/行数) —— 旧实现只改内存不落盘,
+        # 导致 metadata.json 永远不存在: get_cache_status/list_cached_symbols
+        # 恒空, 且存量 CSV 的口径判定 (按元数据) 无据可依
+        if _persist_metadata:
+            self._save_metadata()
+
+        return combined
+
+    def _register_local_meta(self, df: pd.DataFrame, symbol: str,
+                             adjust: str, is_index: bool) -> None:
+        """把本地行情帧登记进元数据 (正常入库 / 无新数据早退 两路共用)
+
+        幂等: 同一帧重复登记覆盖同值。早退路径此前不登记 → 文件在但
+        键缺 (中断的批量写盘) 时股票池/校验/状态对这份文件永久失明。
+        """
         entry = {
-            "first_date": str(combined['日期'].iloc[0].date()) if hasattr(combined['日期'].iloc[0], 'date') else str(combined['日期'].iloc[0]),
-            "last_date": str(combined['日期'].iloc[-1].date()) if hasattr(combined['日期'].iloc[-1], 'date') else str(combined['日期'].iloc[-1]),
-            "row_count": len(combined),
+            "first_date": str(df['日期'].iloc[0].date()) if hasattr(df['日期'].iloc[0], 'date') else str(df['日期'].iloc[0]),
+            "last_date": str(df['日期'].iloc[-1].date()) if hasattr(df['日期'].iloc[-1], 'date') else str(df['日期'].iloc[-1]),
+            "row_count": len(df),
             "updated": datetime.now().isoformat()
         }
         if is_index:
@@ -340,17 +369,11 @@ class HistoricalDataManager:
             meta_key = symbol if not adjust else f"{symbol}_{adjust}"
             self.metadata["stocks"][meta_key] = entry
         self.metadata["last_update"] = datetime.now().isoformat()
-        self.metadata["stock_count"] = len(self.metadata["stocks"])
-        # 元数据落盘 (复权口径/日期范围/行数) —— 旧实现只改内存不落盘,
-        # 导致 metadata.json 永远不存在: get_cache_status/list_cached_symbols
-        # 恒空, 且存量 CSV 的口径判定 (按元数据) 无据可依
-        if _persist_metadata:
-            self._save_metadata()
-
-        return combined
+        self.metadata["stock_count"] = len(
+            {self._base_symbol(k) for k in self.metadata["stocks"]})
 
     def _fetch_from_api(self, symbol: str, start_date: str, end_date: str,
-                        adjust: str = "") -> pd.DataFrame:
+                        adjust: str = DEFAULT_ADJUST) -> pd.DataFrame:
         """从新浪接口获取数据 (adjust=复权口径, 审计 P0-4)
 
         sh/sz 透传 ak.stock_zh_a_daily; bj 走 sina_daily 的 klc 直连
@@ -423,14 +446,15 @@ class HistoricalDataManager:
     # ------------------------------------------------------------------
     def get_daily_result(self, symbol: str, *, days: int = None,
                           start_date: str = None, end_date: str = None,
-                          adjust: str = '', as_of: str = None,
+                          adjust: str = DEFAULT_ADJUST, as_of: str = None,
                           min_rows: int = 0,
                           trading_calendar=None) -> FetchResult:
         """共享数据层的日线入口 —— 供"各自取数"的模块统一走本层 (审计 M20)。
 
         一次给齐以前缺失的四件事:
 
-        - **复权维度** (adjust): ''=不复权 / 'qfq' / 'hfq'。落库文件名与
+        - **复权维度** (adjust): 默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品
+          决策 2026-10-30); ''=不复权 / 'qfq' 需显式指定。落库文件名与
           元数据都带该维度 (审计 P0-4) → 不复权序列含除权跳空, 收益率/指标
           会失真。此前 `long_term_selector` / `reversal_detector` 自行调
           `fetch_daily` → **无此维度**, 与 P0-4 口径矛盾。
@@ -556,7 +580,7 @@ class HistoricalDataManager:
             return None
 
     def load(self, symbol: str, start_date: str = None,
-             end_date: str = None, adjust: str = "") -> pd.DataFrame:
+             end_date: str = None, adjust: str = DEFAULT_ADJUST) -> pd.DataFrame:
         """
         加载本地缓存的**个股**历史数据 (按复权口径取对应文件)
 
@@ -571,8 +595,9 @@ class HistoricalDataManager:
         end_date : str
             结束日期 (可选)
         adjust : str
-            复权口径 (''/qfq/hfq) — 缺失该口径文件时返回**空 DataFrame**
-            (不拿不复权数据冒充前复权, 审计 P0-4)
+            复权口径 — 默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品决策
+            2026-10-30); ''=不复权 / 'qfq' 需显式指定。缺失该口径文件时
+            返回**空 DataFrame** (不拿别的口径冒充, 审计 P0-4)
 
         Returns:
         --------
@@ -635,7 +660,8 @@ class HistoricalDataManager:
 
     def batch_fetch(self, symbols: list, start_date: str = "19960101",
                     end_date: str = None, delay: float = 0.3,
-                    max_workers: int = 4, save_interval: int = 50):
+                    max_workers: int = 4, save_interval: int = 50,
+                    adjust: str = DEFAULT_ADJUST):
         """
         批量获取多只股票的历史数据
 
@@ -653,6 +679,8 @@ class HistoricalDataManager:
             最大并发数
         save_interval : int
             每处理N只股票保存一次元数据
+        adjust : str
+            复权口径 (默认 'hfq' 后复权, DEFAULT_ADJUST)
         """
         if end_date is None:
             end_date = datetime.now().strftime("%Y%m%d")
@@ -673,6 +701,7 @@ class HistoricalDataManager:
             try:
                 time.sleep(delay)
                 df = self.fetch_and_cache(sym, start_date, end_date,
+                                          adjust=adjust,
                                           _persist_metadata=False)
                 return sym, len(df) if df is not None else 0
             except Exception as e:
@@ -709,6 +738,26 @@ class HistoricalDataManager:
         print()
         print(f"[OK] 批量获取完成: 成功 {success}, 跳过 {skipped}, 失败 {failed}")
 
+    @staticmethod
+    def _base_symbol(key: str) -> str:
+        """metadata 键 → 基础代码 (`'600000_hfq'` → `'600000'`, 其余原样)
+
+        元数据键带复权口径标签 (P0-4); 股票池/展示层要的是**基础代码** —
+        否则默认口径切到 hfq 后池子里会出现 `'600000_hfq'` 这种假代码。
+        """
+        base, sep, tag = str(key).rpartition('_')
+        return base if sep and base and tag in ('qfq', 'hfq') else str(key)
+
+    def _has_stock_any_adjust(self, code: str) -> bool:
+        """该股在**任一**复权口径下已缓存 (证据口径: 有数据即可)
+
+        幸存者偏差的补齐判定 / delisted 补数的缺失判定都用它 —— 只认
+        `'600625'` 裸键会在"只取过 hfq"的缓存上误报"未缓存"。
+        """
+        stocks = self.metadata.get("stocks", {})
+        return any((code if tag == '' else f'{code}_{tag}') in stocks
+                   for tag in ('', 'qfq', 'hfq'))
+
     def get_cache_status(self) -> pd.DataFrame:
         """
         获取缓存状态概览
@@ -720,7 +769,8 @@ class HistoricalDataManager:
         records = []
         for sym, info in self.metadata.get("stocks", {}).items():
             records.append({
-                'symbol': sym,
+                'symbol': self._base_symbol(sym),
+                'adjust': info.get('adjust', ''),
                 'first_date': info.get('first_date'),
                 'last_date': info.get('last_date'),
                 'row_count': info.get('row_count', 0),
@@ -806,7 +856,8 @@ class HistoricalDataManager:
         st = reg.stats()
         in_scope_codes = reg.codes(in_scope=True)
         n_scope = len(in_scope_codes)
-        n_done = sum(1 for c in in_scope_codes if c in stocks)
+        n_done = sum(1 for c in in_scope_codes
+                    if self._has_stock_any_adjust(c))
 
         # ---- 四条证据规则 (任一不满足 → 保守 True) ----
         by_ex = st.get('coverage_start_by_exchange') or {}
@@ -856,7 +907,7 @@ class HistoricalDataManager:
 
         return {
             'as_of': str(ref) if ref else None,
-            'n_cached_stocks': len(stocks),
+            'n_cached_stocks': len({self._base_symbol(k) for k in stocks}),
             'data_range': [str(min(firsts)) if firsts else None,
                            str(max(lasts)) if lasts else None],
             'survivorship_bias': bias,
@@ -892,7 +943,7 @@ class HistoricalDataManager:
         Raises:
             ValueError: as_of 超出缓存覆盖范围 (拒绝静默给出偏池)
         """
-        universe = []
+        universe = set()
 
         ref_date = self._reference_date(as_of)
         if ref_date is None:
@@ -934,7 +985,9 @@ class HistoricalDataManager:
             if first_date > cutoff_date:
                 continue
 
-            universe.append(sym)
+            # 元数据键带口径标签 (600000_hfq) → 池子要基础代码; 同股
+            # 多口径各判一次, set 去重 (默认口径切 hfq 后必现)
+            universe.add(self._base_symbol(sym))
 
         return sorted(universe)
 
@@ -963,11 +1016,18 @@ class HistoricalDataManager:
         dict : 验证结果
         """
         df = self.load(symbol)
+        checked_adjust = DEFAULT_ADJUST
+        if len(df) == 0:
+            # 完整性校验与口径无关: 默认 (hfq) 文件缺失时回退不复权 —
+            # 旧缓存/只取过 raw 的股票不能因此被误报"无数据"
+            df = self.load(symbol, adjust='')
+            checked_adjust = ''
         if len(df) == 0:
             return {"symbol": symbol, "valid": False, "reason": "无数据"}
 
         result = {
             "symbol": symbol,
+            "adjust": checked_adjust,
             "valid": True,
             "row_count": len(df),
             "first_date": str(df['日期'].iloc[0].date()),
@@ -1028,8 +1088,9 @@ class HistoricalDataManager:
         return build_calendar_from_index(index_df, data_dir=str(self.data_dir))
 
     def get_all_symbols(self) -> list:
-        """获取所有已缓存的股票代码"""
-        return sorted(self.metadata.get("stocks", {}).keys())
+        """获取所有已缓存的股票代码 (基础代码, 去口径标签去重)"""
+        return sorted({self._base_symbol(k)
+                       for k in self.metadata.get("stocks", {})})
 
     def get_stock_name(self, symbol: str) -> str:
         """获取股票名称 (stock_list_manager 单例, __file__ 基准 — 审计 M15)
@@ -1049,8 +1110,8 @@ class HistoricalDataManager:
 def _delisted_coverage(reg: DelistedRegistry, manager: "HistoricalDataManager"):
     """清单内**尚未缓存**的在范围退市股 (审计 D1 的补齐口径)"""
     codes = reg.codes(in_scope=True)
-    cached = manager.metadata.get("stocks", {})
-    missing = [c for c in codes if c not in cached]
+    # 补齐判定按**任一**复权口径 (有数据即可; 口径只是同一事实的两个视图)
+    missing = [c for c in codes if not manager._has_stock_any_adjust(c)]
     return codes, missing
 
 
@@ -1115,8 +1176,8 @@ def _run_delisted_command(args, manager, fetcher=None) -> int:
                   "historical_data_manager.py delisted refresh")
             return 1
         codes = reg.codes(in_scope=None if args.include_b else True)
-        cached = manager.metadata.get("stocks", {})
-        missing = [c for c in codes if c not in cached]
+        missing = [c for c in codes
+                   if not manager._has_stock_any_adjust(c)]
         n_b = reg.stats()["n_out_of_scope"]
         print(f"[INFO] 清单{'全量' if args.include_b else '在范围'} "
               f"{len(codes)} 只: 已缓存 {len(codes) - len(missing)} 只, "
@@ -1127,10 +1188,10 @@ def _run_delisted_command(args, manager, fetcher=None) -> int:
             return 0
         manager.batch_fetch(missing, start_date=args.start,
                             end_date=args.end, delay=args.delay,
-                            max_workers=args.workers)
+                            max_workers=args.workers, adjust=args.adjust)
         manager._save_metadata()
-        still = [c for c in codes if c not in
-                 manager.metadata.get("stocks", {})]
+        still = [c for c in codes
+                 if not manager._has_stock_any_adjust(c)]
         if still:
             print(f"[WARN] 补齐后仍缺 {len(still)} 只 (取数失败/接口无数据) "
                   f"→ 幸存者偏差保持 True")
@@ -1158,6 +1219,9 @@ def main():
     p_fetch.add_argument('--end', default=None, help='结束日期')
     p_fetch.add_argument('--index', action='store_true',
                          help='按指数取数 (审计 M12: 前缀/接口/命名空间均按指数)')
+    p_fetch.add_argument('--adjust', default=DEFAULT_ADJUST,
+                         choices=['', 'qfq', 'hfq'],
+                         help="复权口径 (default=DEFAULT_ADJUST='hfq')")
 
     # batch: 批量获取
     p_batch = subparsers.add_parser('batch', help='批量获取数据')
@@ -1168,6 +1232,9 @@ def main():
     p_batch.add_argument('--end', default=None, help='结束日期')
     p_batch.add_argument('--workers', type=int, default=4, help='并发数')
     p_batch.add_argument('--delay', type=float, default=0.3, help='请求间隔(秒)')
+    p_batch.add_argument('--adjust', default=DEFAULT_ADJUST,
+                         choices=['', 'qfq', 'hfq'],
+                         help="复权口径 (default=DEFAULT_ADJUST='hfq')")
 
     # status: 查看缓存状态
     p_status = subparsers.add_parser('status', help='查看缓存状态')
@@ -1200,12 +1267,16 @@ def main():
                           help='请求间隔(秒)')
     p_dfetch.add_argument('--include-b', action='store_true',
                           help='连B股一起取 (框架股票池不含B股, 默认跳过)')
+    p_dfetch.add_argument('--adjust', default=DEFAULT_ADJUST,
+                          choices=['', 'qfq', 'hfq'],
+                          help="复权口径 (default=DEFAULT_ADJUST='hfq')")
 
     args = parser.parse_args()
     manager = HistoricalDataManager()
 
     if args.command == 'fetch':
         df = manager.fetch_and_cache(args.symbol, args.start, args.end,
+                                     adjust=args.adjust,
                                      is_index=args.index)
         kind = "指数" if args.index else "股票"
         print(f"获取{kind} {args.symbol}: {len(df)} 条记录")
@@ -1235,7 +1306,8 @@ def main():
 
         if symbols:
             manager.batch_fetch(symbols, args.start, args.end,
-                              delay=args.delay, max_workers=args.workers)
+                              delay=args.delay, max_workers=args.workers,
+                              adjust=args.adjust)
 
     elif args.command == 'status':
         status_df = manager.get_cache_status()
@@ -1257,10 +1329,13 @@ def main():
         print(f"\n符合条件的股票: {len(universe)} 只 (参考日 {meta['as_of']})")
         if meta.get('survivorship_bias'):
             print(f"[WARN] {meta['survivorship_note']}")
+        stocks = manager.metadata["stocks"]
         for s in universe[:20]:
             name = manager.get_stock_name(s)
-            info = manager.metadata["stocks"][s]
-            print(f"  {s} {name} ({info['first_date']} ~ {info['last_date']}, {info['row_count']}行)")
+            info = (stocks.get(s) or stocks.get(f'{s}_hfq')
+                    or stocks.get(f'{s}_qfq') or {})
+            print(f"  {s} {name} ({info.get('first_date', '?')} ~ "
+                  f"{info.get('last_date', '?')}, {info.get('row_count', 0)}行)")
         if len(universe) > 20:
             print(f"  ... 共 {len(universe)} 只")
 

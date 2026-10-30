@@ -42,7 +42,7 @@ class _CapturingFetcher:
         self.data = data
         self.calls = []
 
-    def get_quote_result(self, symbol, days=120):
+    def get_quote_result(self, symbol, days=120, adjust='hfq'):
         self.calls.append({'symbol': symbol, 'days': days})
         return FetchResult.success(self.data.copy(), source='test')
 

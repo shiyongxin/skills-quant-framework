@@ -70,7 +70,7 @@ def _manager(tmp_path, stocks=None):
 
 def _args(cmd, **kw):
     base = dict(delisted_cmd=cmd, start='19900101', end=None, workers=4,
-                delay=0.0, include_b=False)
+                delay=0.0, include_b=False, adjust='hfq')
     base.update(kw)
     return Namespace(**base)
 
@@ -367,8 +367,9 @@ class TestDelistedCli:
         seen = {}
 
         def fake_batch(symbols, start_date=None, end_date=None,
-                       delay=0.0, max_workers=4):
+                       delay=0.0, max_workers=4, adjust='hfq'):
             seen['symbols'] = list(symbols)
+            seen['adjust'] = adjust
             # 模拟取数落库 (batch 的效果)
             for s in symbols:
                 m.metadata['stocks'][s] = {
@@ -377,7 +378,7 @@ class TestDelistedCli:
         m.batch_fetch = fake_batch
         rc = _run_delisted_command(_args('fetch'), m)
         out = capsys.readouterr().out
-        assert rc == 0
+        assert rc == 0 and seen['adjust'] == 'hfq', 'CLI 默认口径透传到 batch'
         # 只取缺失的 2 只 (600005/000018), 已缓存的 600625 不重取,
         # B股 900953 默认不进
         assert sorted(seen['symbols']) == ['000018', '600005']
@@ -389,7 +390,7 @@ class TestDelistedCli:
         seen = {}
 
         def fake_batch(symbols, start_date=None, end_date=None,
-                       delay=0.0, max_workers=4):
+                       delay=0.0, max_workers=4, adjust='hfq'):
             seen['symbols'] = list(symbols)
             for s in symbols:
                 m.metadata['stocks'][s] = {

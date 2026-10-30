@@ -219,7 +219,11 @@ def _apply_sina_factor(df: pd.DataFrame, factor: pd.DataFrame,
     merged.ffill(inplace=True)
     merged = merged[~no_price]
     merged = merged.astype(float)
-    merged.dropna(inplace=True)
+    # 只按参与复权的列 dropna —— klc 响应带 prevclose/postVol/postAmt 等
+    # 大量 NaN 的旁支列, 全列 dropna 会把 6031 行砍到 78 行 (2026-10-30
+    # 实测 sh600519): 坏行只应由 OHLC/量/因子说了算, 旁支列 NaN 不杀行
+    merged.dropna(subset=["open", "high", "low", "close", "volume", col],
+                  inplace=True)
     merged.drop_duplicates(
         subset=["open", "high", "low", "close", "volume", "amount"], inplace=True)
     if tag == "qfq":
@@ -231,7 +235,8 @@ def _apply_sina_factor(df: pd.DataFrame, factor: pd.DataFrame,
     merged = merged.drop(columns=[col])
     for c in ("open", "high", "low", "close"):
         merged[c] = merged[c].round(2)
-    merged = merged.dropna()
+    # 末尾同样只看参与复权的列 (与前一处同理: klc 旁支列 NaN 不杀行)
+    merged = merged.dropna(subset=["open", "high", "low", "close", "volume"])
     return merged.reset_index()
 
 

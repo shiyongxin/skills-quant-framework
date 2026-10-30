@@ -107,7 +107,7 @@ class TestAtrUnification:
             def get_quote_data(self, symbol, days=120):
                 return df.copy()
 
-            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120):
+            def get_quote_result(self, symbol, start_date=None, end_date=None, days=120, adjust='hfq'):
                 from core.fetch_result import FetchResult
                 return FetchResult.success(df.copy(), source='test')
 
@@ -254,9 +254,13 @@ class TestRealtimeQuoteParsing:
 
 class TestFallbackAlignment:
     def test_default_adjust_matches_main_path(self):
+        from core.fetch_result import DEFAULT_ADJUST
         import stock_data_fetcher as m
         sig = inspect.signature(m.StockDataFetcher.get_quote_data_fallback)
-        assert sig.parameters['adjust'].default == ''  # 旧: "qfq"
+        assert sig.parameters['adjust'].default == DEFAULT_ADJUST
+        main = inspect.signature(m.StockDataFetcher.get_quote_data)
+        assert main.parameters['adjust'].default == DEFAULT_ADJUST, \
+            '主路径与回退路径口径必须一致 (审计 R4)'
 
     def test_volume_converted_to_shares(self, monkeypatch):
         import stock_data_fetcher as m

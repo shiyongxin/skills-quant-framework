@@ -172,7 +172,7 @@ class _Stub:
     def __init__(self, df=None):
         self._df = df
 
-    def get_quote_result(self, symbol, days=120):
+    def get_quote_result(self, symbol, days=120, adjust='hfq'):
         from core.fetch_result import FetchResult
         data = self._df if self._df is not None else _mk_ohlcv(n=200)
         return FetchResult(ok=True, data=data, source='stub')

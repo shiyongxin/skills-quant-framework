@@ -96,7 +96,7 @@ class TestTechnicalAnalyzerSignalSemantics:
         from core.fetch_result import FetchResult
 
         class _Stub:
-            def get_quote_result(self, symbol, days=120):
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
                 return FetchResult(ok=True, data=_mk_ohlcv(n=120),
                                    source='stub')
 
@@ -112,7 +112,7 @@ class TestTechnicalAnalyzerSignalSemantics:
         from core.fetch_result import FetchResult
 
         class _Stub:
-            def get_quote_result(self, symbol, days=120):
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
                 return FetchResult(ok=True, data=_mk_ohlcv(n=120),
                                    source='stub')
 
@@ -131,7 +131,7 @@ class TestPositionAnalyzerNaNHonesty:
         df = _mk_ohlcv(n=120, seed=5)
 
         class _Stub:
-            def get_quote_result(self, symbol, days=120):
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
                 return FetchResult(ok=True, data=df.copy(), source='stub')
 
         pa = PositionAnalyzer(fetcher=_Stub())
@@ -148,7 +148,7 @@ class TestPositionAnalyzerNaNHonesty:
         df = _mk_ohlcv(n=120, seed=5)
 
         class _Stub:
-            def get_quote_result(self, symbol, days=120):
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
                 return FetchResult(ok=True, data=df.copy(), source='stub')
 
         pa = PositionAnalyzer(fetcher=_Stub())

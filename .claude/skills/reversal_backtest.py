@@ -19,6 +19,7 @@ warnings.filterwarnings('ignore')
 
 from execution_model import CostModel, can_buy_at_open, can_sell_at_open, can_sell_intraday
 from core.dataframe import standardize_daily_frame
+from core.fetch_result import DEFAULT_ADJUST
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 from core import metrics as _core_metrics
@@ -90,7 +91,8 @@ class ReversalBacktester:
             df = fetch_daily(
                 symbol=full_code,
                 start_date=start_date.date(),
-                end_date=end_date.date()
+                end_date=end_date.date(),
+                adjust=DEFAULT_ADJUST  # 回测口径: 后复权 (产品决策 2026-10-30)
             )
 
             if df is None or len(df) < 100:

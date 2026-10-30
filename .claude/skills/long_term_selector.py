@@ -26,6 +26,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import trade_constraints
+from core.fetch_result import DEFAULT_ADJUST
 from core.indicators import sma as _core_sma
 
 
@@ -170,7 +171,7 @@ class LongTermSelector:
         return self._data_manager
 
     def get_stock_data(self, code: str, days: int = 500,
-                        adjust: str = '', as_of: str = None
+                        adjust: str = DEFAULT_ADJUST, as_of: str = None
                         ) -> Optional[pd.DataFrame]:
         """
         获取股票历史数据 (走**共享数据层**, 审计 M20)
@@ -183,8 +184,9 @@ class LongTermSelector:
         Args:
             code: 股票代码
             days: 需要最近多少根日线
-            adjust: 复权口径 (''=不复权 / 'qfq' / 'hfq') —— 维度随缓存
-                一起区分 (同一只股票不同口径不是同一份数据)
+            adjust: 复权口径 —— 默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品
+                决策 2026-10-30); ''=不复权 / 'qfq' 需显式指定。维度随
+                缓存一起区分 (同一只股票不同口径不是同一份数据)
             as_of: 参考日 (显式传入 → 可复现; None → 今天)
 
         Returns:

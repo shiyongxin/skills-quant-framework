@@ -12,6 +12,7 @@ from stock_data_fetcher import StockDataFetcher
 from position_analyzer import PositionAnalyzer
 import factor_library
 import trade_constraints
+from core.fetch_result import DEFAULT_ADJUST
 
 # 打分内置默认 (与 config/stock_selector.json 出厂值逐位一致; 配置文件缺失时的回退)
 DEFAULT_SCORE_CONFIG = {
@@ -72,7 +73,8 @@ class StockSelector:
 
         for symbol in stock_list:
             try:
-                data = self.analyzer.get_stock_data(symbol, days=60)
+                data = self.analyzer.get_stock_data(symbol, days=60,
+                                                      adjust=DEFAULT_ADJUST)
                 if data is None or len(data) < 40:
                     continue
 
@@ -115,7 +117,8 @@ class StockSelector:
 
         for symbol in stock_list:
             try:
-                data = self.analyzer.get_stock_data(symbol, days=60)
+                data = self.analyzer.get_stock_data(symbol, days=60,
+                                                      adjust=DEFAULT_ADJUST)
                 if data is None or len(data) < 40:
                     continue
 
@@ -151,7 +154,8 @@ class StockSelector:
 
         for symbol in stock_list:
             try:
-                data = self.analyzer.get_stock_data(symbol, days=period + 10)
+                data = self.analyzer.get_stock_data(symbol, days=period + 10,
+                                                      adjust=DEFAULT_ADJUST)
                 if data is None or len(data) < period:
                     continue
 

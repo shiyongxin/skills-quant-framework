@@ -343,9 +343,11 @@ class TestHistoricalDataManagerDegradation:
                                encoding='utf-8-sig')
 
         mgr = HistoricalDataManager(data_dir=str(tmp_path))
-        assert len(mgr.load('600000')) == 5
+        assert len(mgr.load('600000', adjust='')) == 5
         assert len(mgr.load('600000', adjust='qfq')) == 0, \
             "缺该复权口径文件时必须返回空, 不拿不复权数据冒充前复权"
+        assert len(mgr.load('600000')) == 0, \
+            "默认口径 (hfq) 缺文件 → 返回空, 不拿不复权 CSV 冒充"
 
     def test_legacy_untagged_csv_assigned_by_metadata(self, tmp_path):
         """存量: 旧版无标签 CSV 的口径由元数据判定 (只在该口径下可用)。"""
@@ -381,7 +383,7 @@ class TestHistoricalDataManagerDegradation:
             raise ImportError("No module named 'pyarrow'")
         monkeypatch.setattr(pd, 'read_parquet', _no_pyarrow_read)
 
-        df = mgr.load('600000')
+        df = mgr.load('600000', adjust='')  # 回退不变量与口径无关
         assert len(df) == 5, "Parquet 读失败 → 回退同口径 CSV"
         assert pd.api.types.is_datetime64_any_dtype(df['日期']), \
             "CSV 回退后日期列须还原为 datetime (与 Parquet 路径同契约)"
@@ -399,7 +401,7 @@ class TestHistoricalDataManagerDegradation:
             raise ImportError("No module named 'pyarrow'")
         monkeypatch.setattr(pd, 'read_parquet', _no_pyarrow_read)
 
-        df = mgr.load('600000')
+        df = mgr.load('600000', adjust='')  # 命中"两者都读不了"路径
         assert isinstance(df, pd.DataFrame) and len(df) == 0
 
     def test_csv_stored_data_still_gets_incremental_update(self, tmp_path,
@@ -415,7 +417,7 @@ class TestHistoricalDataManagerDegradation:
         def _no_pyarrow(self, *a, **k):
             raise ImportError("No module named 'pyarrow'")
         monkeypatch.setattr(pd.DataFrame, 'to_parquet', _no_pyarrow)
-        mgr.fetch_and_cache('600000', end_date='20240105')
+        mgr.fetch_and_cache('600000', end_date='20240105', adjust='')
         assert (tmp_path / 'historical' / '600000.csv').exists()
 
         seen = {}
@@ -425,7 +427,7 @@ class TestHistoricalDataManagerDegradation:
             return pd.DataFrame()       # 无新数据
         monkeypatch.setattr(mgr, '_fetch_from_api', _api)
 
-        out = mgr.fetch_and_cache('600000', end_date='20240110')
+        out = mgr.fetch_and_cache('600000', end_date='20240110', adjust='')
         assert seen['start'] == '20240106', \
             "CSV 存量须参与增量: API 起点 = 本地末日 + 1 (而非从头全量)"
         assert len(out) == 5, "API 无新数据时返回本地旧数据"

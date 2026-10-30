@@ -35,7 +35,7 @@ except ImportError:
     REQUESTS_AVAILABLE = False
 
 from core.dataframe import ensure_change_pct, standardize_daily_frame
-from core.fetch_result import FetchResult
+from core.fetch_result import FetchResult, DEFAULT_ADJUST
 from core.indicator_engine import IndicatorEngine
 from sina_daily import fetch_daily, format_symbol
 
@@ -136,7 +136,7 @@ class StockDataFetcher:
         return pd.DataFrame()
 
     def get_quote_data(self, symbol, start_date=None, end_date=None, days=252,
-                       adjust=""):
+                       adjust=DEFAULT_ADJUST):
         """
         获取历史行情数据 - 使用新浪接口 (ak.stock_zh_a_daily)
 
@@ -145,8 +145,9 @@ class StockDataFetcher:
             start_date: 开始日期 (格式: "20200101" 或 datetime对象)
             end_date: 结束日期 (格式: "20231231" 或 datetime对象)，默认为今天
             days: 获取天数，默认252个交易日（约1年）
-            adjust: 复权口径 — ''=不复权 (默认, 与落库主口径一致) / 'qfq' /
-                'hfq'。**复权是数据维度**: 不同口径的序列混用会在除权日产生
+            adjust: 复权口径 — 默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品
+                决策 2026-10-30); ''=不复权 / 'qfq' 需显式指定。
+                **复权是数据维度**: 不同口径的序列混用会在除权日产生
                 虚假跳空, 收益率与全部指标随之失真 (审计 P0-4)。
 
         Returns:
@@ -216,7 +217,7 @@ class StockDataFetcher:
             return pd.DataFrame()
 
     def get_quote_result(self, symbol, start_date=None, end_date=None, days=252,
-                         adjust=""):
+                         adjust=DEFAULT_ADJUST):
         """
         获取历史行情并返回结构化 FetchResult (审计项 11)
 
@@ -224,8 +225,10 @@ class StockDataFetcher:
         调用方应检查 result.ok / result.error。
 
         Args:
-            adjust: 复权口径 (''/qfq/hfq) — 随结果记录在 FetchResult.adjust,
-                调用方据此判断序列口径 (审计 P0-4: adjust 是数据维度)
+            adjust: 复权口径 — 默认 'hfq' 后复权 (DEFAULT_ADJUST); ''=
+                不复权 / 'qfq' 需显式指定 (真实成本对比/实时报价对齐必须
+                传 '')。随结果记录在 FetchResult.adjust, 调用方据此判断
+                序列口径 (审计 P0-4: adjust 是数据维度)
 
         Returns:
             core.fetch_result.FetchResult
@@ -242,7 +245,7 @@ class StockDataFetcher:
             f"{symbol} 获取失败(未知原因)",
             source=f"stock_zh_a_daily:{symbol}:{adjust or 'raw'}", adjust=adjust)
 
-    def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust=""):
+    def get_quote_data_fallback(self, symbol, start_date, end_date, period="daily", adjust=DEFAULT_ADJUST):
         """
         获取历史行情数据 - 备用方法（尝试东方财富接口）
 
@@ -251,7 +254,7 @@ class StockDataFetcher:
             start_date: 开始日期
             end_date: 结束日期
             period: 周期
-            adjust: 复权方式 — 默认 ""(不复权), 与主路径 stock_zh_a_daily 对齐
+            adjust: 复权方式 — 默认 DEFAULT_ADJUST('hfq') 与主路径对齐
                     (审计R4: 旧默认 "qfq" 与主路径混用会产生除权跳空)
 
         Returns:

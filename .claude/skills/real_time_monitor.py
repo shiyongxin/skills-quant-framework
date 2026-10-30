@@ -243,7 +243,10 @@ class RealTimeMonitor:
 
         # 获取最新数据 (FetchResult: 失败携带原因)
         try:
-            result = self.fetcher.get_quote_result(symbol, days=120)
+            # 实时告警按**真实价格**判定 (用户设的是真实价): 历史序列
+            # 若用默认 hfq 会与实时报价错位 → 显式不复权
+            result = self.fetcher.get_quote_result(symbol, days=120,
+                                                   adjust='')
             if not result.ok:
                 print(f"[WARN] {symbol} 监控数据获取失败: {result.error}")
                 return triggered_alerts

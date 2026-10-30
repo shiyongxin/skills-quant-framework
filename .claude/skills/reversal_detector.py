@@ -30,6 +30,7 @@ from reversal_rules import (
     decide_action,
 )
 import trade_constraints
+from core.fetch_result import DEFAULT_ADJUST
 from core.indicators import atr as _core_atr
 from core.indicator_engine import IndicatorEngine
 
@@ -165,7 +166,8 @@ class ReversalDetector:
             self._data_manager = HistoricalDataManager(self.data_dir)
         return self._data_manager
 
-    def get_stock_data(self, code: str, days: int = 250, adjust: str = '',
+    def get_stock_data(self, code: str, days: int = 250,
+                        adjust: str = DEFAULT_ADJUST,
                         as_of: str = None) -> Optional[pd.DataFrame]:
         """获取股票数据 (走**共享数据层**, 审计 M20)
 
@@ -173,6 +175,7 @@ class ReversalDetector:
         None / 无交易日历 → 与 P0-4 口径矛盾 (且除权跳空会污染反转判定)。
         现统一走 `HistoricalDataManager.get_daily_result`: 复权维度 +
         参考日 + FetchResult (失败带原因) + 交易日历窗口。
+        复权维度默认 'hfq' 后复权 (DEFAULT_ADJUST, 产品决策 2026-10-30)。
         """
         result = self.data_manager.get_daily_result(
             code, days=days, adjust=adjust, as_of=as_of, min_rows=60)
