@@ -12,12 +12,15 @@
 本工具做三件事（只做**可判定**的事, 不可判定的如实报"疑似"）:
     1. 单位判定与归一: 用 `成交额/成交量 ≈ 收盘价` 的中位数比值反推单位
        (比值≈1 → 元/股; ≈100 → 成交量是手; ≈1e-4 → 成交额是万元;
-       ≈1e-2 → 两者同时错)
+       ≈1e-2 → 两者同时错)。**仅对不复权文件执行** —— 复权口径的收盘
+       已被因子缩放, 比值结构性失真 (000002_hfq 实测 ratio 0.0098 会被
+       误判手+万元), 对其归一会写坏量额, 故如实标"不可判定"不猜测。
     2. 结构清洗: 列名标准化 / 日期 dtype / 排序 / 重复日期去重 /
-       缺失涨跌幅补算
+       缺失涨跌幅补算 (与复权口径无关, 所有文件都做)
     3. 复权体检: 单日异常跳空 (疑似除权日) 只**标记不改写** ——
        没有除权因子就无法还原, 正确做法是按复权口径重新取数
-       (复权维度已落库, 见 HistoricalDataManager)
+       (复权维度已落库, 见 HistoricalDataManager); 复权文件上的
+       大波动多为涨跌停/早期无限制交易日, 提示语不建议重复取数
 
 用法:
     python .claude/skills/data_cleaner.py --data-dir stock_data          # 体检
@@ -164,14 +167,28 @@ def clean_ohlcv_frame(df: pd.DataFrame, adjust: str = ''
         if len(out) != before:
             report['actions'].append(f'重复日期去重: -{before - len(out)} 行')
 
-    units = detect_units(out)
-    report['units_detected'] = units
-    if units['volume_unit'] == 'lots':
-        out['成交量'] = pd.to_numeric(out['成交量'], errors='coerce') * 100
-        report['actions'].append('成交量单位 手→股 (×100)')
-    if units['amount_unit'] == 'wan_yuan':
-        out['成交额'] = pd.to_numeric(out['成交额'], errors='coerce') * 10000
-        report['actions'].append('成交额单位 万元→元 (×10000)')
+    if adjust:
+        # 复权口径文件 (qfq/hfq): 收盘已被累计因子缩放, 而成交额/成交量
+        # 仍是真实单位 → 比值 = 1/因子, 按不复权设计的阈值**结构性误判**
+        # (实测 000002_hfq 隐含因子 101.6 → ratio 0.0098 落入手+万元区间,
+        #  --apply 会把量额 ×100/×1e4 写坏) —— 单位判定只对不复权文件
+        # 可执行, 此处如实标记"不可判定", 绝不猜测归一。
+        report['units_detected'] = {
+            'volume_unit': 'unknown', 'amount_unit': 'unknown',
+            'ratio': None, 'ratio_source': 'adjusted_close_not_verifiable',
+        }
+        report['warnings'].append(
+            '复权口径文件不做单位判定 (收盘已缩放, 比值不可判定); '
+            '需单位归一请先对同名不复权文件执行, 再按复权口径重新取数')
+    else:
+        units = detect_units(out)
+        report['units_detected'] = units
+        if units['volume_unit'] == 'lots':
+            out['成交量'] = pd.to_numeric(out['成交量'], errors='coerce') * 100
+            report['actions'].append('成交量单位 手→股 (×100)')
+        if units['amount_unit'] == 'wan_yuan':
+            out['成交额'] = pd.to_numeric(out['成交额'], errors='coerce') * 10000
+            report['actions'].append('成交额单位 万元→元 (×10000)')
 
     if '收盘' in out.columns and '涨跌幅' not in out.columns:
         # CSV 路径: 收盘价可能是字符串 → 需转数值 (共享单一真相源, 审计 M19)
@@ -180,13 +197,24 @@ def clean_ohlcv_frame(df: pd.DataFrame, adjust: str = ''
 
     jumps = find_suspicious_jumps(out)
     if jumps:
-        report['warnings'].append(
-            f'疑似除权/复权跳空 {len(jumps)} 处 (单日涨跌幅 > '
-            f'{_SUSPICIOUS_JUMP_PCT:.0f}%): {jumps[:5]}'
-            + (' …' if len(jumps) > 5 else ''))
-        report['warnings'].append(
-            '除权因子本地不可得, 不改写价格; 请按复权口径重新取数 '
-            '(adjust 已进落库维度)')
+        if adjust:
+            # 复权口径已消除除权跳空 → 剩余大波动多为涨跌停板 (北交所30%/
+            # 创业板科创板20%) 或 1996 前无限制时段的真实行情, 不再建议
+            # "按复权口径重新取数" (它已经是) —— 只标记不改写。
+            report['warnings'].append(
+                f'复权口径单日波动 >{_SUSPICIOUS_JUMP_PCT:.0f}% '
+                f'{len(jumps)} 处: {jumps[:5]}'
+                + (' …' if len(jumps) > 5 else '')
+                + ' —— 除权跳空应已消除, 此处多为涨跌停/早期无限制交易日'
+                '或数据异常 (只标记不改写)')
+        else:
+            report['warnings'].append(
+                f'疑似除权/复权跳空 {len(jumps)} 处 (单日涨跌幅 > '
+                f'{_SUSPICIOUS_JUMP_PCT:.0f}%): {jumps[:5]}'
+                + (' …' if len(jumps) > 5 else ''))
+            report['warnings'].append(
+                '除权因子本地不可得, 不改写价格; 请按复权口径重新取数 '
+                '(adjust 已进落库维度)')
 
     report['rows_out'] = int(len(out))
     return out, report

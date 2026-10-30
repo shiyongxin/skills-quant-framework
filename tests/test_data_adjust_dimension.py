@@ -177,6 +177,37 @@ class TestCleanFrame:
         assert len(jumps) == 1
         assert abs(jumps[0]['pct']) > 20
 
+    def test_adjusted_file_skips_unit_conversion(self):
+        """复权文件不做单位判定: 收盘被因子缩放 → 比值结构性失真,
+        按不复权阈值归一会写坏量额 (实测 000002_hfq ratio 0.0098
+        落入手+万元区间, 隐含因子仅 101.6)."""
+        # ratio = amount/volume/close = 0.01 → 不复权阈值会判 手+万元
+        df = _frame(volume=1_000_000.0, amount=100_000.0, close=10.0)
+        cleaned_raw, rep_raw = clean_ohlcv_frame(df.copy())
+        assert rep_raw['units_detected']['volume_unit'] == 'lots'
+        # 同一份数据标 hfq → 跳过判定, 量额逐位不变
+        cleaned, report = clean_ohlcv_frame(df.copy(), adjust='hfq')
+        assert cleaned['成交量'].iloc[-1] == pytest.approx(1_000_000.0)
+        assert cleaned['成交额'].iloc[-1] == pytest.approx(100_000.0)
+        assert not any('单位' in a for a in report['actions'])
+        assert report['units_detected']['ratio_source'] == \
+            'adjusted_close_not_verifiable'
+        assert any('不做单位判定' in w for w in report['warnings'])
+
+    def test_adjusted_file_jump_warning_not_refetch_advice(self):
+        """复权文件的大波动不再建议"按复权口径重新取数" (它已经是)"""
+        df = _frame(n=5)
+        df.loc[df.index[-1], '收盘'] = 5.0     # -50%
+        df.loc[df.index[-1], '成交额'] = 5_000_000.0
+        _, report = clean_ohlcv_frame(df, adjust='hfq')
+        assert report['warnings'], "应仍标记波动 (只标记不改写)"
+        joined = ' '.join(report['warnings'])
+        assert '疑似除权' not in joined
+        assert '请按复权口径重新取数' not in joined
+        # 不复权文件仍给正确的重新取数建议
+        _, rep_raw = clean_ohlcv_frame(df.copy())
+        assert any('请按复权口径重新取数' in w for w in rep_raw['warnings'])
+
 
 class TestScanDirectory:
     def test_scan_empty_dir(self, tmp_path):

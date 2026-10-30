@@ -333,9 +333,9 @@
 | ~~批次 4.2 工程基座 (L1/L2/L3/L4/L5/L9/L10/L11)~~ | §5.2 | **✅ 已收口（2026-10-29，6 条属实 / 2 条已过时）** |
 | 停牌建模根本限制（无指数数据即无日历） | §4 H5 | **部分收口**（引擎侧已落地：`core/suspension.py` + 4 引擎接线），但**无日历 = 不建模**（`suspension_modeled=False`）—— 日历来源仍依赖指数数据/本地缓存 |
 | ~~幸存者偏差无法本地消除~~ | §4 H4 根本限制 + §5.3 D1 | **✅ 已收口（2026-10-30 D1）**：清单+回退+四条证据规则+CLI 补数落地，本地 337/337 已补齐 → meta 可判 False；残余：北交所名录缺失 / 覆盖起点 1999-2001 / 清单 90 天新鲜度 / B股范围外 |
-| 线上历史数据批量重取（除权跳空只标记不改写） | — | **仍开**。依赖网络与磁盘；`data_cleaner.py` 已就位 |
+| ~~线上历史数据批量重取（除权跳空只标记不改写）~~ | — | **✅ 已收口（2026-10-30, 随复权默认口径 §5.4 一并完成）**: 条目本意"正确处置=按复权口径重新取数"已落地 —— 分析口径 **hfq 469/469 全量重取** (2026-10-30, 默认路径从此读无除权跳空的序列); 不复权存量 468/469 (仅 600519 无 raw, 真实价格场景走网络即时取), raw 的除权跳空是真实价格历史而非数据缺陷 (raw 消费方 = 持仓成本对比/实时监控, 本就需要真实价)。**顺带修掉 `data_cleaner` 潜在腐败 bug**: 单位判定用 `量额比÷收盘` 反推, 复权文件收盘被因子缩放 → 比值结构性失真 (实测 `000002_hfq` 隐含因子 101.6 → ratio 0.0098 落入手+万元误判区, `--apply` 会把量额 ×100/×1e4 写坏 469 个复权文件中的 4 个) → 改为**单位归一只对不复权文件执行**, 复权文件如实标"不可判定"; 复权文件跳空提示语不再建议"重新取数"(它已经是) → 门禁 `test_data_adjust_dimension.py::TestCleanFrame` +2 (复权文件跳过归一 / 跳空语义分口径) + `test_optional_deps.py::TestDataCleanerCsvSupport` 改双文件契约 (raw 判单位 + qfq 跳过)。残余如实: 跳空启发式 >20% 对北交所 30% 涨跌停/1996 前无限制时段有误报 (**只标记不写盘, 无害**) |
 | ~~复权默认口径待产品决策~~ | §3 M20 注 + **§5.4** | **✅ 已决策并落地（2026-10-30）**：默认 `hfq` 后复权（`DEFAULT_ADJUST`），真实价格场景显式 `''`；门禁 `TestDefaultHfqWiring` 12 + 早退补登记 1 用例，基线 971 → 984 |
-| `technical_analyzer` signals 缺 `shift(1)` | ⚠️ B L3/L4（`position_analyzer` 连声明都没有） | **仍开**（advisory-only，已文档化） |
+| ~~`technical_analyzer` signals 缺 `shift(1)`~~ | ⚠️ B L3/L4 | **✅ 已收口（2026-10-30 复验后修复）**: 复验发现 `technical_analyzer` 侧**早已修复**（真交叉 + 中性标签 + `signal_timing` 字段, 门禁 `test_signal_semantics.py::TestTechnicalAnalyzerSignalSemantics`）; 实际残余只在 **`position_analyzer:131` 水平比较冒充金叉** + 无 t+1 声明 → 已修: `_macd_cross_label` 真交叉 (与 technical_analyzer/signal_generator shift(1) 口径同源) + `signal_timing` 字段 + docstring advisory 声明 + 报告尾行; 门禁 `TestPositionAnalyzerMacdCross` 4 用例 (水平多头不标金叉 / 真交叉标金叉 / NaN→数据不足 / 声明含 t+1), 基线 984 → 988 |
 
 > 批次 1 之前的已修项（原 `AGENTS.md` 的 "Fixed" 长清单）已搬入 §9 附录。
 

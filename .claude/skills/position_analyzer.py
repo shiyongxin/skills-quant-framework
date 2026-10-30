@@ -95,6 +95,10 @@ class PositionAnalyzer:
         """
         分析持仓
 
+        信号口径 (审计 B10/L4): 技术信号/评分/建议均为 **advisory** ——
+        基于最新 bar 收盘成立, 最早次一交易日开盘执行 (t+1, 与
+        execution_model 成交规则一致), 非可成交指令。
+
         Args:
             symbol: 股票代码
             shares: 持股数量
@@ -127,8 +131,9 @@ class PositionAnalyzer:
         ma20_dist = (current_price / latest['MA20'] - 1) * 100
         ma60_dist = (current_price / latest['MA60'] - 1) * 100
 
-        # MACD信号
-        macd_signal = '金叉' if latest['MACD'] > latest['MACD_Signal'] else '死叉'
+        # MACD信号 (真交叉: 审计 B10/L4 — 旧水平比较把持续多头连续多日
+        # 冒充"金叉", 与 technical_analyzer/signal_generator 交叉口径冲突)
+        macd_signal = self._macd_cross_label(data)
 
         # RSI状态
         rsi = latest['RSI']
@@ -187,6 +192,7 @@ class PositionAnalyzer:
             'profit_loss_pct': profit_loss_pct,
             'recover_gain': recover_gain,
             'loss_level': loss_level,
+            'signal_timing': '信号基于最新bar收盘成立, 次一交易日开盘可执行 (t+1)',
             'technical': {
                 'ma5_dist': ma5_dist,
                 'ma20_dist': ma20_dist,
@@ -210,6 +216,31 @@ class PositionAnalyzer:
             'score_unavailable': score_unavailable,
             'advice': advice
         }
+
+    @staticmethod
+    def _macd_cross_label(data):
+        """MACD 交叉标签: 真交叉才叫金叉/死叉 (审计 B10/L4)
+
+        与 technical_analyzer._analyze_signals / signal_generator 的
+        shift(1) 交叉检测同源 —— 水平状态 (DIF 在信号线上方) 只报
+        "多头(未交叉)", 不冒充"金叉"; NaN 末根返回"数据不足"。
+        """
+        macd, sig = data['MACD'], data['MACD_Signal']
+        if pd.isna(macd.iloc[-1]) or pd.isna(sig.iloc[-1]):
+            return '数据不足'
+        if len(data) >= 2:
+            p_m, p_s = macd.iloc[-2], sig.iloc[-2]
+            if (not pd.isna(p_m) and not pd.isna(p_s)
+                    and macd.iloc[-1] > sig.iloc[-1]
+                    and p_m <= p_s):
+                return '金叉'
+            if (not pd.isna(p_m) and not pd.isna(p_s)
+                    and macd.iloc[-1] < sig.iloc[-1]
+                    and p_m >= p_s):
+                return '死叉'
+        if macd.iloc[-1] > sig.iloc[-1]:
+            return '多头(未交叉)'
+        return '空头(未交叉)'
 
     def _calculate_score(self, data, latest):
         """计算技术面评分 (NaN 不静默当 0 分 — 审计 C2 诚实性)
@@ -373,6 +404,9 @@ class PositionAnalyzer:
         for t_tip in advice['t_trading']:
             lines.append(f"  {t_tip}")
         lines.append("")
+
+        # 信号时点 (advisory 声明: 审计 B10/L4, 与 technical_analyzer 报告一致)
+        lines.append(f"  * {analysis_result.get('signal_timing', '')}")
 
         lines.append("=" * 80)
 

@@ -4,7 +4,8 @@
 覆盖:
 - technical_analyzer: MACD/KDJ 真交叉 (不把水平状态叫金叉) + NaN 记
   "数据不足" 而非静默无信号 + t+1 执行语义字段
-- position_analyzer: 指标不可用时评分不静默当 0 分 (记 score_unavailable)
+- position_analyzer: 指标不可用时评分不静默当 0 分 (记 score_unavailable) +
+  MACD 真交叉标签 (同日金叉冒充修复, B10/L4) + signal_timing 声明
 """
 import numpy as np
 import pandas as pd
@@ -159,3 +160,76 @@ class TestPositionAnalyzerNaNHonesty:
         pa._last_score_unavailable = []
         pa._calculate_score(data, data.iloc[-1])
         assert any('RSI' in u for u in pa._last_score_unavailable)
+
+
+class TestPositionAnalyzerMacdCross:
+    """MACD 真交叉标签 + t+1 声明 (审计 B10/L4: 同日金叉冒充修复).
+
+    旧实现 `latest['MACD'] > latest['MACD_Signal']` 是水平比较 ——
+    多头状态连续多日全部标"金叉"; 新实现与 technical_analyzer 同源:
+    只有当根发生穿越才叫金叉, 水平状态报"多头(未交叉)".
+    """
+
+    def _data_with_indicators(self, n=200, seed=3):
+        from core.fetch_result import FetchResult
+        from position_analyzer import PositionAnalyzer
+
+        df = _mk_ohlcv(n=n, seed=seed)
+
+        class _Stub:
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
+                return FetchResult(ok=True, data=df.copy(), source='stub')
+
+        pa = PositionAnalyzer(fetcher=_Stub())
+        data = pa.get_stock_data('600519', days=n)
+        assert data is not None
+        return pa, data
+
+    def test_level_state_not_called_golden_cross(self):
+        """水平多头 (末两根同在信号线上方) 不得标'金叉'"""
+        pa, data = self._data_with_indicators()
+        macd, sig = data['MACD'], data['MACD_Signal']
+        # 找一个非交叉的多头末根
+        for cut in range(len(data) - 1, 60, -1):
+            w = data.iloc[:cut + 1]
+            if (pd.notna(macd.iloc[cut]) and pd.notna(sig.iloc[cut])
+                    and macd.iloc[cut] > sig.iloc[cut]
+                    and macd.iloc[cut - 1] > sig.iloc[cut - 1]):
+                label = pa._macd_cross_label(w)
+                assert label == '多头(未交叉)', label
+                return
+        raise AssertionError("构造数据中未找到非交叉多头末根 (换 seed)")
+
+    def test_true_cross_labelled_golden_cross(self):
+        pa, data = self._data_with_indicators()
+        macd, sig = data['MACD'], data['MACD_Signal']
+        cross_idx = np.flatnonzero(
+            ((macd > sig) & (macd.shift(1) <= sig.shift(1))).values)
+        assert len(cross_idx) > 0, "构造数据中应存在 MACD 金叉"
+        i = int(cross_idx[-1])
+        label = pa._macd_cross_label(data.iloc[:i + 1])
+        assert label == '金叉'
+
+    def test_nan_last_bar_reported_insufficient(self):
+        pa, data = self._data_with_indicators()
+        data = data.copy()
+        data.loc[data.index[-1], 'MACD'] = np.nan
+        assert pa._macd_cross_label(data) == '数据不足'
+
+    def test_analyze_result_declares_t1(self):
+        """结果带 signal_timing 声明 (advisory, 不是可成交指令)"""
+        from core.fetch_result import FetchResult
+        from position_analyzer import PositionAnalyzer
+
+        df = _mk_ohlcv(n=120, seed=5)
+
+        class _Stub:
+            def get_quote_result(self, symbol, days=120, adjust='hfq'):
+                return FetchResult(ok=True, data=df.copy(), source='stub')
+
+        pa = PositionAnalyzer(fetcher=_Stub())
+        res = pa.analyze_position('600519', shares=100, cost_price=10.0)
+        assert res is not None
+        assert 't+1' in res['signal_timing']
+        report = pa.format_report(res)
+        assert 't+1' in report

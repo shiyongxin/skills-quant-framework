@@ -81,7 +81,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **984 offline tests** (984 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **990 offline tests** (990 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -109,7 +109,7 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 
 **台账 `docs/OPEN_ITEMS_PLAN_2026-10-25.md` 是审计 backlog 的唯一真相源** (逐条证据 + 复验置信度 + 归因 + 对应门禁)。批次 1 之前的已修项见台账 §9 附录; 提交级细节见 `git log --oneline`。
 
-**已收口**: **复权默认口径已拍板并落地 (默认 hfq 后复权, 2026-10-30, 台账 §5.4; 门禁 `TestDefaultHfqWiring` + 早退补登记, 基线 971→984)**; **D1 退市股数据基建 (幸存者偏差由「只能标记」变「可消除」, 2026-10-30, 台账 §5.3)**; 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
+**已收口**: **复权默认口径已拍板并落地 (默认 hfq 后复权, 2026-10-30, 台账 §5.4; 门禁 `TestDefaultHfqWiring` + 早退补登记, 基线 971→984)**; **D1 退市股数据基建 (幸存者偏差由「只能标记」变「可消除」, 2026-10-30, 台账 §5.3)**; **2026-10-30 后续三项 (台账 §6, 基线 984→990)**: CI 自诞生即红的 py<3.14 注解修复 (`web_app.py` PEP 563, 三次红同根因)、`position_analyzer` MACD 水平比较冒充金叉 → 真交叉 + `signal_timing` + t+1 advisory 声明 (审计 B-L3/L4 的真实残余)、`data_cleaner` 复权文件单位误判腐败 bug (比值结构性失真 → 单位归一只对不复权文件执行) + 批量重取条目一并收口; 批次 1 (确凿小 bug, 15 条) / 批次 2 (回测数值口径: H7 容量约束 / H8 持仓状态机 / H9 walk-forward 预热 / M1 指标口径) / 批次 3 (研究有效性: H1 样本外隔离 / H10 稳健性证据 / H2 confidence 证据派生 / H5 引擎侧停牌建模 / H6 因子点时 / H4 PIT 股票池 / H3 验证链重做) / 批次 4.1 (副本治理 → 副本降级为构建产物)。
 
 **仍开** (完整条目与证据见台账 §3/§5.2/§5.3/§6):
 
@@ -117,8 +117,6 @@ No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数�
 - **批次 4.2 工程基座已收口** (2026-10-29: L1/L2/L3/L5/L9/L10/L11 已修 + 门禁 `test_project_metadata.py`; L4/L5 的旧证据已过时)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。
 - **幸存者偏差: D1 基建已落地 (2026-10-30)**: 退市清单 (`delisted refresh`) + klc 直连回退 + **四条证据规则** (`_universe_meta` 判 `survivorship_bias=False`) + CLI 补数 (`delisted fetch`); 本地已补 **337/337** → meta 可判 False。残余如实: 北交所退市无名录接口、清单覆盖起点 沪2001/深1999 (更早参考日仍保守 True)、清单需 90 天内刷新、B股 30 只在股票池范围外 (台账 §5.3)。
-- **线上历史数据批量重取**: 除权跳空只标记不改写, 需按复权口径重新取数 (依赖网络与磁盘; `data_cleaner.py` 已就位)。
-- `technical_analyzer` signals 缺 `shift(1)` 保护 (advisory-only, 已文档化)。
 
 ## `.gitignore` gotchas
 

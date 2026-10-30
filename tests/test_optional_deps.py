@@ -476,13 +476,22 @@ class TestDataCleanerCsvSupport:
         hist.mkdir(parents=True)
         frame = _ohlcv_frame()
         frame['成交量'] = frame['成交量'] * 100      # 手 → 股 (待归一)
-        frame.to_csv(hist / '600000_qfq.csv', index=False, encoding='utf-8-sig')
+        frame.to_csv(hist / '600000.csv', index=False, encoding='utf-8-sig')
+        # 复权文件也从文件名解析口径, 但单位判定跳过 (收盘被因子缩放)
+        frame.to_csv(hist / '600519_qfq.csv', index=False,
+                     encoding='utf-8-sig')
 
         reports = scan_directory(str(tmp_path), dry_run=True)
-        assert len(reports) == 1
-        assert reports[0]['file'] == '600000_qfq.csv'
-        assert reports[0]['adjust'] == 'qfq'
-        assert reports[0]['units_detected']['volume_unit'] == 'lots'
+        assert len(reports) == 2
+        # 不复权 CSV: 单位判定照常 (手 → lots)
+        raw_rep = next(r for r in reports if r['file'] == '600000.csv')
+        assert raw_rep['adjust'] == ''
+        assert raw_rep['units_detected']['volume_unit'] == 'lots'
+        # qfq CSV: 口径解析 + 单位判定按设计跳过 (防缩放比值误判写坏)
+        qfq_rep = next(r for r in reports if r['file'] == '600519_qfq.csv')
+        assert qfq_rep['adjust'] == 'qfq'
+        assert qfq_rep['units_detected']['ratio_source'] == \
+            'adjusted_close_not_verifiable'
 
 
 # =============================================================================
