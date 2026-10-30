@@ -145,7 +145,7 @@ L1 入选但 L2 为 SELL → 空仓等待，而非换股。
 | profit_factor / MDD / Sharpe | `core/metrics` | 求和式 PF；MDD 正值%；sharpe rf=0.03, ddof=1 |
 | 数据获取结果 | `core/fetch_result.FetchResult` | 失败必须 `ok=False`+`error`，禁止静默空 DF；带 `adjust` 复权维度 |
 | 交易日历 / 停牌 | `core/trading_calendar.TradingCalendar` | 由**指数行情**反推交易日集合（指数每交易日有行 → 个股缺行 = 真停牌） |
-| 复权口径（落库维度） | `HistoricalDataManager` 文件名 + 元数据 + `FetchResult.adjust` | `{symbol}.parquet`=不复权 / `{symbol}_qfq.parquet` / `{symbol}_hfq.parquet`；缺口径时返回空 DF，不拿不复权冒充 |
+| 复权口径（落库维度） | `HistoricalDataManager` 文件名 + 元数据 + `FetchResult.adjust` | `{symbol}.parquet`=不复权 / `{symbol}_qfq.parquet` / `{symbol}_hfq.parquet`；缺口径时返回空 DF，不拿不复权冒充。**默认口径 `DEFAULT_ADJUST='hfq'`**（`core/fetch_result`，产品决策 2026-10-30 台账 §5.4） |
 
 **共享指标引擎**（审计 #10）：`core/indicator_engine.IndicatorEngine` 是业务模块
 调用指标的统一入口 —— 只负责"取哪段、叫什么列名"，公式一律在 `core/indicators.py`：
@@ -192,10 +192,21 @@ ensure_calendar()          # 显式注入 / 本地 JSON 缓存 / 本地指数 pa
 
 **复权**：复权是**数据维度**不是装饰 —— 不同口径混用会在除权日产生虚假跳空。
 
+- **默认口径 `DEFAULT_ADJUST='hfq'`**（后复权，产品决策 2026-10-30，台账 §5.4）：
+  数据入口（`HistoricalDataManager` 五入口 / `stock_data_fetcher` 三入口 / LTS /
+  反转检测 / 选股）默认走 hfq。选后复权不选前复权的理由：**历史价永不变 →
+  M20 增量缓存追加语义永远正确**（前复权随每次新分红整体重算，旧缓存作废）。
+  该常量在 `core/fetch_result.py` 单一定义，禁散落字面量。
+- **真实价格场景必须显式 `adjust=''`**（不复权）：`position_analyzer`（持仓成本是
+  真实成交价，混入 hfq 会把收益算错）、`real_time_monitor`（告警价是对着实时行情
+  设的）。其余消费方（信号/图表/热门榜）展示的是**后复权序列价**（历史价偏高），
+  下单参考以实时行情为准 —— 残余代价已接受并记录。
 - 落库：`{symbol}.parquet`（不复权）/ `{symbol}_qfq.parquet` / `{symbol}_hfq.parquet`，
-  元数据记 `adjust`；`load(adjust=...)` 只读对应口径，缺失时返回空 DF。
-- 取数：`stock_data_fetcher.get_quote_data/get_quote_result(..., adjust=...)` 显式
-  传参，随 `FetchResult.adjust` 记录。
+  元数据记 `adjust`；`load(adjust=...)` 只读对应口径，缺失时返回空 DF，
+  **不拿另一口径冒充**（补齐判定按 `_has_stock_any_adjust`：任一口径即算已缓存）。
+- 取数：`stock_data_fetcher.get_quote_data/get_quote_result(..., adjust=DEFAULT_ADJUST)`
+  默认 hfq，随 `FetchResult.adjust` 记录；显式传参最高优先。
+- 新克隆无存量 → `batch --adjust hfq` 预取，或显式 `adjust=''` 用不复权存量。
 - 存量清洗：`python .claude/skills/data_cleaner.py --data-dir stock_data [--apply]`
   —— 用 `成交额/成交量 ≈ 收盘价` 的中位数比值反推单位（股/手、元/万元）并归一；
   结构清洗（列名/日期/排序/去重/补涨跌幅）；除权跳空**只标记不改写**（无除权因子
