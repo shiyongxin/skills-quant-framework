@@ -6,6 +6,12 @@ Stock Analysis Web Application
 基于Streamlit开发的交互式股票分析平台
 """
 
+# 注解全部延迟求值 (PEP 563): 核心模块 import 失败时 Signal 等名字未绑定,
+# Python <3.14 会在**函数定义时**立即求值注解 → NameError 使整个降级路径
+# (render_import_error) 本身都无法 import。3.14+ (PEP 649) 默认惰性所以本地
+# 不复现, CI 3.11/3.12 必炸 —— 加本行统一到所有版本惰性。
+from __future__ import annotations
+
 # Streamlit 是可选依赖: 缺失时模块仍可被 import (供测试/工具链导入),
 # 但界面不可用 —— 如实降级, 不再以 ImportError 硬崩 (审计: 可选依赖降级路径零覆盖)
 try:
