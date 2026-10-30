@@ -14,6 +14,7 @@ from itertools import product
 import random
 
 from core.indicators import rsi as _core_rsi, sma as _core_sma, macd as _core_macd
+from parameter_space import ParameterSpace
 
 try:
     from backtest_framework import BacktestEngine, PositionConfig, PositionSizingMethod
@@ -36,8 +37,18 @@ class OptimizationResult:
 
 
 @dataclass
-class OptimizationConfig:
-    """优化配置"""
+class StrategyOptimizationConfig:
+    """策略优化器自身的配置 (审计 L9)。
+
+    注: 本类原先叫 `OptimizationConfig` —— 与 `optimization_config.py` 里的
+    同名类**同名不同形** (那边是完整优化配置: data/ga/fitness/walk_forward/
+    robustness 子配置; 这边只有 3 个字段) → `from strategy_optimizer import
+    OptimizationConfig` 会**遮蔽** `optimization_config.OptimizationConfig`
+    (取决于 import 顺序), 是典型的"同名遮蔽"陷阱。
+
+    现硬改名 (不留别名 —— 留别名等于把遮蔽风险原样留下), 调用方需改用
+    `StrategyOptimizationConfig`。
+    """
     strategy_name: str = "default"
     target_metric: str = "sharpe_ratio"  # 优化目标指标
     maximize: bool = True  # 是否最大化
@@ -72,26 +83,33 @@ class StrategyTemplate:
         """
         raise NotImplementedError
 
-    def get_param_grid(self) -> Dict[str, List]:
-        """
-        获取参数网格
+    # 本策略实际消费的**规范参数名** (ParameterSpace 维度)
+    PARAM_DIMS: tuple = ()
 
-        Returns:
-            {参数名: 参数值列表} 字典
+    def get_param_grid(self) -> Dict[str, List]:
+        """参数网格 —— **派生自 `ParameterSpace`** (审计 L1)。
+
+        旧实现由各策略手写网格 → 参数名与范围都和规范定义漂移
+        (`short_period` vs `ma_fast` 等), 且 `sell_threshold` 符号相反
+        (手写用负值 = 强度刻度; 规范用正值 = 分值刻度) → 同名不同义,
+        跨系统拷贝参数会得到反向行为。现网格与参数名统一由规范定义派生,
+        漂移在结构上不可能再发生。
         """
-        raise NotImplementedError
+        return ParameterSpace.grid_for(list(self.PARAM_DIMS))
 
 
 class MAStrategy(StrategyTemplate):
     """移动平均线策略"""
 
+    PARAM_DIMS = ('ma_fast', 'ma_slow')
+
     def __init__(self):
         super().__init__("MA交叉")
 
     def generate_signals(self, data: pd.DataFrame, params: Dict) -> pd.DataFrame:
-        """生成MA交叉信号"""
-        short_period = params.get('short_period', 5)
-        long_period = params.get('long_period', 20)
+        """生成MA交叉信号 (参数名用规范名, 审计 L1)"""
+        short_period = params.get('ma_fast', 5)
+        long_period = params.get('ma_slow', 20)
 
         data = data.copy()
 
@@ -112,24 +130,20 @@ class MAStrategy(StrategyTemplate):
 
         return data
 
-    def get_param_grid(self) -> Dict[str, List]:
-        return {
-            'short_period': [5, 10, 15, 20],
-            'long_period': [20, 30, 40, 60]
-        }
-
 
 class MACDStrategy(StrategyTemplate):
     """MACD策略"""
+
+    PARAM_DIMS = ('macd_fast', 'macd_slow', 'macd_signal')
 
     def __init__(self):
         super().__init__("MACD")
 
     def generate_signals(self, data: pd.DataFrame, params: Dict) -> pd.DataFrame:
-        """生成MACD信号"""
-        fast = params.get('fast_period', 12)
-        slow = params.get('slow_period', 26)
-        signal_period = params.get('signal_period', 9)
+        """生成MACD信号 (参数名用规范名, 审计 L1)"""
+        fast = params.get('macd_fast', 12)
+        slow = params.get('macd_slow', 26)
+        signal_period = params.get('macd_signal', 9)
 
         data = data.copy()
 
@@ -151,25 +165,20 @@ class MACDStrategy(StrategyTemplate):
 
         return data
 
-    def get_param_grid(self) -> Dict[str, List]:
-        return {
-            'fast_period': [8, 12, 16],
-            'slow_period': [20, 26, 32],
-            'signal_period': [6, 9, 12]
-        }
-
 
 class RSIStrategy(StrategyTemplate):
     """RSI策略"""
+
+    PARAM_DIMS = ('rsi_period', 'rsi_oversold', 'rsi_overbought')
 
     def __init__(self):
         super().__init__("RSI")
 
     def generate_signals(self, data: pd.DataFrame, params: Dict) -> pd.DataFrame:
-        """生成RSI信号"""
-        period = params.get('period', 14)
-        oversold = params.get('oversold', 30)
-        overbought = params.get('overbought', 70)
+        """生成RSI信号 (参数名用规范名, 审计 L1)"""
+        period = params.get('rsi_period', 14)
+        oversold = params.get('rsi_oversold', 30)
+        overbought = params.get('rsi_overbought', 70)
 
         data = data.copy()
 
@@ -189,43 +198,37 @@ class RSIStrategy(StrategyTemplate):
 
         return data
 
-    def get_param_grid(self) -> Dict[str, List]:
-        return {
-            'period': [7, 14, 21],
-            'oversold': [20, 30, 40],
-            'overbought': [60, 70, 80]
-        }
-
 
 class MultiFactorStrategy(StrategyTemplate):
     """多因子综合策略"""
+
+    PARAM_DIMS = ('buy_threshold', 'sell_threshold')
 
     def __init__(self):
         super().__init__("多因子")
 
     def generate_signals(self, data: pd.DataFrame, params: Dict) -> pd.DataFrame:
-        """生成综合信号"""
+        """生成综合信号 (审计 L1)。
+
+        阈值口径统一到 `signal_generator` 的**投票制分值刻度**
+        (buy_score ≥ buy_threshold / sell_score ≥ sell_threshold, 均为正) →
+        与 `ParameterSpace` 的规范定义同名同义。旧实现用
+        `signal_strength` (-10..10 强度刻度) 配**负值**阈值 → 同名不同义,
+        跨系统拷贝参数会得到反向行为; 现直接委托信号生成器出信号
+        (买卖互斥仲裁也一并复用, 不再自己判阈值)。
+        """
         buy_threshold = params.get('buy_threshold', 3.0)
-        sell_threshold = params.get('sell_threshold', -3.0)
+        sell_threshold = params.get('sell_threshold', 4.0)
 
         data = data.copy()
 
-        # 计算技术指标
+        # 计算技术指标 + 信号 (阈值交给信号生成器, 口径唯一)
         from signal_generator import SignalGenerator
-        generator = SignalGenerator()
+        generator = SignalGenerator(buy_threshold=buy_threshold,
+                                    sell_threshold=sell_threshold)
         data = generator.generate_signals(data)
 
-        # 生成信号
-        data['signal_buy'] = data['signal_strength'] >= buy_threshold
-        data['signal_sell'] = data['signal_strength'] <= sell_threshold
-
         return data
-
-    def get_param_grid(self) -> Dict[str, List]:
-        return {
-            'buy_threshold': [2.0, 3.0, 4.0, 5.0],
-            'sell_threshold': [-5.0, -4.0, -3.0, -2.0]
-        }
 
 
 # =============================================================================
@@ -236,7 +239,7 @@ class StrategyOptimizer:
     """策略参数优化器"""
 
     def __init__(self, strategy: StrategyTemplate = None,
-                 config: OptimizationConfig = None):
+                 config: StrategyOptimizationConfig = None):
         """
         初始化优化器
 
@@ -248,7 +251,7 @@ class StrategyOptimizer:
             raise ImportError("必要模块未安装")
 
         self.strategy = strategy or MAStrategy()
-        self.config = config or OptimizationConfig()
+        self.config = config or StrategyOptimizationConfig()
 
     def evaluate_params(self, data: pd.DataFrame,
                        params: Dict) -> Dict[str, float]:
@@ -609,7 +612,8 @@ if __name__ == "__main__":
             # 创建优化器
             optimizer = StrategyOptimizer(
                 strategy=MAStrategy(),
-                config=OptimizationConfig(target_metric="sharpe_ratio")
+                config=StrategyOptimizationConfig(
+                    target_metric="sharpe_ratio")
             )
 
             print("=" * 60)

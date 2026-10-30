@@ -135,14 +135,22 @@ class TrendIndicators:
     @staticmethod
     def vwap(df):
         """
-        成交量加权平均价 (Volume Weighted Average Price)
-        当日累积计算
+        成交量加权平均价 (Volume Weighted Average Price) —— **累积口径**
+
+        公式 (core 单一真相源 `core.indicators.vwap`):
+        `VWAP = cumsum(TP × Volume) / cumsum(Volume)`, TP = (H+L+C)/3
+        → **锚定传入序列的起点**, 逐根累积, 不是"当日单日 VWAP"。
+
+        审计 L10: 旧文档声称按每根 bar 单独计算且只接受单行数据, 与实现
+        不符 (实现一直是全序列累积) → 文档漂移会让调用方误以为拿到的是
+        单根 bar 的值。调用方若喂 120 根日线, 得到的是**该 120 根的
+        锚定 VWAP 序列**。
 
         Args:
-            df: DataFrame (单日数据)
+            df: DataFrame (含 最高/最低/收盘/成交量 的**序列**, 非单行)
 
         Returns:
-            添加VWAP列的DataFrame
+            添加 VWAP 列的 DataFrame
         """
         df = df.copy()
 

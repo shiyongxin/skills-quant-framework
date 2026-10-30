@@ -21,18 +21,37 @@ from js_runtime import js_guard
 
 
 class Regime(Enum):
-    """市场体制枚举"""
+    """市场体制枚举 —— **取值集合的单一真相源** (审计 L11)。
+
+    注: 运行时体制一律以**字符串** (`Regime.BULL.value`) 流通 (体制序列、
+    优化器的 `target_regime`、`multi_stock_backtester.regime` 都是字符串),
+    本枚举只负责定义"合法取值有哪些" → 混用会让 `Regime.BULL == "BULL"`
+    为 False (枚举实例 ≠ 字符串), 而字符串比较是全仓通用语。
+
+    统一口径: 数据结构 (`RegimeWindow.regime` / `RegimeStats.regime`) 与
+    体制序列都用**字符串**; 需要校验时用 `Regime.is_valid(value)`。
+    """
     BULL = "BULL"           # 牛市
     BEAR = "BEAR"           # 熊市
     SIDEWAYS = "SIDEWAYS"   # 横盘震荡
     CRASH = "CRASH"         # 暴跌
     RECOVERY = "RECOVERY"   # 反弹恢复
 
+    @classmethod
+    def values(cls) -> tuple:
+        """全部合法体制取值 (字符串) —— 单一真相源。"""
+        return tuple(r.value for r in cls)
+
+    @classmethod
+    def is_valid(cls, value) -> bool:
+        """给定值是否为合法体制 (字符串口径)。"""
+        return value in cls.values()
+
 
 @dataclass
 class RegimeWindow:
-    """一个体制时段"""
-    regime: Regime
+    """一个体制时段 (regime 为**字符串**, 见 `Regime` 的口径说明)"""
+    regime: str
     start_date: str
     end_date: str
     start_idx: int
@@ -43,8 +62,8 @@ class RegimeWindow:
 
 @dataclass
 class RegimeStats:
-    """体制统计信息"""
-    regime: Regime
+    """体制统计信息 (regime 为**字符串**, 见 `Regime` 的口径说明)"""
+    regime: str
     count: int              # 出现次数
     total_days: int         # 总天数
     avg_duration: float     # 平均持续天数
@@ -312,7 +331,7 @@ class MarketRegimeClassifier:
             if regime_series.iloc[i] != current_regime:
                 # 体制切换
                 window = RegimeWindow(
-                    regime=Regime(current_regime),
+                    regime=current_regime,
                     start_date=str(df['日期'].iloc[start_idx].date()),
                     end_date=str(df['日期'].iloc[i-1].date()),
                     start_idx=start_idx,
@@ -330,7 +349,7 @@ class MarketRegimeClassifier:
 
         # 最后一段
         window = RegimeWindow(
-            regime=Regime(current_regime),
+            regime=current_regime,
             start_date=str(df['日期'].iloc[start_idx].date()),
             end_date=str(df['日期'].iloc[-1].date()),
             start_idx=start_idx,
@@ -358,7 +377,7 @@ class MarketRegimeClassifier:
 
         stats = []
         for regime_name, window_list in windows.items():
-            regime = Regime(regime_name)
+            regime = regime_name
             all_days = sum(w.duration_days for w in window_list)
             all_returns = [w.index_return for w in window_list]
 
@@ -445,7 +464,7 @@ class MarketRegimeClassifier:
         }
 
         for s in stats:
-            name = regime_names.get(s.regime.value, s.regime.value)
+            name = regime_names.get(s.regime, s.regime)
             lines.append(f"  {name:<12} {s.count:<10} {s.total_days:<10} "
                         f"{s.avg_duration:<10.1f} {s.pct_of_total:<10.1f} {s.avg_return:<10.2f}%")
 

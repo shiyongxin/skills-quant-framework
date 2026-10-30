@@ -1,0 +1,45 @@
+name: tests
+
+# 审计 L3: 仓库此前**无 CI** → 914 个离线用例只在本地跑, 回归门禁形同虚设。
+# 本工作流只跑**离线**套件 (tests/): 不联网取数、不依赖本地缓存。
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r .claude/skills/requirements.txt
+          pip install pytest pyarrow matplotlib scikit-learn
+
+      - name: Run offline test suite
+        run: python -m pytest tests/ -q
+
+      - name: Check working tree is clean (no generated artifacts committed)
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::工作区有未提交改动 (测试可能写入产物):"
+            git status --porcelain
+            exit 1
+          fi

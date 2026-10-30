@@ -334,11 +334,12 @@ class TestStrategyOptimizerHonesty:
 
     def test_optimization_config_has_no_dead_fields(self):
         import dataclasses
-        from strategy_optimizer import OptimizationConfig
-        names = {f.name for f in dataclasses.fields(OptimizationConfig)}
+        from strategy_optimizer import StrategyOptimizationConfig
+        names = {f.name for f in
+                 dataclasses.fields(StrategyOptimizationConfig)}
         assert 'cv' not in names
         assert 'n_jobs' not in names
-        assert OptimizationConfig().target_metric == 'sharpe_ratio'
+        assert StrategyOptimizationConfig().target_metric == 'sharpe_ratio'
 
     def test_module_no_unqualified_bayesian_claim(self):
         # 源码中仅允许带更名/历史名说明的 "贝叶斯" 宣称

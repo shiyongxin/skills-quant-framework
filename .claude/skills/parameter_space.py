@@ -146,6 +146,46 @@ class ParameterSpace:
         return [p for p in cls.get_all_params() if p.group == "position"]
 
     @classmethod
+    def grid_for(cls, names: list, max_points: int = 6) -> dict:
+        """从**规范定义**派生网格 `{参数名: [候选值...]}` (审计 L1)。
+
+        单一真相源: 参数名与取值范围只在 `ParameterSpace` 里定义一次。
+        任何"手写网格"都会与它漂移 —— 旧 `strategy_optimizer` 的 5 处网格
+        就是反例: 参数名 (`short_period` vs `ma_fast`) 与范围都不一致, 且
+        `sell_threshold` **符号相反** (手写网格用负值 = signal_strength
+        刻度; 规范定义用正值 = 投票制分值刻度) → 同名不同义, 跨系统拷贝
+        参数会得到**反向行为**。
+
+        约定:
+        - 每个维度的**首个候选值 = 规范默认值** (调用方如
+          `compare_strategies` 取网格首值 → 等价于用默认参数评估)
+        - 候选值过多时按等距抽取 (含默认值), 避免网格爆炸
+        """
+        out = {}
+        for name in names:
+            pdef = cls.get_param_def(name)
+            if pdef.param_type == 'int':
+                step = max(1, int(pdef.step))
+                vals = list(range(int(pdef.low), int(pdef.high) + 1, step))
+            elif pdef.param_type == 'float':
+                step = float(pdef.step) or 1.0
+                n = int((pdef.high - pdef.low) / step) + 1
+                vals = [round(pdef.low + i * step, 6) for i in range(max(1, n))]
+            else:
+                vals = list(pdef.categories or [pdef.default])
+            if len(vals) > max_points:
+                idx = {int(round(i * (len(vals) - 1) / (max_points - 1)))
+                       for i in range(max_points)}
+                if pdef.default in vals:
+                    idx.add(vals.index(pdef.default))
+                vals = [vals[i] for i in sorted(idx)]
+            if pdef.default in vals:
+                vals.remove(pdef.default)
+                vals.insert(0, pdef.default)
+            out[name] = vals
+        return out
+
+    @classmethod
     def get_param_def(cls, name: str) -> ParamDef:
         """按名称获取参数定义"""
         for p in cls.get_all_params():

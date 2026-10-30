@@ -93,6 +93,11 @@ update_*.py
 stock_selection_history.json
 # 优化器输出产物 (生成的, 非源码; 曾被误提交 → 2026-10-29 取消跟踪)
 optimization_result.json
+# 冒烟脚本产生的数据目录 (审计 L5: smoke_test_tool.py 写 ./test_data/)
+test_data/
+# 技能打包产物 (审计 L2: package_skills.py 输出 .skill + dist/)
+dist/
+*.skill
 
 # Chart output directories
 charts/

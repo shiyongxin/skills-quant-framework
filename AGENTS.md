@@ -67,7 +67,8 @@ python run_web_app.py
 python3 -m pytest tests/ -q
 ```
 
-No lint/typecheck/CI config exists. No pre-commit.
+CI exists: `.github/workflows/tests.yml` (push/PR → 离线套件, 矩阵 3.11/3.12; 依赖装自 `.claude/skills/requirements.txt`).
+No lint/typecheck config. No pre-commit. `pyproject.toml` 存在 (项目元数据 + 可安装布局), 但**不写** `[tool.pytest.ini_options]` → `pytest.ini` 是 pytest 配置唯一真相源.
 
 ## Dependencies
 
@@ -78,7 +79,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 ## Testing
 
-- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **914 offline tests** (914 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
+- `tests/` is tracked; `pytest.ini` `testpaths = tests`. **940 offline tests** (940 pass, 0 skip — 装齐 `pyarrow` + `matplotlib` + `sklearn` 后全部用例实跑; 缺任一时相应用例因 `importorskip` 跳过). Run from repo root: `python3 -m pytest tests/ -q`.
 - **每条审计修复都配了门禁** (源码级 AST + 行为断言), 按主题分文件:
 
 | 主题 | 测试文件 |
@@ -93,6 +94,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 | 数据层 (P0-4/5 + M12/M13/M16/M17/M19/M20/M22) | `test_data_layer_p0.py` `test_data_adjust_dimension.py` `test_index_namespace.py` `test_realtime_quote.py` `test_batch1_m22_m15_m18_m16.py` `test_m19_column_standardization.py` `test_m20_shared_data_layer.py` |
 | 源码卫生 + 可选依赖降级契约 | `test_source_hygiene.py` `test_optional_deps.py` |
 | 部署包一致性 (批次 4) | `test_package_parity.py` |
+| 工程基座 (L1/L2/L3/L5/L9/L10/L11) | `test_project_metadata.py` |
 | 其余 | `test_b_report_p2.py` `test_e2e_regression.py` `test_execution_model.py` `test_factor_library.py` `test_indicator_skill_p0.py` `test_js_runtime.py` `test_ml_predictor_timeseries.py` `test_reversal_unification.py` `test_risk_wiring.py` `test_stage1_regressions.py` `test_stage2_fix_regressions.py` `test_web_presentation_p2.py` |
 
   → 逐条修复的**证据 / 复验置信度 / 归因**在台账 `docs/OPEN_ITEMS_PLAN_2026-10-25.md` §2/§3/§4/§5.1 (本文不重复)。
@@ -110,7 +112,7 @@ No lint/typecheck/CI config exists. No pre-commit.
 
 - **批次 2 已全部收口** (M13/M12/M17/M14/L6-L12/M2/M3/M9/M22/M15/M18/M16 → 批次1; H8/H9/H7/M1/M5/M19/M20/M4 → 批次2)。
 - **复权默认口径待产品决策**: 全仓默认 `adjust=''` (不复权) → 含除权跳空 (优化器自身也用不复权, 回测收益口径受影响)。M20 已把**维度**打通 (可按口径取数/缓存分键), 但"默认用哪个口径"尚未定 —— 建议单独拍板。
-- **批次 4.2 工程基座**: L1 (`strategy_optimizer` 5 处 `get_param_grid` 与 `ParameterSpace` 不一致, `sell_threshold` 符号冲突) / L2 (硬编码他人机器绝对路径) / L3 (无 `pyproject.toml`/CI) / L4 (11 处 `sys.path.append` CWD 依赖) / L5 (`test_tool.py` import 即执行) / L9 (`OptimizationConfig` 双份定义) / L10 (VWAP 全样本 vs 当日语义冲突) / L11 (体制字符串 vs 枚举混用)。
+- **批次 4.2 工程基座已收口** (2026-10-29: L1/L2/L3/L5/L9/L10/L11 已修 + 门禁 `test_project_metadata.py`; L4/L5 的旧证据已过时)。
 - **停牌建模根本限制**: 日历来源依赖指数数据 → **无指数数据即无日历** (停牌检查如实跳过, 只剩零成交启发式)。
 - **幸存者偏差无法本地消除**: 退市股历史行情本地缺失 → 只能标记 (`survivorship_bias=True`); 消除需外部数据源 (台账 §5.3)。
 - **线上历史数据批量重取**: 除权跳空只标记不改写, 需按复权口径重新取数 (依赖网络与磁盘; `data_cleaner.py` 已就位)。

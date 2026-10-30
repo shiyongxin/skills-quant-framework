@@ -118,6 +118,8 @@ class TechnicalAnalyzer:
         # 列名契约 (审计 B-C7): 统一 EMA20, EMA_20 保留为别名
         data['EMA20'] = data['EMA_20']
         data = TrendIndicators.hull_ma(data, 20)
+        # VWAP 为**累积口径** (锚定传入序列起点, 审计 L10): 此处喂的是
+        # 多根日线 → 得到的是该窗口的锚定 VWAP 序列, 不是单日 VWAP
         data = TrendIndicators.vwap(data)
 
         # 高级指标

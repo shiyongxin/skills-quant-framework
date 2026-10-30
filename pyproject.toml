@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skills-quant-framework"
+version = "2.0.0"
+description = "Chinese A-share quantitative analysis framework (Claude Code skills collection)"
+readme = "README.md"
+requires-python = ">=3.10"
+# 分析层依赖 (与 .claude/skills/requirements.txt 同源; 该文件是分层注释版真相源)
+dependencies = [
+    "pandas",
+    "numpy",
+    "scipy>=1.11.0",
+    "akshare",
+    "pyarrow",
+    "requests",
+]
+
+[project.optional-dependencies]
+# 可选功能 (缺失时对应路径降级, 不影响主链路)
+chart = ["matplotlib"]
+ml = ["scikit-learn"]
+web = ["streamlit>=1.28.0", "scikit-learn>=1.3.0", "altair>=5.0.0", "plotly>=5.17.0"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+# 模块平铺在 .claude/skills/ 下 (Claude Code skills 布局) → 用 package-dir
+# 映射到包根, 并把平铺模块显式列为顶层 py-modules。
+# 注: 模块清单必须与磁盘一致 —— 由 tests/test_project_metadata.py 门禁核对
+# (新增/删除模块而不改这里 → 门禁失败)。
+package-dir = {"" = ".claude/skills"}
+py-modules = [
+    "advanced_indicators", "backtest_framework", "chart_visualizer", "daily_signal_generator",
+    "data_cleaner", "execution_model", "factor_library", "historical_backtest_validator",
+    "historical_data_manager", "indicator_system_report", "js_runtime", "long_term_selector",
+    "market_regime_classifier", "ml_predictor", "multi_factor_selection", "multi_stock_backtester",
+    "optimization_config", "optimization_engine", "optimized_params", "parameter_space",
+    "pattern_recognition", "portfolio_manager", "position_analyzer", "quant_workflow",
+    "real_time_monitor", "realtime_quote", "reversal_backtest", "reversal_detector",
+    "reversal_rules", "risk_management", "signal_generator", "sina_daily",
+    "stock_data_fetcher", "stock_list_manager", "stock_selector", "strategy_optimizer",
+    "technical_analyzer", "trade_constraints", "trend_indicators", "vectorized_backtest",
+    "web_app"
+]
+
+[tool.setuptools.packages.find]
+where = [".claude/skills"]
+include = ["core*"]
+
+# 注: **不写** [tool.pytest.ini_options] —— 仓库根的 `pytest.ini` 是 pytest
+# 配置的唯一真相源 (pytest 只读一个 ini 文件; 两处都写会产生"双份配置 +
+# 静默忽略其中一份"的坑, pytest 也会告警 "ignoring pytest config in
+# pyproject.toml")。
